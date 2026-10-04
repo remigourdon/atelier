@@ -333,7 +333,7 @@ fn modal_key(model: &mut Model, modal: Modal, key: KeyEvent) -> Vec<Effect> {
 
 fn submit(model: &mut Model, then: Submit, value: &str) -> Vec<Effect> {
     let job = match then {
-        _ if value.is_empty() && matches!(then, Submit::Branch { .. } | Submit::Workspace) => {
+        _ if value.is_empty() && matches!(then, Submit::Branch { .. }) => {
             return Vec::new();
         }
         Submit::Branch {
@@ -354,7 +354,6 @@ fn submit(model: &mut Model, then: Submit, value: &str) -> Vec<Effect> {
             repo,
             alias: value.into(),
         },
-        Submit::Workspace => Job::AddWorkspace(value.into()),
     };
     vec![run(model, job)]
 }
@@ -615,14 +614,7 @@ fn activate(model: &mut Model) -> Vec<Effect> {
 
 fn new(model: &mut Model) -> Vec<Effect> {
     match model.active() {
-        List::Workspaces => update(
-            model,
-            Action::Ask {
-                title: "New workspace".into(),
-                initial: String::new(),
-                then: Submit::Workspace,
-            },
-        ),
+        List::Workspaces => note(model, "create workspaces with `atelier ws add <name>`"),
         List::Repos => note(model, "register repos with `atelier add <path>`"),
         List::Work => {
             let Some(workspace) = model.workspace().map(str::to_owned) else {
@@ -720,7 +712,10 @@ fn workspace_menu(
         })
         .collect();
     if entries.is_empty() {
-        return note(model, "no other workspace: create one with n in panel 1");
+        return note(
+            model,
+            "no other workspace: create one with `atelier ws add <name>`",
+        );
     }
     model.modal = Some(Modal::Menu {
         title,
@@ -774,31 +769,8 @@ fn confirm(model: &mut Model, title: String, lines: Vec<String>, job: Job) -> Ve
 
 fn remove(model: &mut Model) -> Vec<Effect> {
     match model.active() {
-        List::Workspaces => {
-            let Some(name) = model.workspace().map(str::to_owned) else {
-                return Vec::new();
-            };
-            confirm(
-                model,
-                "Remove workspace".into(),
-                vec![format!("Remove the workspace {name}?")],
-                Job::RemoveWorkspace(name),
-            )
-        }
-        List::Repos => {
-            let Some(repo) = model.repo().cloned() else {
-                return Vec::new();
-            };
-            confirm(
-                model,
-                "Forget repo".into(),
-                vec![
-                    format!("Forget {} and close its tabs?", repo.name()),
-                    "Its worktrees stay on disk.".into(),
-                ],
-                Job::Forget(repo.path),
-            )
-        }
+        List::Workspaces => note(model, "remove workspaces with `atelier ws rm <name>`"),
+        List::Repos => note(model, "forget repos with `atelier rm <repo>`"),
         List::Work => {
             let targets = model.targets();
             let removals: Vec<Removal> = targets
@@ -1117,6 +1089,20 @@ pub mod tests {
         press(&mut model, "d");
         assert!(model.modal.is_none());
         assert!(model.log.last().unwrap().command.contains("main"));
+    }
+
+    #[test]
+    fn workspaces_and_repos_are_created_and_removed_from_the_cli_only() {
+        let mut model = model();
+        for (keys, hint) in [
+            ("1n", "atelier ws add"),
+            ("d", "atelier ws rm"),
+            ("]d", "atelier rm"),
+        ] {
+            assert!(jobs(press(&mut model, keys)).is_empty(), "{keys}");
+            assert!(model.modal.is_none(), "{keys}");
+            assert!(model.log.last().unwrap().command.contains(hint), "{keys}");
+        }
     }
 
     #[test]

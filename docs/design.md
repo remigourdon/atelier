@@ -105,7 +105,7 @@ Lazygit defaults. The keymap is one table in code that also feeds `?` and the hi
 | `R` · `?` · `+` `_` · `@` | refresh · actions menu · screen mode · toggle command log |
 | `Esc` · `q` `C-c` | back · quit |
 
-`Space`, `x`, `d` and `p` on a group header act on every item in the group. `?` lists the focused panel's actions, then the global ones.
+`Space`, `x`, `d` and `p` on a group header act on every item in the group. `?` lists the focused panel's actions, then the global ones. Workspaces are added and removed, and repos registered and forgotten, from the CLI only.
 
 ## Nix
 
