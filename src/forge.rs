@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::process::Runner;
 use crate::state::State;
 
-/// How long a fetched list of reviews is served from the cache.
-pub const CACHE_SECS: u64 = 300;
+/// How long a fetched list of reviews is served from the cache. A minute shy of the five-minute
+/// full refresh, whose own fetch is stamped only once it returns.
+pub const CACHE_SECS: u64 = 240;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Provider {
@@ -245,11 +246,16 @@ pub fn parse_glab(json: &str, role: Role) -> Result<Vec<Review>> {
                     .and_then(|host| project_url.split_once(host))
                     .map_or(String::new(), |(_, path)| path.trim_matches('/').to_owned()),
             };
+            // The draft flag is shown on its own.
+            let title = match mr.title.strip_prefix("Draft: ") {
+                Some(title) if mr.draft => title.to_owned(),
+                _ => mr.title,
+            };
             Review {
                 provider: Provider::GitLab,
                 role,
                 number: mr.iid,
-                title: mr.title,
+                title,
                 url: mr.web_url,
                 project,
                 project_url,
@@ -420,6 +426,7 @@ mod tests {
         assert_eq!(first.branch, "ORD-3479-cache-tariffs");
         assert_eq!(first.author, "alice");
         assert!(first.draft);
+        assert_eq!(first.title, "ORD-3479 Cache tariff lookups");
         assert_eq!(reviews[1].base, "develop");
         assert_eq!(reviews[1].project, "billing/web");
     }

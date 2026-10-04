@@ -151,6 +151,7 @@ fn fetch_reviews(model: &mut Model) -> Vec<Effect> {
         return Vec::new();
     };
     let mut effects = Vec::new();
+    let mut busy = false;
     for provider in Provider::ALL {
         let mut hosts: Vec<String> = (model.snapshot.forges.values())
             .filter(|forge| Provider::from_name(&forge.provider) == Some(provider))
@@ -160,7 +161,9 @@ fn fetch_reviews(model: &mut Model) -> Vec<Effect> {
         hosts.dedup();
         if hosts.is_empty() {
             model.reviews.retain(|review| review.provider != provider);
-        } else if !model.loading.contains_key(&Source::Forge(provider)) {
+        } else if model.loading.contains_key(&Source::Forge(provider)) {
+            busy = true;
+        } else {
             effects.push(run(
                 model,
                 Job::Reviews {
@@ -170,6 +173,10 @@ fn fetch_reviews(model: &mut Model) -> Vec<Effect> {
                 },
             ));
         }
+    }
+    // A provider still listing gets its turn at the next listing, so `R` is not lost.
+    if busy {
+        model.reviews_due = Some(force);
     }
     effects
 }
@@ -1659,6 +1666,16 @@ pub mod tests {
         update(&mut model, Action::Tick);
         model.loading.clear();
         assert_eq!(loaded(&mut model), [first], "so does the full refresh");
+        press(&mut model, "R");
+        assert!(
+            loaded(&mut model).is_empty(),
+            "the full refresh is still listing reviews"
+        );
+        assert_eq!(model.reviews_due, Some(true), "R waits for it");
+        model.loading.clear();
+        let [Job::Reviews { force: true, .. }] = loaded(&mut model)[..] else {
+            panic!("then R lists them past the cache");
+        };
     }
 
     #[test]
