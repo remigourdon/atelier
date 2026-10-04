@@ -1,11 +1,10 @@
 # Design
 
-Rust rewrite of the Python atelier in `remigourdon/configue` (`modules/atelier`). Goals: strict feature parity, a fast lazygit-style TUI, and no assumptions about one person's setup beyond zellij and worktrunk. Vocabulary is in [CONTEXT.md](../CONTEXT.md).
+Goals: a fast lazygit-style TUI and CLI over worktrunk and zellij, and no assumptions about one person's setup beyond zellij and worktrunk. Vocabulary is in [CONTEXT.md](../CONTEXT.md).
 
 ## Scope
 
-- Feature parity with the Python version before cutover. Cutover is one configue PR that deletes `modules/atelier` and imports this flake; reverting it is the rollback.
-- Same CLI: `ws add|rm|ls`, `add`, `update`, `rm`, `ls`, `open`, `carnet new|add`, `tui`, hidden `hook <phase>`. New: `hooks install|uninstall|status`, `shell init fish`.
+- CLI: `ws add|rm|ls`, `add`, `update`, `rm`, `ls`, `open`, `carnet new|add`, `tui`, `hooks install|uninstall|status`, `shell init fish`, hidden `hook <phase>`.
 - External tools stay subprocesses: `wt`, `zellij`, `git`, `gh`, `glab`, `acli`. Forge and tracker access sit behind traits so native APIs can come later.
 
 ## Architecture
@@ -17,12 +16,12 @@ src/  cli  config  state  hooks  shell  zellij  worktrunk  forge  tracker  tui/{
 ```
 
 - **TUI loop**: Elm architecture. `tokio::select!` over crossterm events, timers and task results produces `Action`s; `update(&mut State, Action) -> Vec<Effect>` is pure; effects run as tokio tasks and send result actions back; the UI redraws only when state is dirty.
-- **Crates**: ratatui, crossterm (`event-stream`), tokio, clap (dynamic completions), serde/serde_json, rusqlite (bundled), toml_edit, tui-input, catppuccin, tui-markdown (carnet README only), color-eyre, tracing (file log, replaces `hooks.log`), insta.
-- **Refresh**: same as today. A fast `wt list` every 10 s after 10 s idle, a full refresh (`--full`, reviews, issues) every 5 min, and remote responses cached 5 min in sqlite.
+- **Crates**: ratatui, crossterm (`event-stream`), tokio, clap (dynamic completions), serde/serde_json, rusqlite (bundled), toml_edit, tui-input, catppuccin, tui-markdown (carnet README only), color-eyre, tracing (file log), insta.
+- **Refresh**: a fast `wt list` every 10 s after 10 s idle, a full refresh (`--full`, reviews, issues) every 5 min, and remote responses cached 5 min in sqlite.
 
 ## State
 
-Same database: `$XDG_STATE_HOME/atelier/atelier.db`, tables `workspaces`, `repos`, `items`, `tabs`, `cache`. Migrations are an ordered list applied in one transaction, tracked by `PRAGMA user_version`. Migration 1 is the current Python schema written idempotently (including the legacy `items.workspace` fix), so it is a no-op on existing databases. It does not seed a `vrac` row: the configured default workspace is created at startup, and code always writes `items.workspace` explicitly instead of relying on the legacy column default. Migrations only add things, so the Python version can still read the DB.
+Database: `$XDG_STATE_HOME/atelier/atelier.db`, tables `workspaces`, `repos`, `items`, `tabs`, `cache`. Migrations are an ordered list applied in one transaction, tracked by `PRAGMA user_version`. Migration 1 is the baseline schema, written idempotently so it is a no-op on databases that already have it. The configured default workspace is created at startup rather than seeded by a migration, and code always writes `items.workspace` explicitly instead of relying on a column default. Migrations only add things, so older binaries can still read the DB.
 
 ## Config
 
@@ -63,9 +62,9 @@ Issues are normalised from each source. `state` comes from Jira's `statusCategor
 
 ## Zellij
 
-- The built-in layouts are the current `session.kdl` and `worktree.kdl`. The worktree layout runs the resolved editor and `agent_command`.
+- The built-in layouts are `session.kdl` and `worktree.kdl`. The worktree layout runs the resolved editor and `agent_command`.
 - A tab's anchor pane is found by `title == anchor_pane`. A name set in the layout survives programs setting the terminal title (verified on zellij 0.45). Custom layouts must name one pane `editor`.
-- Reconcile, tab naming and elision, cross-session focus: same behaviour as the Python version.
+- The core also owns reconcile, tab naming and elision, and cross-session focus.
 
 ## TUI
 
@@ -126,7 +125,7 @@ The module never writes worktrunk's config; whoever generates it merges `worktru
 
 ## Testing and CI
 
-- Unit tests: tab naming, ticket regex, section rules, migrations (including a fixture of a Python-era DB), `update()`.
+- Unit tests: tab naming, ticket regex, section rules, migrations (including a fixture of a baseline-schema DB), `update()`.
 - Parser tests on recorded JSON from `wt`, `gh`, `glab` and `acli`.
 - A few insta snapshots of the main layout.
 - One live zellij smoke test: a client attached through `script` (headless sessions don't spawn new tabs' panes), open a tab, find the anchor pane, close it.
@@ -140,4 +139,4 @@ The module never writes worktrunk's config; whoever generates it merges `worktru
 3. Reviews.
 4. Issues.
 5. Carnets.
-6. Home Manager module, then the cutover PR in configue.
+6. Home Manager module.
