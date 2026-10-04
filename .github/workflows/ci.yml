@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
 
+# Supersede in-flight runs when a pull request is pushed to again, but never
+# cancel a run on main: that history is the record for the main branch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
