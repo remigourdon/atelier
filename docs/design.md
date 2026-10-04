@@ -12,9 +12,10 @@ Goals: a fast lazygit-style TUI and CLI over worktrunk and zellij, and no assump
 Single crate. `src/tui` depends on core modules, never the reverse.
 
 ```
-src/  cli  config  state  hooks  shell  zellij  worktrunk  forge  tracker  tui/{app,update,view,widgets}
+src/  cli  config  state  hooks  shell  process  zellij  worktrunk  forge  tracker  tui/{app,update,view,widgets}
 ```
 
+- **Processes**: every external command goes through the `process::Runner` trait, so orchestration is tested against a fake that records calls.
 - **TUI loop**: Elm architecture. `tokio::select!` over crossterm events, timers and task results produces `Action`s; `update(&mut State, Action) -> Vec<Effect>` is pure; effects run as tokio tasks and send result actions back; the UI redraws only when state is dirty.
 - **Crates**: ratatui, crossterm (`event-stream`), tokio, clap (dynamic completions), serde/serde_json, rusqlite (bundled), toml_edit, tui-input, catppuccin, tui-markdown (carnet README only), color-eyre, tracing (file log), insta.
 - **Refresh**: a fast `wt list` every 10 s after 10 s idle, a full refresh (`--full`, reviews, issues) every 5 min, and remote responses cached 5 min in sqlite.
