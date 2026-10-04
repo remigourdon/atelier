@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
-use super::app::{Focus, KEYMAP, List, Model, Panel, Popup, Row, Screen, popup_hints};
+use super::app::{Focus, KEYMAP, List, Model, Panel, Popup, Row, Screen, Source, popup_hints};
 use super::widgets;
 use crate::config::Icons;
 
@@ -33,6 +33,7 @@ pub struct Glyphs {
     pub workspace: &'static str,
     pub repo: &'static str,
     pub worktree: &'static str,
+    pub review: &'static str,
     pub open: &'static str,
     pub closed: &'static str,
     pub folded: &'static str,
@@ -48,18 +49,20 @@ impl Glyphs {
                 workspace: "",
                 repo: "",
                 worktree: "",
+                review: "",
                 open: "●",
                 closed: "○",
                 folded: "▸",
                 unfolded: "▾",
                 spinner,
             },
-            // Nerd Fonts: fa-desktop, oct-repo, dev-git_branch, fa-circle, fa-circle_o,
-            // fa-folder, fa-folder_open.
+            // Nerd Fonts: fa-desktop, oct-repo, dev-git_branch, oct-git_pull_request,
+            // fa-circle, fa-circle_o, fa-folder, fa-folder_open.
             Icons::Nerd => Self {
                 workspace: "\u{f108}",
                 repo: "\u{f401}",
                 worktree: "\u{e725}",
+                review: "\u{f407}",
                 open: "\u{f111}",
                 closed: "\u{f10c}",
                 folded: "\u{f07b}",
@@ -129,7 +132,7 @@ pub fn areas(model: &Model, area: Rect) -> Areas {
         let constraints = shown.iter().map(|&panel| match panel {
             _ if short && panel != model.panel => Constraint::Length(1),
             _ if short => Constraint::Fill(1),
-            Panel::Workspaces => Constraint::Fill(1),
+            Panel::Workspaces | Panel::Reviews => Constraint::Fill(1),
             Panel::Work => Constraint::Fill(2),
         });
         let rects = Layout::vertical(constraints).split(side);
@@ -193,21 +196,19 @@ fn render_panel(frame: &mut Frame, model: &Model, palette: &Palette, panel: Pane
         }
     };
     let mut title = vec![Span::raw(format!("[{}] ", panel.number()))];
-    match panel {
-        Panel::Workspaces => {
-            title.push(tab("Workspaces", list == List::Workspaces));
+    for (index, &other) in panel.tabs().iter().enumerate() {
+        if index > 0 {
             title.push(Span::raw(" │ "));
-            title.push(tab("Repos", list == List::Repos));
         }
-        Panel::Work => {
-            title.push(tab("Work", true));
-            if let Some(workspace) = model.workspace() {
-                title.push(Span::styled(
-                    format!(" · {workspace}"),
-                    Style::new().fg(palette.dim),
-                ));
-            }
-        }
+        title.push(tab(other.title(), other == list));
+    }
+    if panel == Panel::Work
+        && let Some(workspace) = model.workspace()
+    {
+        title.push(Span::styled(
+            format!(" · {workspace}"),
+            Style::new().fg(palette.dim),
+        ));
     }
     let filter = model.filter(list);
     if !filter.is_empty() || model.filtering == Some(list) {
@@ -229,10 +230,14 @@ fn render_panel(frame: &mut Frame, model: &Model, palette: &Palette, panel: Pane
     frame.render_widget(block, rect);
     let rows = rows(model, palette, list);
     if rows.is_empty() {
-        let empty = if model.loaded {
-            "nothing here"
-        } else {
+        let loading = match list.role() {
+            Some(_) => (model.loading.keys()).any(|source| matches!(source, Source::Reviews(_))),
+            None => !model.loaded,
+        };
+        let empty = if loading {
             "loading…"
+        } else {
+            "nothing here"
         };
         frame.render_widget(
             Paragraph::new(Span::styled(empty, Style::new().fg(palette.dim))),
@@ -362,6 +367,38 @@ fn rows<'a>(model: &'a Model, palette: &Palette, list: List) -> Vec<Line<'a>> {
                 }
             })
             .collect(),
+        List::ToReview | List::Mine => model
+            .reviews(list)
+            .into_iter()
+            .map(|review| {
+                let glyphs = &palette.glyphs;
+                let marker = match model.review_work(review) {
+                    Some(work) if work.tab => {
+                        Span::styled(format!("{} ", glyphs.open), Style::new().fg(palette.ok))
+                    }
+                    Some(_) => Span::styled(format!("{} ", glyphs.closed), dim),
+                    None => Span::raw("  "),
+                };
+                let mut spans = vec![marker];
+                spans.extend(icon(glyphs.review, dim));
+                spans.push(Span::styled(
+                    format!(
+                        "{}{} ",
+                        model.review_project(review),
+                        review.provider.reference(review.number)
+                    ),
+                    dim,
+                ));
+                spans.push(Span::raw(review.title.as_str()));
+                if review.draft {
+                    spans.push(Span::styled(" draft", Style::new().fg(palette.warn)));
+                }
+                if list == List::ToReview {
+                    spans.push(Span::styled(format!(" @{}", review.author), dim));
+                }
+                Line::from(spans)
+            })
+            .collect(),
     }
 }
 
@@ -475,6 +512,39 @@ fn detail(model: &Model) -> Vec<(String, String)> {
             }
             None => Vec::new(),
         },
+        List::ToReview | List::Mine => {
+            let Some(review) = model.review() else {
+                return Vec::new();
+            };
+            let repo = match model.review_repo(review) {
+                Some(repo) => repo.name(),
+                None => format!("{} (not registered)", review.project),
+            };
+            vec![
+                pair(
+                    "Review",
+                    format!(
+                        "{}{}",
+                        review.project,
+                        review.provider.reference(review.number)
+                    ),
+                ),
+                pair("Title", review.title.clone()),
+                pair("Author", review.author.clone()),
+                pair("Branch", format!("{} → {}", review.branch, review.base)),
+                pair("Status", if review.draft { "draft" } else { "open" }.into()),
+                pair("Updated", review.updated_at.clone()),
+                pair("URL", review.url.clone()),
+                pair("Repo", repo),
+                pair(
+                    "Worktree",
+                    model.review_work(review).map_or_else(
+                        || "none: Space checks it out".into(),
+                        |work| work.path().display().to_string(),
+                    ),
+                ),
+            ]
+        }
     }
 }
 
@@ -543,7 +613,11 @@ fn render_hints(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect)
     let mut spans = Vec::new();
     if let Some(list) = model.filtering {
         spans.push(Span::styled(
-            format!("filter {}: {}", name(list), popup_hints(Popup::Filter)),
+            format!(
+                "filter {}: {}",
+                list.title().to_lowercase(),
+                popup_hints(Popup::Filter)
+            ),
             Style::new().fg(palette.warn),
         ));
     } else {
@@ -584,12 +658,4 @@ fn render_hints(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect)
 /// The help's first word, so the hint bar fits.
 fn short_help(help: &str) -> &str {
     help.split(' ').next().unwrap_or(help)
-}
-
-fn name(list: List) -> &'static str {
-    match list {
-        List::Workspaces => "workspaces",
-        List::Repos => "repos",
-        List::Work => "work",
-    }
 }

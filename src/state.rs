@@ -425,6 +425,29 @@ impl State {
             .execute("DELETE FROM tabs WHERE path = ?", [text(path.as_ref())])?;
         Ok(())
     }
+
+    /// A cached remote response no older than `max_age` seconds, or of any age with `None`.
+    pub fn cached(&self, source: &str, key: &str, max_age: Option<u64>) -> Result<Option<String>> {
+        let since = max_age.map(|seconds| format!("-{seconds} seconds"));
+        Ok(self
+            .db
+            .query_row(
+                "SELECT json FROM cache WHERE source = ? AND key = ? \
+                 AND (?3 IS NULL OR fetched_at >= datetime('now', ?3))",
+                params![source, key, since],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn store_cache(&self, source: &str, key: &str, json: &str) -> Result<()> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO cache(source, key, json, fetched_at) \
+             VALUES (?, ?, ?, datetime('now'))",
+            params![source, key, json],
+        )?;
+        Ok(())
+    }
 }
 
 fn migrate(db: &mut Connection) -> Result<()> {
@@ -628,6 +651,35 @@ mod tests {
         let state = State::open_read_only(&path, "default").unwrap();
         assert_eq!(state.workspaces().unwrap(), ["default", "w"]);
         assert!(state.add_workspace("x").is_err());
+    }
+
+    #[test]
+    fn cache_entries_expire_but_stay_readable() {
+        let state = fresh();
+        assert_eq!(state.cached("gh", "k", Some(300)).unwrap(), None);
+        state.store_cache("gh", "k", "[1]").unwrap();
+        assert_eq!(
+            state.cached("gh", "k", Some(300)).unwrap().as_deref(),
+            Some("[1]")
+        );
+        assert_eq!(state.cached("glab", "k", None).unwrap(), None);
+        state
+            .db
+            .execute(
+                "UPDATE cache SET fetched_at = datetime('now', '-301 seconds')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(state.cached("gh", "k", Some(300)).unwrap(), None);
+        assert_eq!(
+            state.cached("gh", "k", None).unwrap().as_deref(),
+            Some("[1]")
+        );
+        state.store_cache("gh", "k", "[2]").unwrap();
+        assert_eq!(
+            state.cached("gh", "k", Some(300)).unwrap().as_deref(),
+            Some("[2]")
+        );
     }
 
     #[test]

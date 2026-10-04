@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod hooks;
 mod process;
+mod reviews;
 mod shell;
 mod state;
 mod sync;

@@ -5,14 +5,14 @@ Goals: a fast lazygit-style TUI and CLI over worktrunk and zellij, and no assump
 ## Scope
 
 - CLI: `ws add|rm|ls`, `add`, `update`, `rm`, `ls`, `open`, `carnet new|add`, `tui`, `hooks install|uninstall|status`, `shell init fish`, hidden `hook <phase>`.
-- External tools stay subprocesses: `wt`, `zellij`, `git`, `gh`, `glab`, `acli`. Forge and tracker access sit behind traits so native APIs can come later.
+- External tools stay subprocesses: `wt`, `zellij`, `git`, `gh`, `glab`, `acli`. Review and issue access sit behind traits so native APIs can come later.
 
 ## Architecture
 
 Single crate. `src/tui` depends on core modules, never the reverse.
 
 ```
-src/  cli  config  state  sync  hooks  shell  process  zellij  worktrunk  forge  tracker  tui/{app,update,view,widgets,jobs}
+src/  cli  config  state  sync  hooks  shell  process  zellij  worktrunk  reviews  issues  tui/{app,update,view,widgets,jobs}
 ```
 
 - **Processes**: every external command goes through the `process::Runner` trait, so orchestration is tested against a fake that records calls.
@@ -20,7 +20,8 @@ src/  cli  config  state  sync  hooks  shell  process  zellij  worktrunk  forge 
 - **Crates**: ratatui, crossterm (`event-stream`), tokio, clap (dynamic completions), serde/serde_json, rusqlite (bundled), toml_edit, tui-input, catppuccin, tui-markdown (carnet README only), color-eyre, tracing (file log), insta.
 - **Jobs**: each effect runs on a blocking thread with its own database connection and a recording runner, so every command lands in the command log. Refreshes and commit listings log only failures, since they run constantly.
 - **worktrunk**: `wt list` always runs with `--config-set list.json-schema=2`, so the user's config cannot change the schema. A new worktree is `wt switch [--create] <branch> --no-cd`, with `ATELIER_WORKSPACE` and `ATELIER_GROUP_HINT` telling atelier's hook its workspace and group.
-- **Refresh**: a fast `wt list` every 10 s after 10 s idle, a full refresh (`--full`, reviews, issues) every 5 min, and remote responses cached 5 min in sqlite.
+- **Refresh**: a fast `wt list` every 10 s after 10 s idle, a full refresh (`--full`, reviews, issues) every 5 min, and remote responses cached in sqlite for 4 min, so each full refresh fetches anew while other TUIs and restarts reuse it. `R` bypasses the cache; a failed fetch falls back to the cached response at any age.
+- **Reviews**: listed per host of the registered repos' forges, across every project on it: GitHub through one paginated `gh api graphql` search per sub-tab (`review-requested:@me`, `author:@me`; it reports the head branch, which `gh search prs` does not), GitLab through `glab api --paginate /merge_requests` with `scope=reviews_for_me` or `created_by_me`. A review maps to a registered repo by its project's web page; `Space` runs `wt switch pr:N`/`mr:N` in that repo's default workspace and focuses the worktree's tab, and on an unregistered project says so.
 
 ## State
 

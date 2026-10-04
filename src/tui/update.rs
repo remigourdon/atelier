@@ -11,11 +11,12 @@ use tui_input::backend::crossterm::EventHandler;
 
 use super::app::{
     Action, Binding, Cmd, Effect, FAST_REFRESH, FULL_REFRESH, Focus, Job, KEYMAP, List, MenuEntry,
-    Modal, Model, On, Panel, Popup, PopupCmd, Removal, Row, Screen, Source, Submit, Work, lookup,
-    popup_lookup,
+    Modal, Model, On, Panel, Popup, PopupCmd, Removal, ReviewsDue, Row, Screen, Source, Submit,
+    Work, lookup, popup_lookup,
 };
 use super::view::{areas, main_len, offset};
 use crate::process::Logged;
+use crate::reviews::{self, Provider};
 
 pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
     match action {
@@ -63,7 +64,9 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
                     model.loaded = true;
                     keep.restore(model);
                     model.commits.clear();
-                    commits(model)
+                    let mut effects = commits(model);
+                    effects.extend(fetch_reviews(model));
+                    effects
                 }
                 Err(error) => {
                     model.push_log([Logged {
@@ -77,6 +80,30 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
         Action::Commits(path, lines) => {
             done(model, Source::Git);
             model.commits.insert(path, lines);
+            Vec::new()
+        }
+        Action::Reviews {
+            provider,
+            reviews,
+            log,
+        } => {
+            done(model, Source::Reviews(provider));
+            model.push_log(log);
+            match reviews {
+                Ok(reviews) => {
+                    let keep = Keep::of(model);
+                    model.reviews.retain(|review| review.provider != provider);
+                    model.reviews.extend(reviews);
+                    model
+                        .reviews
+                        .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                    keep.restore(model);
+                }
+                Err(error) => model.push_log([Logged {
+                    command: format!("{} reviews", provider.cli()),
+                    error: Some(error),
+                }]),
+            }
             Vec::new()
         }
         Action::Finished { job, log, error } => {
@@ -111,9 +138,51 @@ fn run(model: &mut Model, job: Job) -> Effect {
         model.since_refresh = 0;
         if full {
             model.since_full = 0;
+            if model.reviews_due == ReviewsDue::No {
+                model.reviews_due = ReviewsDue::Cached;
+            }
         }
     }
     Effect::Run(job)
+}
+
+/// Lists each provider's reviews on the hosts of the registered repos, once a listing that
+/// asked for them has found those hosts.
+fn fetch_reviews(model: &mut Model) -> Vec<Effect> {
+    let due = std::mem::replace(&mut model.reviews_due, ReviewsDue::No);
+    if due == ReviewsDue::No {
+        return Vec::new();
+    }
+    let force = due == ReviewsDue::Fresh;
+    let mut effects = Vec::new();
+    let mut busy = false;
+    for provider in Provider::ALL {
+        let mut hosts: Vec<String> = (model.snapshot.forges.values())
+            .filter(|forge| Provider::from_name(&forge.provider) == Some(provider))
+            .filter_map(|forge| reviews::host(&forge.url).map(Into::into))
+            .collect();
+        hosts.sort();
+        hosts.dedup();
+        if hosts.is_empty() {
+            model.reviews.retain(|review| review.provider != provider);
+        } else if model.loading.contains_key(&Source::Reviews(provider)) {
+            busy = true;
+        } else {
+            effects.push(run(
+                model,
+                Job::Reviews {
+                    provider,
+                    hosts,
+                    force,
+                },
+            ));
+        }
+    }
+    // A provider still listing gets its turn at the next listing, so `R` is not lost.
+    if busy {
+        model.reviews_due = due;
+    }
+    effects
 }
 
 fn done(model: &mut Model, source: Source) {
@@ -147,6 +216,8 @@ struct Keep {
     workspace: Option<String>,
     repo: Option<std::path::PathBuf>,
     line: Option<LineKey>,
+    /// Each review list's selected review, by URL.
+    reviews: Vec<(List, String)>,
 }
 
 #[derive(PartialEq)]
@@ -161,6 +232,13 @@ impl Keep {
             workspace: model.workspace().map(Into::into),
             repo: model.repo().map(|repo| repo.path.clone()),
             line: model.work_row().map(|line| line_key(model, &line)),
+            reviews: [List::ToReview, List::Mine]
+                .into_iter()
+                .filter_map(|list| {
+                    let review = model.reviews(list).get(model.index(list)).copied()?;
+                    Some((list, review.url.clone()))
+                })
+                .collect(),
         }
     }
 
@@ -183,6 +261,11 @@ impl Keep {
         });
         let line = line.unwrap_or(model.index(List::Work));
         model.selected.insert(List::Work, line);
+        for (list, url) in self.reviews {
+            if let Some(index) = model.reviews(list).iter().position(|r| r.url == url) {
+                model.selected.insert(list, index);
+            }
+        }
         clamp_all(model);
     }
 }
@@ -195,7 +278,7 @@ fn line_key(model: &Model, line: &Row) -> LineKey {
 }
 
 fn clamp_all(model: &mut Model) {
-    for list in [List::Workspaces, List::Repos, List::Work] {
+    for list in List::ALL {
         select(model, list, model.index(list));
     }
 }
@@ -447,13 +530,15 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
         Cmd::ScrollLeft => scroll(model, 0, -4),
         Cmd::ScrollRight => scroll(model, 0, 4),
         Cmd::NextTab | Cmd::PrevTab => {
-            if model.panel == Panel::Workspaces {
-                model.sub = match model.sub {
-                    List::Workspaces => List::Repos,
-                    _ => List::Workspaces,
-                };
-                model.scroll = (0, 0);
-            }
+            let tabs = model.panel.tabs();
+            let at = tabs.iter().position(|&tab| tab == list).unwrap_or(0);
+            let next = if cmd == Cmd::NextTab {
+                (at + 1) % tabs.len()
+            } else {
+                (at + tabs.len() - 1) % tabs.len()
+            };
+            model.sub.insert(model.panel, tabs[next]);
+            model.scroll = (0, 0);
         }
         Cmd::Activate => return activate(model),
         Cmd::Enter => match model.work_row() {
@@ -527,13 +612,16 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
             }
         }
         Cmd::CopyPath => {
-            if let Some(path) = copy_path(model) {
+            if let Some(path) = copy_path(model).or_else(|| url(model)) {
                 return update(model, Action::Copy(path));
             }
         }
         Cmd::Filter if !in_main => model.filtering = Some(list),
         Cmd::Filter => {}
-        Cmd::Refresh => return vec![run(model, Job::Refresh { full: true })],
+        Cmd::Refresh => {
+            model.reviews_due = ReviewsDue::Fresh;
+            return vec![run(model, Job::Refresh { full: true })];
+        }
         Cmd::Menu => {
             let here = |binding: &&Binding| matches!(binding.on, On::Lists(lists) if lists.contains(&list));
             let global = |binding: &&Binding| binding.on == On::Global;
@@ -618,6 +706,24 @@ fn activate(model: &mut Model) -> Vec<Effect> {
                 vec![run(model, Job::Open(paths))]
             }
         }
+        List::ToReview | List::Mine => {
+            let Some(review) = model.review() else {
+                return Vec::new();
+            };
+            let Some(repo) = model.review_repo(review) else {
+                let message = format!(
+                    "{} is not registered: add a clone with `atelier add <path>`",
+                    review.project
+                );
+                return note(model, &message);
+            };
+            let job = Job::Checkout {
+                repo: repo.path.clone(),
+                workspace: repo.default_workspace.clone(),
+                review: Box::new(review.clone()),
+            };
+            vec![run(model, job)]
+        }
     }
 }
 
@@ -632,6 +738,7 @@ fn new(model: &mut Model) -> Vec<Effect> {
             },
         ),
         List::Repos => note(model, "register repos with `atelier add <path>`"),
+        List::ToReview | List::Mine => Vec::new(),
         List::Work => {
             let Some(workspace) = model.workspace().map(str::to_owned) else {
                 return Vec::new();
@@ -683,7 +790,7 @@ fn new(model: &mut Model) -> Vec<Effect> {
 
 fn edit(model: &mut Model) -> Vec<Effect> {
     let action = match model.active() {
-        List::Workspaces => return Vec::new(),
+        List::Workspaces | List::ToReview | List::Mine => return Vec::new(),
         List::Repos => {
             let Some(repo) = model.repo() else {
                 return Vec::new();
@@ -740,7 +847,7 @@ fn workspace_menu(
 
 fn move_to(model: &mut Model) -> Vec<Effect> {
     match model.active() {
-        List::Workspaces => Vec::new(),
+        List::Workspaces | List::ToReview | List::Mine => Vec::new(),
         List::Repos => {
             let Some(repo) = model.repo().cloned() else {
                 return Vec::new();
@@ -782,6 +889,7 @@ fn confirm(model: &mut Model, title: String, lines: Vec<String>, job: Job) -> Ve
 
 fn remove(model: &mut Model) -> Vec<Effect> {
     match model.active() {
+        List::ToReview | List::Mine => Vec::new(),
         List::Workspaces => {
             let Some(name) = model.workspace().map(str::to_owned) else {
                 return Vec::new();
@@ -844,17 +952,22 @@ fn copy_path(model: &Model) -> Option<String> {
             Row::Item(index) => Some(model.snapshot.work[index].path().display().to_string()),
             Row::Group { name, .. } => Some(name),
         },
+        List::ToReview | List::Mine => None,
     }
 }
 
 fn branch(model: &Model) -> Option<String> {
-    match (model.active(), model.work_row()?) {
-        (List::Work, Row::Item(index)) => model.snapshot.work[index].tree.branch.clone(),
-        _ => None,
+    match model.active() {
+        List::Work => match model.work_row()? {
+            Row::Item(index) => model.snapshot.work[index].tree.branch.clone(),
+            Row::Group { .. } => None,
+        },
+        List::ToReview | List::Mine => model.review().map(|review| review.branch.clone()),
+        List::Workspaces | List::Repos => None,
     }
 }
 
-/// The forge page of the selected repo, or of the selected worktree's branch.
+/// The forge page of the selected repo, review, or worktree's branch.
 fn url(model: &Model) -> Option<String> {
     let forges = &model.snapshot.forges;
     match model.active() {
@@ -872,6 +985,7 @@ fn url(model: &Model) -> Option<String> {
             }
             Row::Group { .. } => None,
         },
+        List::ToReview | List::Mine => model.review().map(|review| review.url.clone()),
         List::Workspaces => None,
     }
 }
@@ -930,6 +1044,7 @@ pub mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::reviews::{Review, Role};
     use crate::state::Repo;
     use crate::tui::app::{Snapshot, Work};
     use crate::worktrunk::{Forge, Worktree};
@@ -1478,6 +1593,206 @@ pub mod tests {
             model.loading.contains_key(&Source::Run),
             "Space opened the group"
         );
+    }
+
+    pub fn review(provider: Provider, role: Role, number: u64, project_url: &str) -> Review {
+        let project = project_url.rsplit('/').next().unwrap();
+        Review {
+            provider,
+            role,
+            number,
+            title: format!("Change {number}"),
+            url: format!("{project_url}/pull/{number}"),
+            project: format!("org/{project}"),
+            project_url: project_url.into(),
+            author: "alice".into(),
+            branch: format!("change-{number}"),
+            base: "main".into(),
+            draft: false,
+            updated_at: format!("2026-10-0{number}T00:00:00Z"),
+        }
+    }
+
+    /// Reviews of the registered api repo and of an unregistered one, in both roles.
+    pub fn with_reviews(mut model: Model) -> Model {
+        update(
+            &mut model,
+            Action::Reviews {
+                provider: Provider::GitHub,
+                reviews: Ok(vec![
+                    review(Provider::GitHub, Role::ToReview, 1, "https://forge/other"),
+                    review(Provider::GitHub, Role::ToReview, 2, "https://forge/api"),
+                    review(Provider::GitHub, Role::Mine, 3, "https://forge/api"),
+                ]),
+                log: Vec::new(),
+            },
+        );
+        model
+    }
+
+    fn review_numbers(model: &Model, list: List) -> Vec<u64> {
+        model.reviews(list).iter().map(|r| r.number).collect()
+    }
+
+    #[test]
+    fn listings_that_ask_for_reviews_fetch_them_per_provider() {
+        let mut model = Model::new((120, 40));
+        let loaded = |model: &mut Model| {
+            jobs(update(
+                model,
+                Action::Loaded {
+                    snapshot: Ok(snapshot()),
+                    log: Vec::new(),
+                },
+            ))
+        };
+        let first = Job::Reviews {
+            provider: Provider::GitHub,
+            hosts: vec!["forge".into()],
+            force: false,
+        };
+        assert_eq!(
+            loaded(&mut model),
+            std::slice::from_ref(&first),
+            "startup lists them"
+        );
+        model.loading.clear();
+        assert!(loaded(&mut model).is_empty(), "a fast refresh does not");
+        press(&mut model, "R");
+        model.loading.clear();
+        let [Job::Reviews { force: true, .. }] = loaded(&mut model)[..] else {
+            panic!("R lists them past the cache");
+        };
+        model.loading.clear();
+        model.since_full = FULL_REFRESH;
+        update(&mut model, Action::Tick);
+        model.loading.clear();
+        assert_eq!(loaded(&mut model), [first], "so does the full refresh");
+        press(&mut model, "R");
+        assert!(
+            loaded(&mut model).is_empty(),
+            "the full refresh is still listing reviews"
+        );
+        assert_eq!(model.reviews_due, ReviewsDue::Fresh, "R waits for it");
+        model.loading.clear();
+        let [Job::Reviews { force: true, .. }] = loaded(&mut model)[..] else {
+            panic!("then R lists them past the cache");
+        };
+    }
+
+    #[test]
+    fn reviews_replace_their_providers_and_keep_the_selection() {
+        let mut model = with_reviews(model());
+        assert_eq!(
+            review_numbers(&model, List::ToReview),
+            [2, 1],
+            "newest first"
+        );
+        assert_eq!(review_numbers(&model, List::Mine), [3]);
+        press(&mut model, "3j");
+        let gitlab = review(Provider::GitLab, Role::ToReview, 9, "https://lab/x");
+        update(
+            &mut model,
+            Action::Reviews {
+                provider: Provider::GitLab,
+                reviews: Ok(vec![gitlab]),
+                log: Vec::new(),
+            },
+        );
+        assert_eq!(review_numbers(&model, List::ToReview), [9, 2, 1]);
+        assert_eq!(model.review().unwrap().number, 1, "still selected");
+        update(
+            &mut model,
+            Action::Reviews {
+                provider: Provider::GitHub,
+                reviews: Err("offline".into()),
+                log: Vec::new(),
+            },
+        );
+        assert_eq!(review_numbers(&model, List::ToReview).len(), 3);
+        assert_eq!(model.log.last().unwrap().command, "gh reviews");
+    }
+
+    #[test]
+    fn space_checks_out_a_review_of_a_registered_repo() {
+        let mut model = with_reviews(model());
+        press(&mut model, "3");
+        assert_eq!(model.active(), List::ToReview);
+        assert_eq!(
+            jobs(press(&mut model, " ")),
+            [Job::Checkout {
+                repo: "/src/api".into(),
+                workspace: "default".into(),
+                review: Box::new(review(
+                    Provider::GitHub,
+                    Role::ToReview,
+                    2,
+                    "https://forge/api"
+                )),
+            }]
+        );
+        press(&mut model, "j");
+        assert!(jobs(press(&mut model, " ")).is_empty());
+        assert!(
+            model
+                .log
+                .last()
+                .unwrap()
+                .command
+                .contains("org/other is not registered")
+        );
+    }
+
+    #[test]
+    fn review_sub_tabs_browse_and_copy() {
+        let mut model = with_reviews(model());
+        press(&mut model, "3]");
+        assert_eq!(model.active(), List::Mine);
+        assert_eq!(
+            jobs(press(&mut model, "o")),
+            [Job::Browse("https://forge/api/pull/3".into())]
+        );
+        assert_eq!(
+            press(&mut model, "y"),
+            [],
+            "the copy menu opens without effects"
+        );
+        assert_eq!(
+            menu_keys(&model),
+            ["b", "u"],
+            "a review copies its branch or URL"
+        );
+        press(&mut model, "\x1b");
+        assert_eq!(
+            update(
+                &mut model,
+                Action::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))
+            ),
+            [Effect::Copy("https://forge/api/pull/3".into())]
+        );
+        press(&mut model, "[");
+        assert_eq!(model.active(), List::ToReview);
+        press(&mut model, "/other");
+        assert_eq!(review_numbers(&model, List::ToReview), [1]);
+        for keys in ["d", "e", "m", "n"] {
+            assert!(press(&mut model, keys).is_empty(), "{keys}");
+            assert!(model.modal.is_none(), "{keys}");
+        }
+    }
+
+    #[test]
+    fn a_review_row_knows_its_worktree() {
+        let mut model = with_reviews(model());
+        model.snapshot.work[1].tree.branch = Some("change-2".into());
+        let review = model.reviews(List::ToReview)[0].clone();
+        assert_eq!(model.review_project(&review), "api");
+        assert_eq!(
+            model.review_work(&review).map(|work| work.path().clone()),
+            Some("/src/api.ABC-1-login".into())
+        );
+        let other = model.reviews(List::ToReview)[1].clone();
+        assert_eq!(model.review_project(&other), "org/other");
+        assert!(model.review_work(&other).is_none());
     }
 
     #[test]
