@@ -1,10 +1,12 @@
-use clap::Parser;
+mod cli;
+mod config;
+mod hooks;
+mod process;
+mod shell;
+mod state;
+mod zellij;
 
-/// A lazygit-style TUI and CLI that organise git worktrees into zellij sessions.
-#[derive(Parser)]
-#[command(version)]
-struct Cli {}
-
-fn main() {
-    Cli::parse();
+fn main() -> color_eyre::Result<()> {
+    color_eyre::install()?;
+    cli::run()
 }

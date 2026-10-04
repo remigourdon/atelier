@@ -34,6 +34,7 @@
               ];
             };
             cargoLock.lockFile = ./Cargo.lock;
+            nativeCheckInputs = [ pkgs.git ];
             meta = {
               inherit (cargoToml.package) description;
               license = with pkgs.lib.licenses; [
