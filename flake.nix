@@ -47,6 +47,8 @@
         }
       );
 
+      homeModules.default = import ./nix/home-manager.nix self;
+
       devShells = forAllSystems (
         system:
         let
