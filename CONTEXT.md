@@ -2,7 +2,7 @@
 
 Atelier organises git worktrees into zellij sessions, on top of worktrunk (`wt`).
 
-- **Workspace** — a named zellij session that owns items. `vrac` is the default and cannot be removed.
+- **Workspace** — a named zellij session that owns items. One is the default workspace (`default_workspace`, `default` unless configured): it always exists and cannot be removed.
 - **Repo** — a registered git repository (its main worktree path), with an optional alias and a default workspace.
 - **Item** — something atelier can open in a tab: a worktree or a carnet. Each item belongs to exactly one workspace.
 - **Worktree** — a git worktree of a registered repo, created and removed through worktrunk.

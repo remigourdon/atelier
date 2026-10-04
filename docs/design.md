@@ -22,14 +22,14 @@ src/  cli  config  state  hooks  shell  zellij  worktrunk  forge  tracker  tui/{
 
 ## State
 
-Same database: `$XDG_STATE_HOME/atelier/atelier.db`, tables `workspaces`, `repos`, `items`, `tabs`, `cache`. Migrations are an ordered list applied in one transaction, tracked by `PRAGMA user_version`. Migration 1 is the current Python schema written idempotently (including the legacy `items.workspace` fix), so it is a no-op on existing databases. Migrations only add things, so the Python version can still read the DB.
+Same database: `$XDG_STATE_HOME/atelier/atelier.db`, tables `workspaces`, `repos`, `items`, `tabs`, `cache`. Migrations are an ordered list applied in one transaction, tracked by `PRAGMA user_version`. Migration 1 is the current Python schema written idempotently (including the legacy `items.workspace` fix), so it is a no-op on existing databases. It does not seed a `vrac` row: the configured default workspace is created at startup, and code always writes `items.workspace` explicitly instead of relying on the legacy column default. Migrations only add things, so the Python version can still read the DB.
 
 ## Config
 
 `$XDG_CONFIG_HOME/atelier/config.toml`. Every key is optional.
 
 ```toml
-default_workspace = "vrac"
+default_workspace = "default"   # created on first use; cannot be removed
 editor = "hx"                  # else $VISUAL, else $EDITOR, else a plain shell; never nvim by default
 agent_command = "claude"
 browser = "firefox"            # else $BROWSER
