@@ -222,9 +222,7 @@ mod tests {
     fn issues_panel_from_github() {
         use crate::issues::{parse_gh, tests};
         let mut model = loaded(120, 30);
-        model.tracker_config = crate::config::Config::parse(&tests::scheme())
-            .unwrap()
-            .tracker;
+        model.tracker_config = crate::config::Config::parse(tests::SCHEME).unwrap().tracker;
         let mut issues = parse_gh(tests::GH, false).unwrap();
         issues.extend(parse_gh(tests::GH_CLOSED, false).unwrap());
         update(

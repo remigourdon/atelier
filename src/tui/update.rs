@@ -1946,8 +1946,8 @@ pub mod tests {
     /// The triage label scheme, with an issue in each section and in Other, one hidden, and a
     /// Jira issue whose key groups the ABC-1 worktrees.
     pub fn with_issues(mut model: Model) -> Model {
-        use crate::issues::tests::{issue, scheme};
-        model.tracker_config = crate::config::Config::parse(&scheme()).unwrap().tracker;
+        use crate::issues::tests::{SCHEME, issue};
+        model.tracker_config = crate::config::Config::parse(SCHEME).unwrap().tracker;
         let mut jira = issue("ABC-1", &["ready-for-agent"], false);
         jira.tracker = crate::issues::Tracker::Jira;
         jira.project_url = None;

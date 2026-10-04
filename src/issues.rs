@@ -771,14 +771,28 @@ pub mod tests {
     }
 
     /// The triage label scheme docs/design.md shows, for this repo.
-    pub fn scheme() -> String {
-        let design = include_str!("../docs/design.md");
-        let (_, example) = design
-            .split_once("A triage label scheme, for example:\n\n```toml\n")
-            .expect("docs/design.md shows a label scheme");
-        let (example, _) = example.split_once("```").unwrap();
-        format!("[tracker.github]\nrepos = [\"remigourdon/atelier\"]\n{example}")
-    }
+    pub const SCHEME: &str = r#"
+        [tracker.github]
+        repos = ["remigourdon/atelier"]
+
+        [tracker]
+        hide = { labels = ["wontfix", "duplicate"] }
+
+        [[tracker.sections]]
+        title = "Blocked"
+        blocked = true
+
+        [[tracker.sections]]
+        title = "Ready for agent"
+        labels = ["ready-for-agent"]
+
+        [[tracker.sections]]
+        title = "Triage"
+        labels = ["needs-triage", "needs-info"]
+
+        [[tracker.sections]]
+        title = "Backlog"
+    "#;
 
     pub fn issue(key: &str, labels: &[&str], blocked: bool) -> Issue {
         Issue {
@@ -805,7 +819,7 @@ pub mod tests {
 
     #[test]
     fn sections_take_issues_in_order_and_hide_wins() {
-        let tracker = config(&scheme());
+        let tracker = config(SCHEME);
         let titles: Vec<&str> = (tracker.sections().iter())
             .map(|section| section.title.as_str())
             .collect();
