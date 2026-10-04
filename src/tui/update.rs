@@ -9,7 +9,8 @@ use tui_input::backend::crossterm::EventHandler;
 
 use super::app::{
     Action, Binding, Cmd, Effect, FAST_REFRESH, FULL_REFRESH, Focus, Job, KEYMAP, Line, List,
-    LogEntry, MenuEntry, Modal, Model, On, Panel, Removal, Screen, Submit, lookup,
+    LogEntry, MenuEntry, Modal, Model, On, Panel, Popup, PopupCmd, Removal, Screen, Submit, lookup,
+    popup_lookup,
 };
 use super::view::{areas, main_len, offset};
 
@@ -236,6 +237,7 @@ fn key_press(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
     if let Some(list) = model.filtering {
         return filter_key(model, list, key);
     }
+    // `gg` is a two-key sequence, so it is matched here; KEYMAP's top binding lists it.
     let plain_g = key.code == KeyCode::Char('g') && !key.modifiers.contains(KeyModifiers::CONTROL);
     if plain_g {
         model.pending_g = !model.pending_g;
@@ -253,9 +255,9 @@ fn key_press(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
 }
 
 fn filter_key(model: &mut Model, list: List, key: KeyEvent) -> Vec<Effect> {
-    match key.code {
-        KeyCode::Enter => model.filtering = None,
-        KeyCode::Esc => {
+    match popup_lookup(Popup::Filter, &key) {
+        Some(PopupCmd::Accept) => model.filtering = None,
+        Some(PopupCmd::Cancel) => {
             model.filtering = None;
             model.filters.remove(&list);
         }
@@ -277,18 +279,18 @@ fn modal_key(model: &mut Model, modal: Modal, key: KeyEvent) -> Vec<Effect> {
             title,
             mut input,
             then,
-        } => match key.code {
-            KeyCode::Enter => submit(model, then, input.value().trim()),
-            KeyCode::Esc => Vec::new(),
+        } => match popup_lookup(Popup::Prompt, &key) {
+            Some(PopupCmd::Accept) => submit(model, then, input.value().trim()),
+            Some(PopupCmd::Cancel) => Vec::new(),
             _ => {
                 input.handle_event(&Event::Key(key));
                 model.modal = Some(Modal::Prompt { title, input, then });
                 Vec::new()
             }
         },
-        Modal::Confirm { title, lines, job } => match key.code {
-            KeyCode::Enter | KeyCode::Char('y') => vec![run(model, job)],
-            KeyCode::Esc | KeyCode::Char('n' | 'q') => Vec::new(),
+        Modal::Confirm { title, lines, job } => match popup_lookup(Popup::Confirm, &key) {
+            Some(PopupCmd::Accept) => vec![run(model, job)],
+            Some(PopupCmd::Cancel) => Vec::new(),
             _ => {
                 model.modal = Some(Modal::Confirm { title, lines, job });
                 Vec::new()
@@ -300,26 +302,28 @@ fn modal_key(model: &mut Model, modal: Modal, key: KeyEvent) -> Vec<Effect> {
             mut selected,
         } => {
             let last = entries.len().saturating_sub(1);
-            match key.code {
-                KeyCode::Enter => {
+            match popup_lookup(Popup::Menu, &key) {
+                Some(PopupCmd::Accept) => {
                     let action = entries[selected].action.clone();
                     return update(model, action);
                 }
-                KeyCode::Esc | KeyCode::Char('q') => return Vec::new(),
-                KeyCode::Char('j') | KeyCode::Down => selected = (selected + 1).min(last),
-                KeyCode::Char('k') | KeyCode::Up => selected = selected.saturating_sub(1),
-                KeyCode::Home | KeyCode::Char('<') => selected = 0,
-                KeyCode::End | KeyCode::Char('>' | 'G') => selected = last,
-                KeyCode::Char(c) => {
+                Some(PopupCmd::Cancel) => return Vec::new(),
+                Some(PopupCmd::Down) => selected = (selected + 1).min(last),
+                Some(PopupCmd::Up) => selected = selected.saturating_sub(1),
+                Some(PopupCmd::Top) => selected = 0,
+                Some(PopupCmd::Bottom) => selected = last,
+                None => {
                     let shortcut = entries
                         .iter()
-                        .find(|entry| entry.key.chars().eq([c]))
+                        .find(|entry| match key.code {
+                            KeyCode::Char(c) => entry.key.chars().eq([c]),
+                            _ => false,
+                        })
                         .map(|entry| entry.action.clone());
                     if let Some(action) = shortcut {
                         return update(model, action);
                     }
                 }
-                _ => {}
             }
             model.modal = Some(Modal::Menu {
                 title,
@@ -1103,6 +1107,25 @@ pub mod tests {
             assert!(model.modal.is_none(), "{keys}");
             assert!(model.log.last().unwrap().command.contains(hint), "{keys}");
         }
+    }
+
+    #[test]
+    fn popup_hints_come_from_the_popup_keymap() {
+        use crate::tui::app::{Popup, popup_hints};
+        assert_eq!(
+            popup_hints(Popup::Confirm),
+            "Enter/y confirm · Esc/n cancel"
+        );
+        assert_eq!(popup_hints(Popup::Filter), "Enter keep · Esc clear");
+        let mut model = model();
+        press(&mut model, "?G");
+        let Some(Modal::Menu {
+            selected, entries, ..
+        }) = &model.modal
+        else {
+            panic!();
+        };
+        assert_eq!(*selected, entries.len() - 1, "G goes to the last entry");
     }
 
     #[test]

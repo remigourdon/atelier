@@ -384,11 +384,81 @@ pub const KEYMAP: &[Binding] = &[
 
 /// The command bound to a key.
 pub fn lookup(key: &KeyEvent) -> Option<Cmd> {
-    let pressed = (key.code, key.modifiers.contains(KeyModifiers::CONTROL));
+    let pressed = pressed(key);
     KEYMAP
         .iter()
         .find(|binding| binding.keys.contains(&pressed))
         .map(|binding| binding.cmd)
+}
+
+/// The popups and inputs that take keys before `KEYMAP` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Popup {
+    Prompt,
+    Confirm,
+    Menu,
+    Filter,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopupCmd {
+    Down,
+    Up,
+    Top,
+    Bottom,
+    /// Submit, confirm, run the menu entry or keep the filter.
+    Accept,
+    /// Close, or clear the filter.
+    Cancel,
+}
+
+pub struct PopupBinding {
+    pub popup: Popup,
+    pub keys: &'static [Key],
+    pub label: &'static str,
+    pub cmd: PopupCmd,
+    pub help: &'static str,
+}
+
+/// Popup keys. Other keys go to the text input, or pick a menu entry by its key.
+#[rustfmt::skip]
+pub const POPUP_KEYMAP: &[PopupBinding] = &[
+    PopupBinding { popup: Popup::Prompt, keys: &[code(KeyCode::Enter)], label: "Enter", cmd: PopupCmd::Accept, help: "submit" },
+    PopupBinding { popup: Popup::Prompt, keys: &[code(KeyCode::Esc)], label: "Esc", cmd: PopupCmd::Cancel, help: "cancel" },
+    PopupBinding { popup: Popup::Confirm, keys: &[code(KeyCode::Enter), ch('y')], label: "Enter/y", cmd: PopupCmd::Accept, help: "confirm" },
+    PopupBinding { popup: Popup::Confirm, keys: &[code(KeyCode::Esc), ch('n'), ch('q')], label: "Esc/n", cmd: PopupCmd::Cancel, help: "cancel" },
+    PopupBinding { popup: Popup::Menu, keys: &[ch('j'), code(KeyCode::Down)], label: "j/↓", cmd: PopupCmd::Down, help: "next" },
+    PopupBinding { popup: Popup::Menu, keys: &[ch('k'), code(KeyCode::Up)], label: "k/↑", cmd: PopupCmd::Up, help: "previous" },
+    PopupBinding { popup: Popup::Menu, keys: &[ch('<'), code(KeyCode::Home)], label: "</Home", cmd: PopupCmd::Top, help: "top" },
+    PopupBinding { popup: Popup::Menu, keys: &[ch('>'), code(KeyCode::End), ch('G')], label: ">/End/G", cmd: PopupCmd::Bottom, help: "bottom" },
+    PopupBinding { popup: Popup::Menu, keys: &[code(KeyCode::Enter)], label: "Enter", cmd: PopupCmd::Accept, help: "run" },
+    PopupBinding { popup: Popup::Menu, keys: &[code(KeyCode::Esc), ch('q')], label: "Esc", cmd: PopupCmd::Cancel, help: "close" },
+    PopupBinding { popup: Popup::Filter, keys: &[code(KeyCode::Enter)], label: "Enter", cmd: PopupCmd::Accept, help: "keep" },
+    PopupBinding { popup: Popup::Filter, keys: &[code(KeyCode::Esc)], label: "Esc", cmd: PopupCmd::Cancel, help: "clear" },
+];
+
+fn pressed(key: &KeyEvent) -> Key {
+    (key.code, key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
+pub fn popup_lookup(popup: Popup, key: &KeyEvent) -> Option<PopupCmd> {
+    let pressed = pressed(key);
+    POPUP_KEYMAP
+        .iter()
+        .find(|binding| binding.popup == popup && binding.keys.contains(&pressed))
+        .map(|binding| binding.cmd)
+}
+
+/// How to accept or leave a popup, as its border shows.
+pub fn popup_hints(popup: Popup) -> String {
+    POPUP_KEYMAP
+        .iter()
+        .filter(|binding| {
+            binding.popup == popup && matches!(binding.cmd, PopupCmd::Accept | PopupCmd::Cancel)
+        })
+        .map(|binding| format!("{} {}", binding.label, binding.help))
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 /// Seconds between refreshes: a fast one once idle, a full one regardless.

@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line as Text, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
-use super::app::{Focus, KEYMAP, Line, List, Model, Panel, Screen};
+use super::app::{Focus, KEYMAP, Line, List, Model, Panel, Popup, Screen, popup_hints};
 use super::widgets;
 use crate::config::Icons;
 
@@ -542,7 +542,7 @@ fn render_hints(frame: &mut Frame, model: &Model, theme: &Theme, rect: Rect) {
     let mut spans = Vec::new();
     if let Some(list) = model.filtering {
         spans.push(Span::styled(
-            format!("filter {}: Enter keep · Esc clear", name(list)),
+            format!("filter {}: {}", name(list), popup_hints(Popup::Filter)),
             Style::new().fg(theme.warn),
         ));
     } else {
