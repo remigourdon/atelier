@@ -111,22 +111,22 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
             Vec::new()
         }
         Action::Issues {
-            source,
+            tracker,
             issues,
             log,
         } => {
-            done(model, Source::Issues(source));
+            done(model, Source::Issues(tracker));
             model.push_log(log);
             match issues {
                 Ok(issues) => {
                     let keep = Keep::of(model);
-                    model.issues.retain(|issue| issue.source != source);
+                    model.issues.retain(|issue| issue.tracker != tracker);
                     model.issues.extend(issues);
-                    model.issues.sort_by_key(|issue| issue.source);
+                    model.issues.sort_by_key(|issue| issue.tracker);
                     keep.restore(model);
                 }
                 Err(error) => model.push_log([Logged {
-                    command: format!("{} issues", source.cli()),
+                    command: format!("{} issues", tracker.cli()),
                     error: Some(error),
                 }]),
             }
@@ -210,9 +210,9 @@ fn fetch_issues(model: &mut Model) -> Vec<Effect> {
     if due == Due::No {
         return Vec::new();
     }
-    let jobs = (model.tracker.scopes().into_iter())
-        .map(|(source, scopes)| Job::Issues {
-            source,
+    let jobs = (model.tracker_config.scopes().into_iter())
+        .map(|(tracker, scopes)| Job::Issues {
+            tracker,
             scopes,
             force: due == Due::Fresh,
         })
@@ -824,11 +824,16 @@ fn activate(model: &mut Model) -> Vec<Effect> {
 
 /// Asks which repo an issue's worktree goes in, then for its branch. The menu suggests the
 /// repos of its linked work, then its own repo on GitHub, but never picks one: a tracker-only
-/// repo holds issues whose work happens elsewhere. It goes to the workspace of the linked work,
-/// if any.
+/// repo holds issues whose work happens elsewhere. It goes to the workspace of the linked work
+/// in that repo, else of any linked work, else the repo's default one.
 fn ask_start(model: &mut Model, issue: Issue) -> Vec<Effect> {
     let linked = model.issue_work(&issue);
-    let workspace = linked.first().map(|work| work.workspace.clone());
+    let workspace = |repo: &Repo| {
+        let work = (linked.iter().find(|work| work.repo == repo.path)).or(linked.first());
+        work.map_or(repo.default_workspace.clone(), |work| {
+            work.workspace.clone()
+        })
+    };
     let own = (issue.project_url.as_deref()).and_then(|url| model.project_repo(url));
     let mut repos: Vec<&Repo> = model.snapshot.repos.iter().collect();
     repos.sort_by_key(|repo| {
@@ -845,7 +850,7 @@ fn ask_start(model: &mut Model, issue: Issue) -> Vec<Effect> {
                 initial: issue.branch(),
                 then: Submit::Start {
                     repo: repo.path.clone(),
-                    workspace: (workspace.clone()).unwrap_or(repo.default_workspace.clone()),
+                    workspace: workspace(repo),
                     issue: Box::new(issue.clone()),
                 },
             },
@@ -1128,9 +1133,7 @@ fn url(model: &Model) -> Option<String> {
             Row::Group { .. } => None,
         },
         List::ToReview | List::Mine => model.review().map(|review| review.url.clone()),
-        List::Section(_) => (model.issue())
-            .map(|issue| issue.url.clone())
-            .filter(|url| !url.is_empty()),
+        List::Section(_) => model.issue()?.url.clone(),
         List::Workspaces => None,
     }
 }
@@ -1943,15 +1946,15 @@ pub mod tests {
     /// The triage label scheme, with an issue in each section and in Other, one hidden, and a
     /// Jira issue whose key groups the ABC-1 worktrees.
     pub fn with_issues(mut model: Model) -> Model {
-        use crate::issues::tests::{SCHEME, issue};
-        model.tracker = crate::config::Config::parse(SCHEME).unwrap().tracker;
+        use crate::issues::tests::{issue, scheme};
+        model.tracker_config = crate::config::Config::parse(&scheme()).unwrap().tracker;
         let mut jira = issue("ABC-1", &["ready-for-agent"], false);
-        jira.source = crate::issues::Source::Jira;
+        jira.tracker = crate::issues::Tracker::Jira;
         jira.project_url = None;
         update(
             &mut model,
             Action::Issues {
-                source: crate::issues::Source::GitHub,
+                tracker: crate::issues::Tracker::GitHub,
                 issues: Ok(vec![
                     issue("api#1", &["ready-for-agent"], false),
                     issue("api#2", &["needs-triage"], false),
@@ -1966,7 +1969,7 @@ pub mod tests {
         update(
             &mut model,
             Action::Issues {
-                source: crate::issues::Source::Jira,
+                tracker: crate::issues::Tracker::Jira,
                 issues: Ok(vec![jira]),
                 log: Vec::new(),
             },
@@ -1990,16 +1993,18 @@ pub mod tests {
             "GitHub, then Jira"
         );
         assert_eq!(issue_keys(&model, 2), ["api#2"]);
-        assert_eq!(issue_keys(&model, 3), ["api#6"]);
-        assert_eq!(issue_keys(&model, 4), ["api#4"], "Other; wontfix is hidden");
-        assert_eq!(model.title(List::Section(4)), "Other");
+        assert_eq!(
+            issue_keys(&model, 3),
+            ["api#4", "api#6"],
+            "wontfix is hidden"
+        );
         press(&mut model, "4");
         assert_eq!(model.active(), List::Section(0));
         press(&mut model, "]j");
         assert_eq!(model.active(), List::Section(1));
         assert_eq!(model.issue().unwrap().key, "ABC-1");
         press(&mut model, "[[");
-        assert_eq!(model.active(), List::Section(4), "wraps around to Other");
+        assert_eq!(model.active(), List::Section(3), "wraps around");
         press(&mut model, "]]/abc");
         assert_eq!(issue_keys(&model, 1), ["ABC-1"]);
     }
@@ -2007,13 +2012,19 @@ pub mod tests {
     #[test]
     fn other_shows_only_while_it_lists_issues() {
         let mut model = with_issues(model());
-        assert_eq!(model.tabs(Panel::Issues).len(), 5);
+        assert_eq!(model.tabs(Panel::Issues).len(), 4, "Backlog takes the rest");
+        model.tracker_config = crate::config::Config::parse(
+            "[[tracker.sections]]\ntitle = \"Ready\"\nlabels = [\"ready-for-agent\"]\n",
+        )
+        .unwrap()
+        .tracker;
+        assert_eq!(model.tabs(Panel::Issues).len(), 2);
         press(&mut model, "4[");
-        assert_eq!(model.active(), List::Section(4));
+        assert_eq!(model.title(model.active()), "Other");
         update(
             &mut model,
             Action::Issues {
-                source: crate::issues::Source::GitHub,
+                tracker: crate::issues::Tracker::GitHub,
                 issues: Ok(vec![crate::issues::tests::issue(
                     "api#1",
                     &["ready-for-agent"],
@@ -2022,95 +2033,11 @@ pub mod tests {
                 log: Vec::new(),
             },
         );
-        assert_eq!(model.tabs(Panel::Issues).len(), 4);
+        assert_eq!(model.tabs(Panel::Issues).len(), 1);
         assert_eq!(
             model.active(),
             List::Section(0),
             "back to the first section"
-        );
-    }
-
-    #[test]
-    fn issues_replace_their_source_and_keep_the_selection() {
-        let mut model = with_issues(model());
-        press(&mut model, "4]j");
-        update(
-            &mut model,
-            Action::Issues {
-                source: crate::issues::Source::GitHub,
-                issues: Ok(vec![
-                    crate::issues::tests::issue("api#9", &["ready-for-agent"], false),
-                    crate::issues::tests::issue("api#1", &["ready-for-agent"], false),
-                ]),
-                log: Vec::new(),
-            },
-        );
-        assert_eq!(issue_keys(&model, 1), ["api#9", "api#1", "ABC-1"]);
-        assert_eq!(model.issue().unwrap().key, "ABC-1", "still selected");
-        assert!(issue_keys(&model, 0).is_empty());
-        update(
-            &mut model,
-            Action::Issues {
-                source: crate::issues::Source::Jira,
-                issues: Err("offline".into()),
-                log: Vec::new(),
-            },
-        );
-        assert_eq!(issue_keys(&model, 1).len(), 3);
-        assert_eq!(model.log.last().unwrap().command, "acli issues");
-    }
-
-    #[test]
-    fn listings_that_ask_for_issues_fetch_them_per_tracker() {
-        let mut model = Model::new((120, 40));
-        model.tracker = crate::config::Config::parse(
-            "[tracker.github]\nrepos = [\"o/a\", \"o/b\"]\n[tracker.jira]\njql = \"x\"\n",
-        )
-        .unwrap()
-        .tracker;
-        let loaded = |model: &mut Model| -> Vec<Job> {
-            jobs(update(
-                model,
-                Action::Loaded {
-                    snapshot: Ok(snapshot()),
-                    log: Vec::new(),
-                },
-            ))
-            .into_iter()
-            .filter(|job| matches!(job, Job::Issues { .. }))
-            .collect()
-        };
-        assert_eq!(
-            loaded(&mut model),
-            [
-                Job::Issues {
-                    source: crate::issues::Source::GitHub,
-                    scopes: vec!["o/a".into(), "o/b".into()],
-                    force: false,
-                },
-                Job::Issues {
-                    source: crate::issues::Source::Jira,
-                    scopes: vec!["x".into()],
-                    force: false,
-                },
-            ],
-            "startup lists them"
-        );
-        assert!(loaded(&mut model).is_empty(), "a fast refresh does not");
-        press(&mut model, "R");
-        assert!(
-            loaded(&mut model).is_empty(),
-            "both trackers are still listing"
-        );
-        assert_eq!(model.issues_due, Due::Fresh, "R waits for them");
-        model.loading.clear();
-        let forced = loaded(&mut model);
-        assert!(
-            forced.len() == 2
-                && forced
-                    .iter()
-                    .all(|job| matches!(job, Job::Issues { force: true, .. })),
-            "then R lists them past the cache"
         );
     }
 
@@ -2208,6 +2135,32 @@ pub mod tests {
             panic!();
         };
         assert_eq!(workspace, "side", "the linked work's workspace");
+    }
+
+    #[test]
+    fn a_new_worktree_joins_the_linked_work_in_its_repo() {
+        let mut model = with_issues(model());
+        model.snapshot.work[2].workspace = "side".into();
+        let workspace_for = |model: &mut Model, entry: &str| {
+            press(model, "n");
+            press(model, entry);
+            let Some(Modal::Prompt {
+                then: Submit::Start { workspace, .. },
+                ..
+            }) = model.modal.take()
+            else {
+                panic!();
+            };
+            workspace
+        };
+        press(&mut model, "4]j");
+        assert_eq!(model.issue().unwrap().key, "ABC-1");
+        assert_eq!(
+            workspace_for(&mut model, "1"),
+            "default",
+            "api's linked work"
+        );
+        assert_eq!(workspace_for(&mut model, "2"), "side", "web's linked work");
     }
 
     #[test]

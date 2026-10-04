@@ -8,7 +8,7 @@ use regex::Regex;
 
 use super::app::{Action, Job, Removal, Snapshot, Work};
 use crate::config::{Config, group_from_name};
-use crate::issues::{self, Issue, Tracker};
+use crate::issues::{self, Issue, TrackerConfig};
 use crate::process::{Logged, Recorder, Runner, System};
 use crate::reviews::{self, Provider, Review, Role};
 use crate::state::{self, State};
@@ -93,20 +93,20 @@ pub fn run(context: &Context, job: Job) -> Action {
             }
         }
         Job::Issues {
-            source,
+            tracker,
             scopes,
             force,
         } => {
-            let tracker = &context.config.tracker;
+            let config = &context.config.tracker;
             let (issues, log) = match context.state() {
                 Ok(state) => {
-                    let (issues, log) = issues(&state, &recorder, tracker, source, &scopes, force);
+                    let (issues, log) = issues(&state, &recorder, config, tracker, &scopes, force);
                     (Ok(issues), log)
                 }
                 Err(err) => (Err(err.to_string()), Vec::new()),
             };
             Action::Issues {
-                source,
+                tracker,
                 issues,
                 log,
             }
@@ -175,40 +175,26 @@ fn reviews(
     (reviews, log)
 }
 
-/// A tracker's issues in every scope, with what failed for the command log, and each issue
-/// listed with only some of its labels or assignees.
+/// A tracker's issues in every scope, with what failed for the command log.
 fn issues(
     state: &State,
     recorder: &Recorder,
-    tracker: &Tracker,
-    source: issues::Source,
+    config: &TrackerConfig,
+    tracker: issues::Tracker,
     scopes: &[String],
     force: bool,
 ) -> (Vec<Issue>, Vec<Logged>) {
     let mut issues = Vec::new();
     let mut log = Vec::new();
     for scope in scopes {
-        let api = source.issues(recorder, scope.clone(), tracker);
+        let api = tracker.issues(recorder, scope.clone(), config);
         let (found, error) = issues::fetch(state, api.as_ref(), force);
+        issues.extend(found);
         log.extend(fetch_failures(
             recorder,
             error,
-            format!("{} issues", source.cli()),
+            format!("{} issues", tracker.cli()),
         ));
-        log.extend(
-            found
-                .iter()
-                .filter(|issue| issue.truncated)
-                .map(|issue| Logged {
-                    command: format!(
-                        "{} issues: {} lists only its first 100 labels or assignees",
-                        source.cli(),
-                        issue.key
-                    ),
-                    error: None,
-                }),
-        );
-        issues.extend(found);
     }
     (issues, log)
 }
@@ -734,19 +720,14 @@ mod tests {
             .once("gh", Some("[]"))
             .always("gh", None);
         let recorder = Recorder::new(&fake);
-        let tracker = Tracker::default();
+        let config = TrackerConfig::default();
         let scopes = ["o/a".to_owned(), "o/b".to_owned()];
-        let github = issues::Source::GitHub;
-        let (found, log) = issues(&state, &recorder, &tracker, github, &scopes, false);
+        let github = issues::Tracker::GitHub;
+        let (found, log) = issues(&state, &recorder, &config, github, &scopes, false);
         assert_eq!(found.len(), 3, "o/a's open issues, and no closed ones");
-        let commands: Vec<&str> = log.iter().map(|entry| entry.command.as_str()).collect();
-        assert_eq!(log.len(), 2, "{commands:?}");
-        assert!(
-            log[0].command.contains("only its first 100 labels") && log[0].error.is_none(),
-            "a truncated issue is noted"
-        );
-        assert!(log[1].command.ends_with("-f owner=o -f name=b") && log[1].error.is_some());
-        issues(&state, &recorder, &tracker, github, &scopes, false);
+        assert_eq!(log.len(), 1, "o/b's failed command");
+        assert!(log[0].command.ends_with("-f owner=o -f name=b"));
+        issues(&state, &recorder, &config, github, &scopes, false);
         assert_eq!(
             fake.calls().len(),
             4,
@@ -754,8 +735,8 @@ mod tests {
         );
         let fake = Fake::default().always("acli", Some("[{}]"));
         let recorder = Recorder::new(&fake);
-        let jira = issues::Source::Jira;
-        let (_, log) = issues(&state, &recorder, &tracker, jira, &["x".into()], false);
+        let jira = issues::Tracker::Jira;
+        let (_, log) = issues(&state, &recorder, &config, jira, &["x".into()], false);
         assert_eq!(
             log.len(),
             1,

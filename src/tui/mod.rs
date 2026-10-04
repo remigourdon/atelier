@@ -42,7 +42,7 @@ async fn drive(
 ) -> Result<()> {
     let size = terminal.size()?;
     let mut model = Model::new((size.width, size.height));
-    model.tracker = context.config.tracker.clone();
+    model.tracker_config = context.config.tracker.clone();
     let (sender, mut results) = mpsc::unbounded_channel::<Action>();
     let mut events = EventStream::new();
     let mut ticks = tokio::time::interval(Duration::from_secs(1));
@@ -217,24 +217,28 @@ mod tests {
         insta::assert_snapshot!(render(&model, 120, 30));
     }
 
-    /// The recorded GitHub issues of this repo through the triage label scheme.
+    /// The recorded GitHub issues of this repo through the label scheme docs/design.md shows.
     #[test]
     fn issues_panel_from_github() {
         use crate::issues::{parse_gh, tests};
         let mut model = loaded(120, 30);
-        model.tracker = crate::config::Config::parse(tests::SCHEME).unwrap().tracker;
+        model.tracker_config = crate::config::Config::parse(&tests::scheme())
+            .unwrap()
+            .tracker;
         let mut issues = parse_gh(tests::GH, false).unwrap();
         issues.extend(parse_gh(tests::GH_CLOSED, false).unwrap());
         update(
             &mut model,
             Action::Issues {
-                source: crate::issues::Source::GitHub,
+                tracker: crate::issues::Tracker::GitHub,
                 issues: Ok(issues),
                 log: Vec::new(),
             },
         );
-        update(&mut model, Action::Key(key('4')));
-        update(&mut model, Action::Key(key('[')));
+        // Backlog, half screen so every section fits the title.
+        for c in ['4', '[', '+'] {
+            update(&mut model, Action::Key(key(c)));
+        }
         insta::assert_snapshot!(render(&model, 120, 30));
     }
 

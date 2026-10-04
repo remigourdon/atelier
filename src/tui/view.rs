@@ -260,7 +260,7 @@ fn render_panel(frame: &mut Frame, model: &Model, palette: &Palette, panel: Pane
         };
         let empty = if loading {
             "loading…"
-        } else if matches!(list, List::Section(_)) && model.tracker.scopes().is_empty() {
+        } else if matches!(list, List::Section(_)) && model.tracker_config.scopes().is_empty() {
             "no [tracker] configured"
         } else {
             "nothing here"
@@ -622,7 +622,7 @@ fn detail(model: &Model) -> Vec<(String, String)> {
                 pair("Labels", issue.labels.join(", ")),
                 pair("Assignees", issue.assignees.join(", ")),
                 pair("Updated", issue.updated_at.clone()),
-                pair("URL", issue.url.clone()),
+                pair("URL", issue.url.clone().unwrap_or_default()),
                 pair("Project", issue.project.clone()),
             ];
             for (key, value) in [("Type", &issue.kind), ("Priority", &issue.priority)] {

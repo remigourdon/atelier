@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use tui_input::Input;
 
-use crate::issues::{self, Issue, Tracker};
+use crate::issues::{self, Issue, TrackerConfig};
 use crate::process::Logged;
 use crate::reviews::{Provider, Review, Role};
 use crate::state::Repo;
@@ -220,7 +220,7 @@ pub enum Job {
     },
     /// Lists a tracker's issues in each scope, from the cache unless `force`.
     Issues {
-        source: issues::Source,
+        tracker: issues::Tracker,
         scopes: Vec<String>,
         force: bool,
     },
@@ -248,7 +248,7 @@ pub enum Source {
     Wt,
     Git,
     Reviews(Provider),
-    Issues(issues::Source),
+    Issues(issues::Tracker),
     Run,
 }
 
@@ -258,7 +258,7 @@ impl Source {
             Source::Wt => "wt",
             Source::Git => "git",
             Source::Reviews(provider) => provider.cli(),
-            Source::Issues(source) => source.cli(),
+            Source::Issues(tracker) => tracker.cli(),
             Source::Run => "run",
         }
     }
@@ -271,7 +271,7 @@ impl Job {
             Job::Refresh { .. } => Source::Wt,
             Job::Commits(_) => Source::Git,
             Job::Reviews { provider, .. } => Source::Reviews(*provider),
-            Job::Issues { source, .. } => Source::Issues(*source),
+            Job::Issues { tracker, .. } => Source::Issues(*tracker),
             _ => Source::Run,
         }
     }
@@ -361,7 +361,7 @@ pub enum Action {
     },
     /// A tracker's issues, replacing the ones listed before.
     Issues {
-        source: issues::Source,
+        tracker: issues::Tracker,
         issues: Result<Vec<Issue>, String>,
         log: Vec<Logged>,
     },
@@ -624,7 +624,7 @@ pub struct Model {
     pub reviews: Vec<Review>,
     pub reviews_due: Due,
     /// Where issues come from and their sections.
-    pub tracker: Tracker,
+    pub tracker_config: TrackerConfig,
     /// Every tracker's issues, each source in its own order.
     pub issues: Vec<Issue>,
     pub issues_due: Due,
@@ -663,7 +663,7 @@ impl Model {
             reviews: Vec::new(),
             // At startup, so the panels fill.
             reviews_due: Due::Cached,
-            tracker: Tracker::default(),
+            tracker_config: TrackerConfig::default(),
             issues: Vec::new(),
             issues_due: Due::Cached,
             pulling: HashSet::new(),
@@ -684,12 +684,12 @@ impl Model {
 
     /// A panel's sub-tabs. Issues have one per section, then Other while it lists any.
     pub fn tabs(&self, panel: Panel) -> Vec<List> {
-        let mut sections = self.tracker.sections().len();
+        let mut sections = self.tracker_config.sections().len();
         let other = Some(sections);
         if self
             .issues
             .iter()
-            .any(|issue| self.tracker.section(issue) == other)
+            .any(|issue| self.tracker_config.section(issue) == other)
         {
             sections += 1;
         }
@@ -719,7 +719,7 @@ impl Model {
             List::Work => "Work",
             List::ToReview => "To review",
             List::Mine => "Mine",
-            List::Section(index) => self.tracker.title(index),
+            List::Section(index) => self.tracker_config.title(index),
         }
     }
 
@@ -822,7 +822,7 @@ impl Model {
         self.issues
             .iter()
             .filter(|issue| {
-                self.tracker.section(issue) == Some(index)
+                self.tracker_config.section(issue) == Some(index)
                     && self.matches(
                         list,
                         &[
