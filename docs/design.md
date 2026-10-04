@@ -21,7 +21,7 @@ src/  cli  config  state  hooks  shell  zellij  worktrunk  forge  tracker  tui/{
 
 ## State
 
-Database: `$XDG_STATE_HOME/atelier/atelier.db`, tables `workspaces`, `repos`, `items`, `tabs`, `cache`. Migrations are an ordered list applied in one transaction, tracked by `PRAGMA user_version`. Migration 1 is the baseline schema, written idempotently (including the `items.workspace` fix), so it is a no-op on databases that already have it. It does not seed a `vrac` row: the configured default workspace is created at startup, and code always writes `items.workspace` explicitly instead of relying on the legacy column default. Migrations only add things, so older binaries can still read the DB.
+Database: `$XDG_STATE_HOME/atelier/atelier.db`, tables `workspaces`, `repos`, `items`, `tabs`, `cache`. Migrations are an ordered list applied in one transaction, tracked by `PRAGMA user_version`. Migration 1 is the baseline schema, written idempotently so it is a no-op on databases that already have it. The configured default workspace is created at startup rather than seeded by a migration, and code always writes `items.workspace` explicitly instead of relying on a column default. Migrations only add things, so older binaries can still read the DB.
 
 ## Config
 
