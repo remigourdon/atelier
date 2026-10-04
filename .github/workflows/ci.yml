@@ -38,3 +38,6 @@ jobs:
       - uses: cachix/install-nix-action@v31
       - run: nix build -L
       - run: ./result/bin/atelier --help
+      - run: nix flake check -L
+      # Evaluates the Home Manager check for macOS, which this runner cannot build.
+      - run: nix eval --raw .#checks.aarch64-darwin.home-manager.drvPath

@@ -1,10 +1,21 @@
 {
   description = "A lazygit-style TUI and CLI that organise git worktrees into zellij sessions";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # Only for checks: the module itself does not depend on it.
+    home-manager = {
+      url = "github:nix-community/home-manager";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
 
   outputs =
-    { self, nixpkgs }:
+    {
+      self,
+      nixpkgs,
+      home-manager,
+    }:
     let
       forAllSystems = nixpkgs.lib.genAttrs [
         "x86_64-linux"
@@ -46,6 +57,16 @@
           };
         }
       );
+
+      homeManagerModules.default = import ./nix/home-manager.nix self;
+
+      checks = forAllSystems (system: {
+        home-manager = import ./nix/home-manager-test.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+          inherit home-manager;
+          module = self.homeManagerModules.default;
+        };
+      });
 
       devShells = forAllSystems (
         system:
