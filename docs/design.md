@@ -12,7 +12,7 @@ Goals: a fast lazygit-style TUI and CLI over worktrunk and zellij, and no assump
 Single crate. `src/tui` depends on core modules, never the reverse.
 
 ```
-src/  cli  config  state  hooks  shell  process  zellij  worktrunk  forge  tracker  tui/{app,update,view,widgets,jobs}
+src/  cli  config  state  sync  hooks  shell  process  zellij  worktrunk  forge  tracker  tui/{app,update,view,widgets,jobs}
 ```
 
 - **Processes**: every external command goes through the `process::Runner` trait, so orchestration is tested against a fake that records calls.

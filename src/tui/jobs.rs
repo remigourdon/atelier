@@ -7,11 +7,11 @@ use color_eyre::eyre::{Result, eyre};
 use regex::Regex;
 
 use super::app::{Action, Job, LogEntry, Removal, Snapshot, Work};
-use crate::config::{Config, group_from_name};
+use crate::config::Config;
 use crate::process::{Recorder, Runner, System};
 use crate::state::{self, State};
-use crate::worktrunk;
 use crate::zellij::{self, Layouts, Zellij};
+use crate::{sync, worktrunk};
 
 /// What every job needs, shared across them.
 pub struct Context {
@@ -104,7 +104,7 @@ fn commits(runner: &dyn Runner, path: &Path) -> Result<Vec<String>> {
     Ok(log.lines().map(Into::into).collect())
 }
 
-/// Records unknown worktrees, forgets vanished ones and gathers what the panels show,
+/// Syncs the recorded items with worktrunk and gathers what the panels show,
 /// with the repos that could not be listed.
 pub fn load(
     state: &State,
@@ -112,62 +112,27 @@ pub fn load(
     ticket: &Regex,
     full: bool,
 ) -> Result<(Snapshot, Vec<LogEntry>)> {
-    let runner = zellij.runner;
     // A reconcile failure (zellij not running) should not hide the worktrees.
     let _ = zellij.reconcile(state);
-    let repos = state.repos()?;
+    let synced = sync::sync(state, zellij.runner, ticket, full)?;
+    let problems = synced
+        .failures
+        .iter()
+        .map(|(repo, err)| LogEntry {
+            command: format!("wt list in {}", repo.name()),
+            error: Some(format!("{err:#}")),
+        })
+        .collect();
     let mut work = Vec::new();
-    let mut forges = std::collections::HashMap::new();
-    let mut listed = HashSet::new();
-    let mut problems = Vec::new();
-    for repo in &repos {
-        let listing = match worktrunk::list(runner, &repo.path, full) {
-            Ok(listing) => listing,
-            Err(err) => {
-                problems.push(LogEntry {
-                    command: format!("wt list in {}", repo.name()),
-                    error: Some(format!("{err:#}")),
-                });
-                // Keep its known items rather than forgetting them on a failed listing.
-                listed.extend(state.repo_items(&repo.path)?.into_iter().map(|i| i.path));
-                continue;
-            }
-        };
-        if let Some(url) = listing.forge_url {
-            forges.insert(repo.path.clone(), url);
-        }
-        for mut tree in listing.worktrees {
-            if let Ok(path) = tree.path.canonicalize() {
-                tree.path = path;
-            }
-            let name = tree
-                .branch
-                .clone()
-                .unwrap_or_else(|| state::dir_name(&tree.path));
-            let group = group_from_name(ticket, &name);
-            state.add_item(
-                &tree.path,
-                "worktree",
-                Some(&repo.path),
-                &group,
-                &repo.default_workspace,
-            )?;
-            let item = state.require_item(&tree.path)?;
-            listed.insert(tree.path.clone());
-            work.push(Work {
-                repo: repo.path.clone(),
-                repo_name: repo.name(),
-                workspace: item.workspace,
-                group: item.group,
-                tab: state.tab(&tree.path)?.is_some(),
-                tree,
-            });
-        }
-    }
-    for item in state.items()? {
-        if item.repo.is_some() && !listed.contains(&item.path) && !item.path.exists() {
-            state.remove_item(&item.path)?;
-        }
+    for tracked in synced.worktrees {
+        work.push(Work {
+            tab: state.tab(&tracked.tree.path)?.is_some(),
+            repo_name: tracked.repo.name(),
+            repo: tracked.repo.path,
+            workspace: tracked.item.workspace,
+            group: tracked.item.group,
+            tree: tracked.tree,
+        });
     }
     let mut workspaces = state.workspaces()?;
     if let Some(here) = &zellij.here
@@ -179,9 +144,9 @@ pub fn load(
     let snapshot = Snapshot {
         here: zellij.here.clone(),
         workspaces,
-        repos,
+        repos: state.repos()?,
         work,
-        forges,
+        forges: synced.forges,
     };
     Ok((snapshot, problems))
 }
@@ -310,10 +275,7 @@ fn create(
         .iter()
         .find(|tree| tree.branch.as_deref() == Some(branch))
     {
-        let path = tree
-            .path
-            .canonicalize()
-            .unwrap_or_else(|_| tree.path.clone());
+        let path = sync::canonical(&tree.path);
         state.add_item(&path, "worktree", Some(repo), group, workspace)?;
         if state.tab(&path)?.is_none() {
             zellij.open_tab(state, &path)?;
@@ -378,56 +340,23 @@ mod tests {
         {"branch":"ABC-1-x","worktree":{"path":"/r.ABC-1-x"}}]}"#;
 
     #[test]
-    fn load_records_new_worktrees_and_forgets_vanished_ones() {
+    fn load_puts_the_current_session_first_and_logs_failed_listings() {
         let state =
             State::from_connection(Connection::open_in_memory().unwrap(), "default").unwrap();
         state.add_workspace("side").unwrap();
         state.add_repo("/r", None, "default").unwrap();
-        state
-            .add_item("/r.gone", "worktree", Some(Path::new("/r")), "", "default")
-            .unwrap();
-        state
-            .add_item("/r.ABC-1-x", "worktree", Some(Path::new("/r")), "", "side")
-            .unwrap();
-        let fake = Fake::default().always("wt -C /r", Some(LISTING));
+        state.add_repo("/broken", None, "default").unwrap();
+        let fake = Fake::default()
+            .always("wt -C /r ", Some(LISTING))
+            .always("wt -C /broken", None);
         let ticket = Config::default().ticket_regex().unwrap();
         let (snapshot, problems) = load(&state, &zellij(&fake), &ticket, false).unwrap();
-        assert!(problems.is_empty());
         assert_eq!(snapshot.workspaces, ["side", "default"]);
+        let titles: Vec<_> = snapshot.work.iter().map(Work::title).collect();
+        assert_eq!(titles, ["r:main", "r:ABC-1-x"]);
         assert_eq!(snapshot.forges[Path::new("/r")], "https://forge/r");
-        let work: Vec<_> = snapshot
-            .work
-            .iter()
-            .map(|w| (w.title(), w.workspace.clone(), w.group.clone()))
-            .collect();
-        assert_eq!(
-            work,
-            [
-                ("r:main".into(), "default".into(), String::new()),
-                ("r:ABC-1-x".into(), "side".into(), String::new())
-            ],
-            "a recorded item keeps its workspace and group"
-        );
-        assert!(state.item("/r").unwrap().is_some());
-        assert!(state.item("/r.gone").unwrap().is_none());
-        assert!(load(&state, &zellij(&fake), &ticket, true).is_ok());
-        assert!(fake.calls().iter().any(|call| call.ends_with("--full")));
-    }
-
-    #[test]
-    fn a_failed_listing_keeps_the_repos_items() {
-        let state =
-            State::from_connection(Connection::open_in_memory().unwrap(), "default").unwrap();
-        state.add_repo("/r", None, "default").unwrap();
-        state
-            .add_item("/r.gone", "worktree", Some(Path::new("/r")), "", "default")
-            .unwrap();
-        let fake = Fake::default().always("wt", None);
-        let ticket = Config::default().ticket_regex().unwrap();
-        let (snapshot, problems) = load(&state, &zellij(&fake), &ticket, false).unwrap();
-        assert!(snapshot.work.is_empty());
-        assert_eq!(problems[0].command, "wt list in r");
-        assert!(state.item("/r.gone").unwrap().is_some());
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].command, "wt list in broken");
     }
 
     #[test]
