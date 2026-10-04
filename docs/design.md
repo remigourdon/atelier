@@ -138,7 +138,7 @@ Flake outputs:
 
 - `packages.default`: `rustPlatform.buildRustPackage`.
 - `devShells.default`: the nixpkgs Rust toolchain.
-- `homeManagerModules.default`:
+- `homeModules.default`:
 
 ```nix
 programs.atelier = {

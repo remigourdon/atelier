@@ -9,7 +9,7 @@ Work in progress. See [docs/design.md](docs/design.md) and [CONTEXT.md](CONTEXT.
 ```nix
 { inputs, config, pkgs, ... }:
 {
-  imports = [ inputs.atelier.homeManagerModules.default ];
+  imports = [ inputs.atelier.homeModules.default ];
 
   programs.atelier = {
     enable = true;
