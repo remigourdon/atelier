@@ -36,6 +36,14 @@ impl Provider {
         }
     }
 
+    /// Its reviews on `host`, through its CLI.
+    pub fn reviews<'a>(self, runner: &'a dyn Runner, host: String) -> Box<dyn Reviews + 'a> {
+        match self {
+            Provider::GitHub => Box::new(Gh { runner, host }),
+            Provider::GitLab => Box::new(Glab { runner, host }),
+        }
+    }
+
     /// worktrunk's shortcut for a review's branch: `pr:12` or `mr:12`.
     pub fn shortcut(self, number: u64) -> String {
         match self {
@@ -90,7 +98,7 @@ pub struct Review {
     pub updated_at: String,
 }
 
-pub trait Forge {
+pub trait Reviews {
     fn provider(&self) -> Provider;
 
     /// The host it talks to, such as `github.com`.
@@ -121,11 +129,14 @@ pub struct Gh<'a> {
     pub host: String,
 }
 
-const GH_QUERY: &str = "query($q: String!) { search(query: $q, type: ISSUE, first: 100) { nodes { \
-    ... on PullRequest { number title url isDraft updatedAt headRefName baseRefName \
-    author { login } repository { nameWithOwner url } } } } }";
+/// `--paginate` pages through it by `$endCursor` and `pageInfo`.
+const GH_QUERY: &str = "query($q: String!, $endCursor: String) { \
+    search(query: $q, type: ISSUE, first: 100, after: $endCursor) { \
+    nodes { ... on PullRequest { number title url isDraft updatedAt headRefName baseRefName \
+    author { login } repository { nameWithOwner url } } } \
+    pageInfo { hasNextPage endCursor } } }";
 
-impl Forge for Gh<'_> {
+impl Reviews for Gh<'_> {
     fn provider(&self) -> Provider {
         Provider::GitHub
     }
@@ -148,6 +159,8 @@ impl Forge for Gh<'_> {
                 "--hostname",
                 &self.host,
                 "graphql",
+                "--paginate",
+                "--slurp",
                 "-f",
                 &query,
                 "-f",
@@ -174,7 +187,7 @@ impl Glab<'_> {
     }
 }
 
-impl Forge for Glab<'_> {
+impl Reviews for Glab<'_> {
     fn provider(&self) -> Provider {
         Provider::GitLab
     }
@@ -195,14 +208,12 @@ impl Forge for Glab<'_> {
     }
 }
 
-/// Parses `gh api graphql`'s search, skipping nodes that are not pull requests.
+/// Parses the pages of `gh api graphql`'s search, skipping nodes that are not pull requests.
 pub fn parse_gh(json: &str, role: Role) -> Result<Vec<Review>> {
-    let raw: raw::GhResponse = serde_json::from_str(json).wrap_err("parsing gh reviews")?;
-    Ok(raw
-        .data
-        .search
-        .nodes
+    let pages: Vec<raw::GhResponse> = serde_json::from_str(json).wrap_err("parsing gh reviews")?;
+    Ok(pages
         .into_iter()
+        .flat_map(|page| page.data.search.nodes)
         .filter_map(|node| {
             Some(Review {
                 provider: Provider::GitHub,
@@ -267,7 +278,7 @@ pub fn parse_glab(json: &str, role: Role) -> Result<Vec<Review>> {
 /// A failed fetch falls back to the cache at any age and also returns the error.
 pub fn fetch(
     state: &State,
-    forge: &dyn Forge,
+    forge: &dyn Reviews,
     role: Role,
     force: bool,
 ) -> (Vec<Review>, Option<Report>) {
@@ -389,9 +400,14 @@ mod tests {
     const GLAB: &str = include_str!("../tests/fixtures/glab-reviews.json");
 
     #[test]
-    fn gh_search_parses_pull_requests_only() {
+    fn gh_search_parses_every_page_of_pull_requests_only() {
         let reviews = parse_gh(GH, Role::Mine).unwrap();
-        assert_eq!(reviews.len(), 2, "the empty node is not a pull request");
+        let numbers: Vec<u64> = reviews.iter().map(|review| review.number).collect();
+        assert_eq!(
+            numbers,
+            [10, 9, 8],
+            "two pages; the empty node is no pull request"
+        );
         let first = &reviews[0];
         assert_eq!(first.number, 10);
         assert_eq!(first.project, "remigourdon/atelier");
@@ -402,7 +418,7 @@ mod tests {
         );
         assert_eq!(first.author, "remigourdon");
         assert_eq!(first.role, Role::Mine);
-        assert!(!first.draft && reviews[1].draft);
+        assert!(!first.draft && reviews[2].draft);
         assert!(parse_gh("{\"errors\":[]}", Role::Mine).is_err());
     }
 
@@ -432,9 +448,11 @@ mod tests {
             runner: &fake,
             host: "github.com".into(),
         };
-        assert_eq!(gh.reviews(Role::ToReview).unwrap().len(), 2);
+        assert_eq!(gh.reviews(Role::ToReview).unwrap().len(), 3);
         let call = &fake.calls()[0];
-        assert!(call.starts_with("gh api --hostname github.com graphql -f query="));
+        assert!(
+            call.starts_with("gh api --hostname github.com graphql --paginate --slurp -f query=")
+        );
         assert!(call.ends_with("-f q=is:pr is:open archived:false review-requested:@me"));
     }
 
@@ -477,7 +495,7 @@ mod tests {
         fail: bool,
     }
 
-    impl Forge for Counting {
+    impl Reviews for Counting {
         fn provider(&self) -> Provider {
             Provider::GitHub
         }
@@ -507,7 +525,7 @@ mod tests {
             fail: false,
         };
         let (reviews, error) = fetch(&state, &forge, Role::Mine, false);
-        assert_eq!((reviews.len(), error.is_none()), (2, true));
+        assert_eq!((reviews.len(), error.is_none()), (3, true));
         fetch(&state, &forge, Role::Mine, false);
         assert_eq!(forge.calls.get(), 1, "served from the cache");
         fetch(&state, &forge, Role::ToReview, false);
@@ -541,7 +559,7 @@ mod tests {
             fail: true,
         };
         let (reviews, error) = fetch(&state, &failing, Role::Mine, true);
-        assert_eq!(reviews.len(), 2);
+        assert_eq!(reviews.len(), 3);
         assert!(error.is_some());
     }
 }

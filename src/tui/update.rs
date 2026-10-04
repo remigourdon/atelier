@@ -11,8 +11,8 @@ use tui_input::backend::crossterm::EventHandler;
 
 use super::app::{
     Action, Binding, Cmd, Effect, FAST_REFRESH, FULL_REFRESH, Focus, Job, KEYMAP, List, MenuEntry,
-    Modal, Model, On, Panel, Popup, PopupCmd, Removal, Row, Screen, Source, Submit, Work, lookup,
-    popup_lookup,
+    Modal, Model, On, Panel, Popup, PopupCmd, Removal, ReviewsDue, Row, Screen, Source, Submit,
+    Work, lookup, popup_lookup,
 };
 use super::view::{areas, main_len, offset};
 use crate::forge::{self, Provider};
@@ -138,7 +138,9 @@ fn run(model: &mut Model, job: Job) -> Effect {
         model.since_refresh = 0;
         if full {
             model.since_full = 0;
-            model.reviews_due.get_or_insert(false);
+            if model.reviews_due == ReviewsDue::No {
+                model.reviews_due = ReviewsDue::Cached;
+            }
         }
     }
     Effect::Run(job)
@@ -147,9 +149,11 @@ fn run(model: &mut Model, job: Job) -> Effect {
 /// Lists each provider's reviews on the hosts of the registered repos, once a listing that
 /// asked for them has found those hosts.
 fn fetch_reviews(model: &mut Model) -> Vec<Effect> {
-    let Some(force) = model.reviews_due.take() else {
+    let due = std::mem::replace(&mut model.reviews_due, ReviewsDue::No);
+    if due == ReviewsDue::No {
         return Vec::new();
-    };
+    }
+    let force = due == ReviewsDue::Fresh;
     let mut effects = Vec::new();
     let mut busy = false;
     for provider in Provider::ALL {
@@ -176,7 +180,7 @@ fn fetch_reviews(model: &mut Model) -> Vec<Effect> {
     }
     // A provider still listing gets its turn at the next listing, so `R` is not lost.
     if busy {
-        model.reviews_due = Some(force);
+        model.reviews_due = due;
     }
     effects
 }
@@ -615,7 +619,7 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
         Cmd::Filter if !in_main => model.filtering = Some(list),
         Cmd::Filter => {}
         Cmd::Refresh => {
-            model.reviews_due = Some(true);
+            model.reviews_due = ReviewsDue::Fresh;
             return vec![run(model, Job::Refresh { full: true })];
         }
         Cmd::Menu => {
@@ -715,10 +719,8 @@ fn activate(model: &mut Model) -> Vec<Effect> {
             };
             let job = Job::Checkout {
                 repo: repo.path.clone(),
-                target: review.provider.shortcut(review.number),
-                branch: review.branch.clone(),
                 workspace: repo.default_workspace.clone(),
-                title: review.title.clone(),
+                review: Box::new(review.clone()),
             };
             vec![run(model, job)]
         }
@@ -1671,7 +1673,7 @@ pub mod tests {
             loaded(&mut model).is_empty(),
             "the full refresh is still listing reviews"
         );
-        assert_eq!(model.reviews_due, Some(true), "R waits for it");
+        assert_eq!(model.reviews_due, ReviewsDue::Fresh, "R waits for it");
         model.loading.clear();
         let [Job::Reviews { force: true, .. }] = loaded(&mut model)[..] else {
             panic!("then R lists them past the cache");
@@ -1720,10 +1722,13 @@ pub mod tests {
             jobs(press(&mut model, " ")),
             [Job::Checkout {
                 repo: "/src/api".into(),
-                target: "pr:2".into(),
-                branch: "change-2".into(),
                 workspace: "default".into(),
-                title: "Change 2".into(),
+                review: Box::new(review(
+                    Provider::GitHub,
+                    Role::ToReview,
+                    2,
+                    "https://forge/api"
+                )),
             }]
         );
         press(&mut model, "j");

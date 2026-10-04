@@ -78,34 +78,13 @@ pub fn run(context: &Context, job: Job) -> Action {
             hosts,
             force,
         } => {
-            let fetched = context
-                .state()
-                .map(|state| reviews(&state, &recorder, provider, &hosts, force));
-            let mut log: Vec<Logged> = recorder
-                .take()
-                .into_iter()
-                .filter(|entry| entry.error.is_some())
-                .collect();
-            let reviews = fetched
-                .map(|(reviews, errors)| {
-                    for error in errors {
-                        // A failed command is logged already; a parse error is not.
-                        let error = format!("{error:#}");
-                        if !log.iter().any(|entry| {
-                            entry
-                                .error
-                                .as_ref()
-                                .is_some_and(|e| error.contains(e.as_str()))
-                        }) {
-                            log.push(Logged {
-                                command: format!("{} reviews", provider.cli()),
-                                error: Some(error),
-                            });
-                        }
-                    }
-                    reviews
-                })
-                .map_err(|err| err.to_string());
+            let (reviews, log) = match context.state() {
+                Ok(state) => {
+                    let (reviews, log) = reviews(&state, &recorder, provider, &hosts, force);
+                    (Ok(reviews), log)
+                }
+                Err(err) => (Err(err.to_string()), Vec::new()),
+            };
             Action::Reviews {
                 provider,
                 reviews,
@@ -134,29 +113,37 @@ pub fn attach(context: &Context, session: &str) -> Vec<Logged> {
     recorder.take()
 }
 
-/// A provider's reviews in both roles on every host, with the fetches that failed.
+/// A provider's reviews in both roles on every host, with what failed for the command log:
+/// each failed command, and a fetch's own error when no command failed, as when parsing.
 fn reviews(
     state: &State,
-    runner: &dyn Runner,
+    recorder: &Recorder,
     provider: Provider,
     hosts: &[String],
     force: bool,
-) -> (Vec<Review>, Vec<color_eyre::Report>) {
+) -> (Vec<Review>, Vec<Logged>) {
     let mut reviews = Vec::new();
-    let mut errors = Vec::new();
+    let mut log = Vec::new();
     for host in hosts {
-        let host = host.clone();
-        let forge: Box<dyn forge::Forge> = match provider {
-            Provider::GitHub => Box::new(forge::Gh { runner, host }),
-            Provider::GitLab => Box::new(forge::Glab { runner, host }),
-        };
+        let forge = provider.reviews(recorder, host.clone());
         for role in Role::ALL {
             let (found, error) = forge::fetch(state, forge.as_ref(), role, force);
             reviews.extend(found);
-            errors.extend(error);
+            let failed: Vec<Logged> = (recorder.take().into_iter())
+                .filter(|entry| entry.error.is_some())
+                .collect();
+            if let Some(error) = error
+                && failed.is_empty()
+            {
+                log.push(Logged {
+                    command: format!("{} reviews", provider.cli()),
+                    error: Some(format!("{error:#}")),
+                });
+            }
+            log.extend(failed);
         }
     }
-    (reviews, errors)
+    (reviews, log)
 }
 
 fn commits(runner: &dyn Runner, path: &Path) -> Result<Vec<String>> {
@@ -263,16 +250,15 @@ fn execute(context: &Context, state: &mut State, zellij: &Zellij, job: Job) -> R
         } => create(state, zellij, &repo, &branch, &workspace, &group),
         Job::Checkout {
             repo,
-            target,
-            branch,
             workspace,
-            title,
+            review,
         } => {
-            let mut group = group_from_name(&context.ticket, &branch);
+            // The title is a hint when the branch names no ticket.
+            let mut group = group_from_name(&context.ticket, &review.branch);
             if group.is_empty() {
-                group = group_from_name(&context.ticket, &title);
+                group = group_from_name(&context.ticket, &review.title);
             }
-            checkout(state, zellij, &repo, &target, &branch, &workspace, &group)
+            checkout(state, zellij, &repo, &review, &workspace, &group)
         }
         Job::Remove(removals) => failures(
             removals
@@ -358,12 +344,13 @@ fn checkout(
     state: &State,
     zellij: &Zellij,
     repo: &Path,
-    target: &str,
-    branch: &str,
+    review: &Review,
     workspace: &str,
     group: &str,
 ) -> Result<()> {
-    let path = switch(state, zellij, repo, &[target], branch, workspace, group)?
+    let target = review.provider.shortcut(review.number);
+    let branch = &review.branch;
+    let path = switch(state, zellij, repo, &[&target], branch, workspace, group)?
         .ok_or_else(|| eyre!("wt switch {target} left no worktree on {branch}"))?;
     zellij.open_tab(state, &path)?;
     Ok(())
@@ -569,18 +556,31 @@ mod tests {
                 Some(r#"[{"tab_id":4,"position":1,"name":"x"}]"#),
             )
             .always("zellij --session side action list-panes", Some("[]"));
-        let run = |target: &str, branch: &str| {
+        let run = |number: u64, branch: &str| {
+            let review = Review {
+                provider: Provider::GitHub,
+                role: Role::ToReview,
+                number,
+                title: String::new(),
+                url: String::new(),
+                project: "o/r".into(),
+                project_url: String::new(),
+                author: String::new(),
+                branch: branch.into(),
+                base: "main".into(),
+                draft: false,
+                updated_at: String::new(),
+            };
             checkout(
                 &state,
                 &zellij(&fake),
                 Path::new("/r"),
-                target,
-                branch,
+                &review,
                 "default",
                 "ABC-1",
             )
         };
-        run("pr:12", "ABC-1-x").unwrap();
+        run(12, "ABC-1-x").unwrap();
         let calls = fake.calls();
         assert_eq!(
             calls[0],
@@ -590,7 +590,7 @@ mod tests {
             calls.contains(&"zellij --session side action go-to-tab-by-id 4".into()),
             "an existing worktree's tab is focused: {calls:?}"
         );
-        let error = run("pr:13", "gone").unwrap_err();
+        let error = run(13, "gone").unwrap_err();
         assert!(error.to_string().contains("no worktree on gone"));
     }
 
@@ -602,13 +602,34 @@ mod tests {
         let fake = Fake::default()
             .always("gh api --hostname a", Some(gh))
             .always("gh api --hostname b", None);
+        let recorder = Recorder::new(&fake);
         let hosts = ["a".to_owned(), "b".to_owned()];
-        let (found, errors) = reviews(&state, &fake, Provider::GitHub, &hosts, false);
-        assert_eq!(found.len(), 4, "both roles on host a");
-        assert_eq!(errors.len(), 2, "both roles on host b");
+        let (found, log) = reviews(&state, &recorder, Provider::GitHub, &hosts, false);
+        assert_eq!(found.len(), 6, "both roles on host a");
+        assert_eq!(log.len(), 2, "each failed command on host b, once");
+        assert!(
+            log.iter()
+                .all(|entry| entry.command.starts_with("gh api --hostname b"))
+        );
         assert_eq!(fake.calls().len(), 4);
-        reviews(&state, &fake, Provider::GitHub, &hosts, false);
+        reviews(&state, &recorder, Provider::GitHub, &hosts, false);
         assert_eq!(fake.calls().len(), 6, "only the failed host is asked again");
+        let fake = Fake::default().always("gh", Some("not json"));
+        let recorder = Recorder::new(&fake);
+        let (_, log) = reviews(&state, &recorder, Provider::GitHub, &["c".into()], false);
+        assert_eq!(
+            log.len(),
+            2,
+            "a parse error is logged though its command succeeded"
+        );
+        assert_eq!(log[0].command, "gh reviews");
+        assert!(
+            log[0]
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("parsing gh reviews")
+        );
     }
 
     #[test]

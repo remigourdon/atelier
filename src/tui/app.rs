@@ -198,15 +198,22 @@ pub enum Job {
         hosts: Vec<String>,
         force: bool,
     },
-    /// Checks out a review's branch with `wt switch pr:N` or `mr:N` and focuses its tab.
+    /// Checks out a review's branch with `wt switch pr:N` or `mr:N` in its registered repo and
+    /// workspace, and focuses its tab.
     Checkout {
         repo: PathBuf,
-        target: String,
-        branch: String,
         workspace: String,
-        /// The review's title, a group hint when the branch names no ticket.
-        title: String,
+        review: Box<Review>,
     },
+}
+
+/// Whether the next worktree listing also lists reviews, and whether from the cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewsDue {
+    No,
+    Cached,
+    /// Past the cache, as `R` asks.
+    Fresh,
 }
 
 /// What the hint bar shows as loading: worktree, commit and review listings, or actions.
@@ -566,8 +573,7 @@ pub struct Model {
     pub commits: HashMap<PathBuf, Vec<String>>,
     /// Both providers' reviews in both roles, most recently updated first.
     pub reviews: Vec<Review>,
-    /// Whether the next listing also lists reviews, and whether past the cache.
-    pub reviews_due: Option<bool>,
+    pub reviews_due: ReviewsDue,
     /// Worktrees with a pull in flight, which show a spinner.
     pub pulling: HashSet<PathBuf>,
     /// The spinner's frame, advanced each tick.
@@ -601,7 +607,8 @@ impl Model {
             loading: BTreeMap::new(),
             commits: HashMap::new(),
             reviews: Vec::new(),
-            reviews_due: Some(false),
+            // At startup, so the panel fills.
+            reviews_due: ReviewsDue::Cached,
             pulling: HashSet::new(),
             frame: 0,
             modal: None,

@@ -1,41 +1,75 @@
-{
-  "data": {
-    "search": {
-      "nodes": [
-        {
-          "number": 10,
-          "title": "Phase 2: TUI frame, Workspaces and Work",
-          "url": "https://github.com/remigourdon/atelier/pull/10",
-          "isDraft": false,
-          "updatedAt": "2026-10-04T16:55:46Z",
-          "headRefName": "phase-2-tui",
-          "baseRefName": "main",
-          "author": {
-            "login": "remigourdon"
+[
+  {
+    "data": {
+      "search": {
+        "nodes": [
+          {
+            "number": 10,
+            "title": "Phase 2: TUI frame, Workspaces and Work",
+            "url": "https://github.com/remigourdon/atelier/pull/10",
+            "isDraft": false,
+            "updatedAt": "2026-10-04T16:55:46Z",
+            "headRefName": "phase-2-tui",
+            "baseRefName": "main",
+            "author": {
+              "login": "remigourdon"
+            },
+            "repository": {
+              "nameWithOwner": "remigourdon/atelier",
+              "url": "https://github.com/remigourdon/atelier"
+            }
           },
-          "repository": {
-            "nameWithOwner": "remigourdon/atelier",
-            "url": "https://github.com/remigourdon/atelier"
+          {
+            "number": 9,
+            "title": "Phase 1: core, CLI and hooks",
+            "url": "https://github.com/remigourdon/atelier/pull/9",
+            "isDraft": false,
+            "updatedAt": "2026-10-04T15:50:36Z",
+            "headRefName": "phase-1-core",
+            "baseRefName": "main",
+            "author": {
+              "login": "remigourdon"
+            },
+            "repository": {
+              "nameWithOwner": "remigourdon/atelier",
+              "url": "https://github.com/remigourdon/atelier"
+            }
           }
-        },
-        {
-          "number": 69,
-          "title": "Add SSH access and a Blink-friendly zellij to the desktop",
-          "url": "https://github.com/remigourdon/configue/pull/69",
-          "isDraft": true,
-          "updatedAt": "2026-10-04T13:06:49Z",
-          "headRefName": "add-ssh-server-to-nixos-desktop",
-          "baseRefName": "main",
-          "author": {
-            "login": "remigourdon"
+        ],
+        "pageInfo": {
+          "hasNextPage": true,
+          "endCursor": "Y3Vyc29yOjI="
+        }
+      }
+    }
+  },
+  {
+    "data": {
+      "search": {
+        "nodes": [
+          {
+            "number": 8,
+            "title": "Phase 0: scaffold",
+            "url": "https://github.com/remigourdon/atelier/pull/8",
+            "isDraft": true,
+            "updatedAt": "2026-10-04T15:13:06Z",
+            "headRefName": "phase-0-scaffold",
+            "baseRefName": "main",
+            "author": {
+              "login": "remigourdon"
+            },
+            "repository": {
+              "nameWithOwner": "remigourdon/atelier",
+              "url": "https://github.com/remigourdon/atelier"
+            }
           },
-          "repository": {
-            "nameWithOwner": "remigourdon/configue",
-            "url": "https://github.com/remigourdon/configue"
-          }
-        },
-        {}
-      ]
+          {}
+        ],
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        }
+      }
     }
   }
-}
+]
