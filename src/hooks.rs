@@ -125,6 +125,10 @@ pub fn handle(
         bail!("hook payload has neither primary_worktree_path nor repo_path");
     };
     let repo_path = resolve(repo_path);
+    // A carnet is never a repo: worktrees made of it are not tracked.
+    if state.item(&repo_path)?.is_some_and(|item| item.is_carnet()) {
+        return Ok(None);
+    }
     let known = |name: &&String| state.has_workspace(name).unwrap_or(false);
     let here = (hints.workspace.iter().find(known))
         .or(zellij.here.iter().find(known))
@@ -291,6 +295,19 @@ mod tests {
             .run(&fake, Some("default"), Phase::PreSwitch, "ABC-1-x")
             .unwrap();
         assert_eq!(tab.session, "w");
+    }
+
+    #[test]
+    fn worktrees_of_a_carnet_are_not_tracked() {
+        let w = world();
+        w.state
+            .add_item(w.path("repo"), "carnet", None, "", "w")
+            .unwrap();
+        let fake = w.fake();
+        assert_eq!(w.run(&fake, Some("w"), Phase::PreStart, "ABC-1-x"), None);
+        assert_eq!(w.state.repos().unwrap(), []);
+        assert_eq!(w.state.item(w.path("wt")).unwrap(), None);
+        assert_eq!(fake.calls(), Vec::<String>::new());
     }
 
     #[test]

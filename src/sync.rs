@@ -71,7 +71,8 @@ pub fn sync(state: &State, runner: &dyn Runner, ticket: &Regex, full: bool) -> R
         }
     }
     for item in state.items()? {
-        if item.repo.is_some() && !listed.contains(&item.path) && !item.path.exists() {
+        // A carnet whose folder is gone was deleted on purpose.
+        if !listed.contains(&item.path) && !item.path.exists() {
             state.remove_item(&item.path)?;
         }
     }
@@ -129,6 +130,22 @@ mod tests {
         assert!(state.item("/r.gone").unwrap().is_none());
         sync(&state, &fake, &ticket(), true).unwrap();
         assert!(fake.calls().iter().any(|call| call.ends_with("--full")));
+    }
+
+    #[test]
+    fn forgets_carnets_whose_folder_is_gone() {
+        let state = state();
+        let dir = tempfile::tempdir().unwrap();
+        state
+            .add_item(dir.path(), "carnet", None, "", "default")
+            .unwrap();
+        state
+            .add_item("/gone-carnet", "carnet", None, "", "default")
+            .unwrap();
+        let fake = Fake::default().always("wt -C /r", Some(LISTING));
+        sync(&state, &fake, &ticket(), false).unwrap();
+        assert!(state.item(dir.path()).unwrap().is_some());
+        assert!(state.item("/gone-carnet").unwrap().is_none());
     }
 
     #[test]

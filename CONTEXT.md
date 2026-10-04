@@ -7,7 +7,7 @@ Atelier organises git worktrees into zellij sessions, on top of worktrunk (`wt`)
 - **Item** — something atelier can open in a tab: a worktree or a carnet. Each item belongs to exactly one workspace.
 - **Worktree** — a git worktree of a registered repo, created and removed through worktrunk.
 - **Main worktree** — a repo's primary checkout. Always listed.
-- **Carnet** — an investigation folder `<root>/YYYY-MM-DD-<name>` that is its own git repo. Optional.
+- **Carnet** — an investigation folder `<root>/YYYY-MM-DD-[KEY-]<name>` that is its own git repo, with only its main worktree. An item of its own kind, never a registered repo: worktrees made of it by hand are not tracked. Its group comes from the ticket key right after the date. Optional.
 - **Group** — a label shared by items about the same ticket, derived from a ticket key (`ABC-123`) in the branch or name, or set by hand.
 - **Tab** — the zellij tab opened for an item, recorded as session, tab id and anchor pane id.
 - **Anchor pane** — the pane named `editor` in the worktree layout; atelier finds a tab's pane by this name.

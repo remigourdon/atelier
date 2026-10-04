@@ -156,9 +156,9 @@ mod tests {
         model.size = (width, height);
         let path = model.snapshot.work[1].path().clone();
         model.snapshot.work[1].tab = true;
-        model.snapshot.work[1].tree.dirty = true;
-        model.snapshot.work[1].tree.symbols = "!".into();
-        model.snapshot.work[0].tree.upstream = Some((0, 3));
+        model.snapshot.work[1].tree_mut().dirty = true;
+        model.snapshot.work[1].tree_mut().symbols = "!".into();
+        model.snapshot.work[0].tree_mut().upstream = Some((0, 3));
         update(&mut model, Action::Key(key('j')));
         update(
             &mut model,
@@ -204,7 +204,7 @@ mod tests {
     #[test]
     fn reviews_panel() {
         let mut model = loaded(120, 30);
-        model.snapshot.work[0].tree.branch = Some("change-2".into());
+        model.snapshot.work[0].tree_mut().branch = Some("change-2".into());
         update(&mut model, Action::Key(key('3')));
         insta::assert_snapshot!(render(&model, 120, 30));
     }
@@ -244,7 +244,15 @@ mod tests {
     #[test]
     fn carnet_shows_its_rendered_readme() {
         let mut model = update::tests::with_carnets(loaded(120, 30));
-        update(&mut model, Action::Key(key('G')));
+        let enter = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter);
+        for key in [key('G'), enter, key('j')] {
+            update(&mut model, Action::Key(key));
+        }
+        let readme = "# 2026-10-02-ideas\n\nWhat I found **so far**.\n";
+        update(
+            &mut model,
+            Action::Readme("/data/2026-10-02-ideas".into(), Some(readme.into())),
+        );
         model.loading.clear();
         insta::assert_snapshot!(render(&model, 120, 30));
     }

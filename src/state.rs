@@ -67,6 +67,13 @@ pub struct Item {
     pub workspace: String,
 }
 
+impl Item {
+    /// A carnet is the only item without a repo.
+    pub fn is_carnet(&self) -> bool {
+        self.repo.is_none()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tab {
     pub path: PathBuf,
@@ -167,7 +174,9 @@ impl State {
         Ok(())
     }
 
-    pub fn remove_workspace(&self, name: &str) -> Result<()> {
+    /// Removes an unused workspace. One owning carnets is removed only when `forget_carnets`,
+    /// which forgets them and keeps their folders.
+    pub fn remove_workspace(&self, name: &str, forget_carnets: bool) -> Result<()> {
         if name == self.default_workspace {
             bail!("{name} is the default workspace and cannot be removed");
         }
@@ -185,12 +194,31 @@ impl State {
         if used("SELECT 1 FROM tabs WHERE session = ?")? {
             bail!("{name} has open tabs");
         }
-        if used("SELECT 1 FROM items WHERE workspace = ?")? {
-            bail!("{name} owns items");
+        if used("SELECT 1 FROM items WHERE workspace = ? AND kind <> 'carnet'")? {
+            bail!("{name} owns worktrees");
         }
-        self.db
-            .execute("DELETE FROM workspaces WHERE name = ?", [name])?;
+        let carnets: Vec<String> = (self.workspace_carnets(name)?.iter())
+            .map(|path| path.display().to_string())
+            .collect();
+        if !carnets.is_empty() && !forget_carnets {
+            bail!("{name} owns carnets: {}", carnets.join(", "));
+        }
+        let transaction = self.db.unchecked_transaction()?;
+        transaction.execute(
+            "DELETE FROM items WHERE workspace = ? AND kind = 'carnet'",
+            [name],
+        )?;
+        transaction.execute("DELETE FROM workspaces WHERE name = ?", [name])?;
+        transaction.commit()?;
         Ok(())
+    }
+
+    /// The carnets `workspace` owns, by path.
+    pub fn workspace_carnets(&self, workspace: &str) -> Result<Vec<PathBuf>> {
+        Ok((self.carnets()?.into_iter())
+            .filter(|carnet| carnet.workspace == workspace)
+            .map(|carnet| carnet.path)
+            .collect())
     }
 
     pub fn repos(&self) -> Result<Vec<Repo>> {
@@ -252,6 +280,9 @@ impl State {
         self.require_workspace(workspace)?;
         if self.repo_by_path(path)?.is_some() {
             bail!("repo already registered: {}", path.display());
+        }
+        if self.item(path)?.is_some_and(|item| item.is_carnet()) {
+            bail!("{} is a carnet, which is never a repo", path.display());
         }
         self.check_alias(alias, path)?;
         self.db.execute(
@@ -618,10 +649,10 @@ mod tests {
     #[test]
     fn default_workspace_cannot_be_removed() {
         let state = fresh();
-        assert!(state.remove_workspace("default").is_err());
+        assert!(state.remove_workspace("default", false).is_err());
         state.add_workspace("w").unwrap();
-        state.remove_workspace("w").unwrap();
-        assert!(state.remove_workspace("w").is_err());
+        state.remove_workspace("w", false).unwrap();
+        assert!(state.remove_workspace("w", false).is_err());
     }
 
     #[test]
@@ -631,7 +662,7 @@ mod tests {
         state.add_repo("/r", None, "w").unwrap();
         assert!(
             state
-                .remove_workspace("w")
+                .remove_workspace("w", false)
                 .unwrap_err()
                 .to_string()
                 .contains("repo default")
@@ -642,11 +673,31 @@ mod tests {
             .unwrap();
         assert!(
             state
-                .remove_workspace("w")
+                .remove_workspace("w", true)
                 .unwrap_err()
                 .to_string()
-                .contains("owns items")
+                .contains("owns worktrees")
         );
+    }
+
+    #[test]
+    fn a_workspace_owning_carnets_is_removed_only_forgetting_them() {
+        let state = fresh();
+        state.add_workspace("w").unwrap();
+        state.add_item("/c1", "carnet", None, "", "w").unwrap();
+        state
+            .add_item("/c2", "carnet", None, "", "default")
+            .unwrap();
+        assert_eq!(
+            state.workspace_carnets("w").unwrap(),
+            [PathBuf::from("/c1")]
+        );
+        let error = state.remove_workspace("w", false).unwrap_err().to_string();
+        assert!(error.contains("owns carnets: /c1"), "{error}");
+        state.remove_workspace("w", true).unwrap();
+        assert!(!state.has_workspace("w").unwrap());
+        assert_eq!(state.item("/c1").unwrap(), None);
+        assert!(state.item("/c2").unwrap().is_some());
     }
 
     #[test]
@@ -740,5 +791,18 @@ mod tests {
         assert!(!state.add_item("/x", "carnet", None, "", "default").unwrap());
         assert_eq!(state.require_item("/x").unwrap().workspace, "w");
         assert!(state.add_item("/y", "carnet", None, "", "nope").is_err());
+    }
+
+    #[test]
+    fn a_carnet_is_never_registered_as_a_repo() {
+        let state = fresh();
+        state.add_item("/x", "carnet", None, "", "default").unwrap();
+        assert!(
+            (state
+                .add_repo("/x", None, "default")
+                .unwrap_err()
+                .to_string())
+            .contains("carnet"),
+        );
     }
 }

@@ -123,12 +123,16 @@ impl Config {
             .or_else(|| non_empty_var("EDITOR"))
     }
 
+    /// The ticket key pattern, undelimited.
+    pub fn ticket_pattern(&self) -> &str {
+        self.ticket_pattern
+            .as_deref()
+            .unwrap_or(DEFAULT_TICKET_PATTERN)
+    }
+
     /// The ticket key pattern, delimited so it never matches inside a longer word.
     pub fn ticket_regex(&self) -> Result<Regex> {
-        let pattern = self
-            .ticket_pattern
-            .as_deref()
-            .unwrap_or(DEFAULT_TICKET_PATTERN);
+        let pattern = self.ticket_pattern();
         Ok(Regex::new(&format!(
             "(?:^|[^A-Za-z0-9])({pattern})(?:$|[^A-Za-z0-9])"
         ))?)

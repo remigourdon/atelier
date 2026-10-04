@@ -1,34 +1,82 @@
-//! Carnets: investigation folders `<root>/YYYY-MM-DD-<name>`, each its own git repo.
+//! Carnets: investigation folders `<root>/YYYY-MM-DD-[KEY-]<name>`, each its own git repo.
 
 use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{Result, bail};
 use regex::Regex;
 
-use crate::config::group_from_name;
 use crate::process::Runner;
-use crate::state::{self, State};
+use crate::state::{State, dir_name};
 
-/// Creates `<root>/<today>-<name>` with a README titled `name`, makes it a git repo, and
-/// records it in `workspace` and `group`, else the group its name gives. Returns its path.
+/// How carnet names carry a ticket key: right after the date in a folder name, and at the
+/// start of a typed name.
+#[derive(Debug, Clone)]
+pub struct Names {
+    dated: Regex,
+    folder: Regex,
+    typed: Regex,
+    key: Regex,
+}
+
+impl Names {
+    pub fn new(ticket_pattern: &str) -> Result<Self> {
+        let key = format!("((?:{ticket_pattern}))");
+        Ok(Self {
+            dated: Regex::new(r"^\d{4}-\d{2}-\d{2}-.")?,
+            folder: Regex::new(&format!(r"^\d{{4}}-\d{{2}}-\d{{2}}-{key}(?:-|$)"))?,
+            typed: Regex::new(&format!(r"^{key}(?:[\s_-]+|$)"))?,
+            key: Regex::new(&format!("^{key}$"))?,
+        })
+    }
+
+    /// The group a carnet's folder name gives: the ticket key right after its date, or `""`.
+    pub fn group(&self, folder: &str) -> String {
+        (self.folder.captures(folder)).map_or_else(String::new, |captures| captures[1].to_owned())
+    }
+
+    /// The folder name, after the date, and the group of a carnet named `name` in `group`:
+    /// the key `name` starts with, else `group`, which also prefixes the name when it is a key.
+    fn slug(&self, name: &str, group: &str) -> (String, String) {
+        let (key, rest) = match self.typed.captures(name) {
+            Some(captures) => (captures[1].to_owned(), &name[captures[0].len()..]),
+            None => (String::new(), name),
+        };
+        let group = if key.is_empty() { group } else { &key };
+        let prefix = if self.key.is_match(group) { group } else { "" };
+        let words = rest
+            .split(|c: char| c.is_whitespace() || c == '_' || c == '-')
+            .filter(|word| !word.is_empty())
+            .map(str::to_lowercase);
+        let slug = std::iter::once(prefix.to_owned())
+            .filter(|prefix| !prefix.is_empty())
+            .chain(words)
+            .collect::<Vec<_>>()
+            .join("-");
+        (slug, group.to_owned())
+    }
+}
+
+/// Creates `<root>/<today>-[KEY-]<name in kebab case>` with a README titled `name`, makes it a
+/// git repo, and records it in `workspace`, in the group `name` starts with, else `group`.
+/// Returns its path.
 pub fn create(
     state: &State,
     runner: &dyn Runner,
-    ticket: &Regex,
+    names: &Names,
     root: &Path,
     name: &str,
     workspace: &str,
     group: &str,
 ) -> Result<PathBuf> {
     let name = name.trim();
-    if name.is_empty() {
-        bail!("a carnet name must not be empty");
-    }
     if name.contains('/') {
         bail!("a carnet name must not contain /");
     }
+    let (slug, group) = names.slug(name, group);
+    if slug.is_empty() {
+        bail!("a carnet name must not be empty");
+    }
     state.require_workspace(workspace)?;
-    let slug = name.split_whitespace().collect::<Vec<_>>().join("-");
     let path = root.join(format!("{}-{slug}", state.today()?));
     if path.exists() {
         bail!("{} already exists", path.display());
@@ -37,23 +85,38 @@ pub fn create(
     let path = path.canonicalize()?;
     std::fs::write(path.join("README.md"), format!("# {name}\n"))?;
     runner.output("git", &["-C", &path.to_string_lossy(), "init", "--quiet"])?;
-    let group = match group {
-        "" => group_from_name(ticket, name),
-        group => group.to_owned(),
-    };
     state.add_item(&path, "carnet", None, &group, workspace)?;
     Ok(path)
 }
 
-/// Records an existing folder as a carnet in `workspace`, in the group its name gives.
-/// Returns its canonical path.
-pub fn add(state: &State, ticket: &Regex, path: &Path, workspace: &str) -> Result<PathBuf> {
+/// Records a dated git repo directly under `root` as a carnet in `workspace`, in the group its
+/// name gives. Returns its canonical path.
+pub fn add(
+    state: &State,
+    names: &Names,
+    root: &Path,
+    path: &Path,
+    workspace: &str,
+) -> Result<PathBuf> {
     let path = path.canonicalize()?;
     if !path.is_dir() {
         bail!("{} is not a directory", path.display());
     }
-    let group = group_from_name(ticket, &state::dir_name(&path));
-    if !state.add_item(&path, "carnet", None, &group, workspace)? {
+    if path.parent() != Some(root.canonicalize()?.as_path()) {
+        bail!(
+            "{} is not directly under {}",
+            path.display(),
+            root.display()
+        );
+    }
+    let name = dir_name(&path);
+    if !names.dated.is_match(&name) {
+        bail!("{name} is not named YYYY-MM-DD-[KEY-]<name>: rename it first");
+    }
+    if !path.join(".git").exists() {
+        bail!("{} is not a git repo", path.display());
+    }
+    if !state.add_item(&path, "carnet", None, &names.group(&name), workspace)? {
         bail!("{} is already recorded", path.display());
     }
     Ok(path)
@@ -74,8 +137,15 @@ mod tests {
         state
     }
 
-    fn ticket() -> Regex {
-        Config::default().ticket_regex().unwrap()
+    fn names() -> Names {
+        Names::new(Config::default().ticket_pattern()).unwrap()
+    }
+
+    /// A git repo `<dir>/<name>`, as `git init` leaves it.
+    fn repo(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::create_dir_all(path.join(".git")).unwrap();
+        path
     }
 
     #[test]
@@ -86,21 +156,21 @@ mod tests {
         let path = create(
             &state,
             &fake,
-            &ticket(),
+            &names(),
             &root.path().join("Data"),
-            " ABC-12 slow login ",
+            " ABC-12 Slow login_page ",
             "w",
             "",
         )
         .unwrap();
-        let name = format!("{}-ABC-12-slow-login", state.today().unwrap());
+        let name = format!("{}-ABC-12-slow-login-page", state.today().unwrap());
         assert_eq!(
             path,
             root.path().canonicalize().unwrap().join("Data").join(&name)
         );
         assert_eq!(
             std::fs::read_to_string(path.join("README.md")).unwrap(),
-            "# ABC-12 slow login\n"
+            "# ABC-12 Slow login_page\n"
         );
         assert_eq!(
             fake.calls(),
@@ -116,8 +186,37 @@ mod tests {
             (None, "ABC-12", "w")
         );
         assert_eq!(state.carnets().unwrap(), [item]);
-        let again = create(&state, &fake, &ticket(), root.path(), "x", "w", "G-1").unwrap();
-        assert_eq!(state.require_item(&again).unwrap().group, "G-1");
+    }
+
+    #[test]
+    fn a_new_carnet_is_named_after_its_key_then_its_group() {
+        let state = state();
+        let root = tempfile::tempdir().unwrap();
+        let fake = Fake::default();
+        let today = state.today().unwrap();
+        let make = |name: &str, group: &str| {
+            let path = create(&state, &fake, &names(), root.path(), name, "w", group).unwrap();
+            let item = state.require_item(&path).unwrap();
+            let name = dir_name(&path);
+            (
+                name.strip_prefix(&format!("{today}-")).unwrap().to_owned(),
+                item.group,
+            )
+        };
+        assert_eq!(
+            make("DEF-3 logs", "GH-1"),
+            ("DEF-3-logs".into(), "DEF-3".into())
+        );
+        assert_eq!(
+            make("Login timeout", "GH-1"),
+            ("GH-1-login-timeout".into(), "GH-1".into())
+        );
+        assert_eq!(make("crash", "web#12"), ("crash".into(), "web#12".into()));
+        assert_eq!(
+            make("notes about DEF-4", ""),
+            ("notes-about-def-4".into(), "".into())
+        );
+        assert_eq!(make("XYZ-9", ""), ("XYZ-9".into(), "XYZ-9".into()));
     }
 
     #[test]
@@ -125,44 +224,56 @@ mod tests {
         let state = state();
         let root = tempfile::tempdir().unwrap();
         let fake = Fake::default();
-        let make = |name: &str| create(&state, &fake, &ticket(), root.path(), name, "w", "");
+        let make = |name: &str| create(&state, &fake, &names(), root.path(), name, "w", "");
         assert!(make("  ").unwrap_err().to_string().contains("empty"));
+        assert!(make(" _ - ").unwrap_err().to_string().contains("empty"));
         assert!(make("a/b").unwrap_err().to_string().contains("/"));
         make("notes").unwrap();
         assert!(make("notes").unwrap_err().to_string().contains("exists"));
         assert!(
-            create(&state, &fake, &ticket(), root.path(), "x", "nope", "").is_err(),
+            create(&state, &fake, &names(), root.path(), "x", "nope", "").is_err(),
             "an unknown workspace"
         );
     }
 
     #[test]
-    fn adding_records_an_existing_folder_once() {
+    fn a_carnets_group_is_the_key_right_after_its_date() {
+        let names = names();
+        assert_eq!(names.group("2026-01-02-ORD-7-crash"), "ORD-7");
+        assert_eq!(names.group("2026-01-02-ORD-7"), "ORD-7");
+        assert_eq!(names.group("2026-01-02-crash-ORD-7"), "");
+        assert_eq!(names.group("2026-01-02-ORD-7x"), "");
+        assert_eq!(names.group("ORD-7-crash"), "");
+    }
+
+    #[test]
+    fn adding_records_a_dated_repo_under_the_root_once() {
         let state = state();
         let dir = tempfile::tempdir().unwrap();
-        let folder = dir.path().join("2026-01-02-ORD-7-crash");
-        std::fs::create_dir(&folder).unwrap();
-        let path = add(&state, &ticket(), &folder, "w").unwrap();
+        let root = dir.path().join("Data");
+        let folder = repo(&root, "2026-01-02-ORD-7-crash");
+        let path = add(&state, &names(), &root, &folder, "w").unwrap();
         assert_eq!(path, folder.canonicalize().unwrap());
         let item = state.require_item(&path).unwrap();
         assert_eq!(
             (item.group.as_str(), item.workspace.as_str()),
             ("ORD-7", "w")
         );
-        assert!(
-            add(&state, &ticket(), &folder, "w")
+        let error = |path: &Path| {
+            add(&state, &names(), &root, path, "w")
                 .unwrap_err()
                 .to_string()
-                .contains("already")
-        );
-        assert!(add(&state, &ticket(), &dir.path().join("missing"), "w").is_err());
-        let file = dir.path().join("file");
+        };
+        assert!(error(&folder).contains("already"));
+        assert!(add(&state, &names(), &root, &root.join("missing"), "w").is_err());
+        let file = root.join("file");
         std::fs::write(&file, "").unwrap();
-        assert!(
-            add(&state, &ticket(), &file, "w")
-                .unwrap_err()
-                .to_string()
-                .contains("not a directory")
-        );
+        assert!(error(&file).contains("not a directory"));
+        let plain = root.join("2026-01-03-plain");
+        std::fs::create_dir(&plain).unwrap();
+        assert!(error(&plain).contains("not a git repo"));
+        assert!(error(&repo(&root, "crash")).contains("YYYY-MM-DD-"));
+        assert!(error(&repo(dir.path(), "2026-01-04-out")).contains("not directly under"));
+        assert!(error(&repo(&root, "2026-01-05-a/2026-01-05-b")).contains("not directly under"));
     }
 }

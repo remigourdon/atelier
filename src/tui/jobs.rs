@@ -6,13 +6,12 @@ use std::path::{Path, PathBuf};
 use color_eyre::eyre::{Report, Result, eyre};
 use regex::Regex;
 
-use super::app::{Action, Job, Removal, Snapshot, Work};
+use super::app::{Action, Job, Removal, Snapshot, Work, WorkKind};
 use crate::config::{Config, group_from_name};
 use crate::issues::{self, Issue, TrackerConfig};
 use crate::process::{Logged, Recorder, Runner, System};
 use crate::reviews::{self, Provider, Review, Role};
 use crate::state::{self, State};
-use crate::worktrunk::Worktree;
 use crate::zellij::{self, Layouts, Zellij};
 use crate::{carnet, hooks, sync, worktrunk};
 
@@ -22,6 +21,7 @@ pub struct Context {
     pub db: PathBuf,
     pub layouts: Layouts,
     pub ticket: Regex,
+    pub names: carnet::Names,
 }
 
 impl Context {
@@ -29,6 +29,7 @@ impl Context {
         Ok(Self {
             layouts: Layouts::resolve(&config)?,
             ticket: config.ticket_regex()?,
+            names: carnet::Names::new(config.ticket_pattern())?,
             db: state::db_path(),
             config,
         })
@@ -74,6 +75,10 @@ pub fn run(context: &Context, job: Job) -> Action {
         Job::Commits(path) => {
             let lines = commits(&recorder, &path).unwrap_or_default();
             Action::Commits(path, lines)
+        }
+        Job::Readme(path) => {
+            let readme = std::fs::read_to_string(path.join("README.md")).ok();
+            Action::Readme(path, readme)
         }
         // Like refreshes, these run constantly: log only failures.
         Job::Reviews {
@@ -211,7 +216,7 @@ fn commits(runner: &dyn Runner, path: &Path) -> Result<Vec<String>> {
 }
 
 /// Syncs the recorded items with worktrunk and gathers what the panels show, with the carnets
-/// whose folder is there when `carnets` are enabled, and the repos that could not be listed.
+/// when `carnets` are enabled, and the repos that could not be listed.
 pub fn load(
     state: &State,
     zellij: &Zellij,
@@ -233,33 +238,29 @@ pub fn load(
     let mut work = Vec::new();
     for tracked in synced.worktrees {
         work.push(Work {
+            path: tracked.tree.path.clone(),
             tab: state.tab(&tracked.tree.path)?.is_some(),
-            repo_name: tracked.repo.name(),
-            repo: Some(tracked.repo.path),
             workspace: tracked.item.workspace,
             group: tracked.item.group,
-            tree: tracked.tree,
-            readme: None,
-        });
-    }
-    let carnets = if carnets {
-        state.carnets()?
-    } else {
-        Vec::new()
-    };
-    for item in carnets.into_iter().filter(|item| item.path.is_dir()) {
-        work.push(Work {
-            tab: state.tab(&item.path)?.is_some(),
-            repo: None,
-            repo_name: String::new(),
-            workspace: item.workspace,
-            group: item.group,
-            readme: std::fs::read_to_string(item.path.join("README.md")).ok(),
-            tree: Worktree {
-                path: item.path,
-                ..Worktree::default()
+            kind: WorkKind::Worktree {
+                repo_name: tracked.repo.name(),
+                repo: tracked.repo.path,
+                tree: Box::new(tracked.tree),
             },
         });
+    }
+    // Sync forgot the carnets whose folder is gone.
+    let all_carnets = state.carnets()?;
+    if carnets {
+        for item in &all_carnets {
+            work.push(Work {
+                path: item.path.clone(),
+                tab: state.tab(&item.path)?.is_some(),
+                workspace: item.workspace.clone(),
+                group: item.group.clone(),
+                kind: WorkKind::Carnet,
+            });
+        }
     }
     let mut workspaces = state.workspaces()?;
     if let Some(here) = &zellij.here
@@ -273,6 +274,7 @@ pub fn load(
         workspaces,
         repos: state.repos()?,
         work,
+        carnets: all_carnets,
         forges: synced.forges,
     };
     Ok((snapshot, problems))
@@ -292,7 +294,11 @@ fn execute(context: &Context, state: &mut State, zellij: &Zellij, job: Job) -> R
         }
     };
     match job {
-        Job::Refresh { .. } | Job::Commits(_) | Job::Reviews { .. } | Job::Issues { .. } => {
+        Job::Refresh { .. }
+        | Job::Commits(_)
+        | Job::Readme(_)
+        | Job::Reviews { .. }
+        | Job::Issues { .. } => {
             unreachable!("run handles these")
         }
         Job::Open(paths) => failures(
@@ -351,7 +357,7 @@ fn execute(context: &Context, state: &mut State, zellij: &Zellij, job: Job) -> R
             let path = carnet::create(
                 state,
                 runner,
-                &context.ticket,
+                &context.names,
                 &root,
                 &name,
                 &workspace,
@@ -405,7 +411,7 @@ fn execute(context: &Context, state: &mut State, zellij: &Zellij, job: Job) -> R
             state.remove_repo(&repo)
         }
         Job::AddWorkspace(name) => state.add_workspace(&name),
-        Job::RemoveWorkspace(name) => state.remove_workspace(&name),
+        Job::RemoveWorkspace(name) => state.remove_workspace(&name, true),
         Job::SwitchWorkspace(name) => zellij.open_session(&name),
         Job::Browse(url) => browse(context, runner, &url),
     }
@@ -519,12 +525,12 @@ fn switch(
 
 /// Removes a worktree through worktrunk, or forgets a carnet and leaves its folder.
 fn remove(state: &State, zellij: &Zellij, removal: &Removal) -> Result<()> {
-    if let Some(repo) = &removal.repo {
-        let repo = repo.to_string_lossy();
+    if let Some(worktree) = &removal.worktree {
+        let repo = worktree.repo.to_string_lossy();
         let path = removal.path.to_string_lossy();
-        let target = removal.branch.as_deref().unwrap_or(&path);
+        let target = worktree.branch.as_deref().unwrap_or(&path);
         let mut args = vec!["-C", &repo, "remove", "--foreground", "--yes"];
-        if removal.force {
+        if worktree.force {
             args.push("--force");
         }
         args.push(target);
@@ -558,6 +564,7 @@ mod tests {
 
     use super::*;
     use crate::process::fake::Fake;
+    use crate::tui::app::RemovedWorktree;
 
     fn zellij(fake: &Fake) -> Zellij<'_> {
         Zellij {
@@ -843,6 +850,7 @@ mod tests {
                 worktree: "W".into(),
             },
             ticket: Config::default().ticket_regex().unwrap(),
+            names: carnet::Names::new(Config::default().ticket_pattern()).unwrap(),
         };
         let fake = Fake::default();
         browse(&context, &fake, "https://forge/r").unwrap();
@@ -859,10 +867,12 @@ mod tests {
             .unwrap();
         let fake = Fake::default();
         let removal = Removal {
-            repo: Some("/r".into()),
             path: "/r.x".into(),
-            branch: Some("x".into()),
-            force: true,
+            worktree: Some(RemovedWorktree {
+                repo: "/r".into(),
+                branch: Some("x".into()),
+                force: true,
+            }),
         };
         remove(&state, &zellij(&fake), &removal).unwrap();
         assert_eq!(
@@ -879,7 +889,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let notes = dir.path().join("2026-10-01-notes");
         std::fs::create_dir(&notes).unwrap();
-        std::fs::write(notes.join("README.md"), "# notes\n").unwrap();
         let bare = dir.path().join("2026-10-02-bare");
         std::fs::create_dir(&bare).unwrap();
         for path in [&notes, &bare, &dir.path().join("gone")] {
@@ -891,17 +900,18 @@ mod tests {
         let ticket = Config::default().ticket_regex().unwrap();
         let (snapshot, _) = load(&state, &zellij(&fake), &ticket, false, false).unwrap();
         assert!(snapshot.work.is_empty());
+        assert_eq!(snapshot.carnets.len(), 2, "hidden carnets are still known");
         let (snapshot, _) = load(&state, &zellij(&fake), &ticket, false, true).unwrap();
         let carnets: Vec<_> = (snapshot.work.iter())
-            .map(|work| (work.title(), work.group.as_str(), work.readme.as_deref()))
+            .map(|work| (work.title(), work.group.as_str()))
             .collect();
         assert_eq!(
             carnets,
             [
-                ("2026-10-01-notes".into(), "G-1", Some("# notes\n")),
-                ("2026-10-02-bare".into(), "G-1", None)
+                ("2026-10-01-notes".into(), "G-1"),
+                ("2026-10-02-bare".into(), "G-1")
             ],
-            "a missing folder is not listed"
+            "a missing folder is forgotten"
         );
         assert!(snapshot.work.iter().all(Work::is_carnet));
     }
@@ -916,10 +926,8 @@ mod tests {
             .unwrap();
         let fake = Fake::default();
         let removal = Removal {
-            repo: None,
             path: dir.path().into(),
-            branch: None,
-            force: false,
+            worktree: None,
         };
         remove(&state, &zellij(&fake), &removal).unwrap();
         assert!(fake.calls().is_empty());

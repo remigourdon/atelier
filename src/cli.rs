@@ -85,6 +85,9 @@ enum Ws {
     Rm {
         #[arg(add = ArgValueCandidates::new(complete_workspaces))]
         name: String,
+        /// Forget the carnets it owns; their folders stay on disk.
+        #[arg(long)]
+        forget_carnets: bool,
     },
     /// List workspaces.
     Ls,
@@ -92,14 +95,14 @@ enum Ws {
 
 #[derive(Subcommand)]
 enum Carnet {
-    /// Create a carnet `<root>/YYYY-MM-DD-<name>`: a git repo with a README.
+    /// Create a carnet `<root>/YYYY-MM-DD-[KEY-]<name>`: a git repo with a README.
     New {
         name: String,
         /// Its workspace (default: the current session's, else the default workspace).
         #[arg(short, long, add = ArgValueCandidates::new(complete_workspaces))]
         workspace: Option<String>,
     },
-    /// Record an existing folder as a carnet.
+    /// Record a dated git repo directly under the root as a carnet.
     Add {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -169,7 +172,10 @@ fn zellij_for<'a>(config: &Config, runner: &'a dyn Runner) -> Result<Zellij<'a>>
 fn run_state(command: Command, config: &Config, state: &mut State) -> Result<()> {
     match command {
         Command::Ws(Ws::Add { name }) => state.add_workspace(&name),
-        Command::Ws(Ws::Rm { name }) => state.remove_workspace(&name),
+        Command::Ws(Ws::Rm {
+            name,
+            forget_carnets,
+        }) => state.remove_workspace(&name, forget_carnets),
         Command::Ws(Ws::Ls) => {
             for name in state.workspaces()? {
                 println!("{name}");
@@ -222,18 +228,18 @@ fn run_state(command: Command, config: &Config, state: &mut State) -> Result<()>
         }
         Command::Carnet(command) => {
             let root = config.require_carnet_root()?;
-            let ticket = config.ticket_regex()?;
+            let names = crate::carnet::Names::new(config.ticket_pattern())?;
             match command {
                 Carnet::New { name, workspace } => {
                     let workspace = item_workspace(state, workspace)?;
                     let path = crate::carnet::create(
-                        state, &System, &ticket, &root, &name, &workspace, "",
+                        state, &System, &names, &root, &name, &workspace, "",
                     )?;
                     println!("created {} in {workspace}", path.display());
                 }
                 Carnet::Add { path, workspace } => {
                     let workspace = item_workspace(state, workspace)?;
-                    let path = crate::carnet::add(state, &ticket, &path, &workspace)?;
+                    let path = crate::carnet::add(state, &names, &root, &path, &workspace)?;
                     println!("recorded {} in {workspace}", path.display());
                 }
             }

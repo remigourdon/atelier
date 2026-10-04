@@ -232,7 +232,17 @@ impl Listing {
 mod raw {
     use std::path::PathBuf;
 
+    use serde::Deserializer;
+
     use super::Deserialize;
+
+    /// A section that is `null`, as `head` and `changes` are in a repo without commits, reads
+    /// as its default.
+    fn nullable<'de, D: Deserializer<'de>, T: Default + Deserialize<'de>>(
+        deserializer: D,
+    ) -> Result<T, D::Error> {
+        Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+    }
 
     #[derive(Deserialize)]
     pub struct Listing {
@@ -257,7 +267,7 @@ mod raw {
     #[derive(Deserialize)]
     pub struct Item {
         pub branch: Option<String>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "nullable")]
         pub head: Head,
         pub worktree: Option<Tree>,
         pub upstream: Option<Upstream>,
@@ -280,7 +290,7 @@ mod raw {
         pub main: bool,
         #[serde(default)]
         pub detached: bool,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "nullable")]
         pub changes: Changes,
     }
 
@@ -394,6 +404,17 @@ mod tests {
         assert_eq!(listing.forge, None);
         assert_eq!(listing.worktrees[0].branch, None);
         assert!(Listing::parse("nope").is_err());
+    }
+
+    #[test]
+    fn listing_tolerates_a_repo_without_commits() {
+        let listing = Listing::parse(
+            r#"{"items":[{"branch":"main","head":null,
+                "worktree":{"path":"/r","main":true,"changes":null}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(listing.worktrees[0].branch.as_deref(), Some("main"));
+        assert_eq!(listing.worktrees[0].short_sha, "");
     }
 
     fn config(text: &str) -> (tempfile::TempDir, HooksConfig) {
