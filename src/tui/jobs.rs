@@ -1,0 +1,488 @@
+//! Runs jobs off the UI thread, each with its own database connection, and reports actions.
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+use color_eyre::eyre::{Result, eyre};
+use regex::Regex;
+
+use super::app::{Action, Job, LogEntry, Removal, Snapshot, Work};
+use crate::config::{Config, group_from_name};
+use crate::process::{Recorder, Runner, System};
+use crate::state::{self, State};
+use crate::worktrunk;
+use crate::zellij::{self, Layouts, Zellij};
+
+/// What every job needs, shared across them.
+pub struct Context {
+    pub config: Config,
+    pub db: PathBuf,
+    pub layouts: Layouts,
+    pub ticket: Regex,
+}
+
+impl Context {
+    pub fn new(config: Config) -> Result<Self> {
+        Ok(Self {
+            layouts: Layouts::resolve(&config)?,
+            ticket: config.ticket_regex()?,
+            db: state::db_path(),
+            config,
+        })
+    }
+
+    fn zellij<'a>(&self, runner: &'a dyn Runner) -> Zellij<'a> {
+        Zellij {
+            runner,
+            here: zellij::current_session(),
+            layouts: self.layouts.clone(),
+            anchor: self.config.anchor_pane().to_owned(),
+        }
+    }
+
+    fn state(&self) -> Result<State> {
+        State::open(&self.db, self.config.default_workspace())
+    }
+}
+
+pub fn run(context: &Context, job: Job) -> Action {
+    let recorder = Recorder::new(&System);
+    let zellij = context.zellij(&recorder);
+    let source = job.source();
+    let log = |recorder: &Recorder| -> Vec<LogEntry> {
+        recorder.take().into_iter().map(Into::into).collect()
+    };
+    match job {
+        // Refreshes and commit listings run constantly: log only their failures.
+        Job::Refresh { full } => {
+            let loaded = context
+                .state()
+                .and_then(|state| load(&state, &zellij, &context.ticket, full));
+            let mut log: Vec<LogEntry> = log(&recorder)
+                .into_iter()
+                .filter(|entry| entry.error.is_some())
+                .collect();
+            let snapshot = loaded
+                .map(|(snapshot, problems)| {
+                    log.extend(problems);
+                    snapshot
+                })
+                .map_err(|err| err.to_string());
+            Action::Loaded { snapshot, log }
+        }
+        Job::Commits(path) => {
+            let lines = commits(&recorder, &path).unwrap_or_default();
+            Action::Commits(path, lines)
+        }
+        job => {
+            let error = context
+                .state()
+                .and_then(|mut state| execute(context, &mut state, &zellij, job))
+                .err()
+                .map(|err| err.to_string());
+            Action::Finished {
+                source,
+                log: log(&recorder),
+                error,
+            }
+        }
+    }
+}
+
+/// Attaches to a session from outside zellij; the caller hands over the terminal.
+pub fn attach(context: &Context, session: &str) -> Vec<LogEntry> {
+    let recorder = Recorder::new(&System);
+    let _ = context.zellij(&recorder).open_session(session);
+    recorder.take().into_iter().map(Into::into).collect()
+}
+
+fn commits(runner: &dyn Runner, path: &Path) -> Result<Vec<String>> {
+    let path = path.to_string_lossy();
+    let log = runner.output(
+        "git",
+        &["-C", &path, "log", "-n", "20", "--format=%h %s (%cr, %an)"],
+    )?;
+    Ok(log.lines().map(Into::into).collect())
+}
+
+/// Records unknown worktrees, forgets vanished ones and gathers what the panels show,
+/// with the repos that could not be listed.
+pub fn load(
+    state: &State,
+    zellij: &Zellij,
+    ticket: &Regex,
+    full: bool,
+) -> Result<(Snapshot, Vec<LogEntry>)> {
+    let runner = zellij.runner;
+    // A reconcile failure (zellij not running) should not hide the worktrees.
+    let _ = zellij.reconcile(state);
+    let repos = state.repos()?;
+    let mut work = Vec::new();
+    let mut forges = std::collections::HashMap::new();
+    let mut listed = HashSet::new();
+    let mut problems = Vec::new();
+    for repo in &repos {
+        let listing = match worktrunk::list(runner, &repo.path, full) {
+            Ok(listing) => listing,
+            Err(err) => {
+                problems.push(LogEntry {
+                    command: format!("wt list in {}", repo.name()),
+                    error: Some(format!("{err:#}")),
+                });
+                // Keep its known items rather than forgetting them on a failed listing.
+                listed.extend(state.repo_items(&repo.path)?.into_iter().map(|i| i.path));
+                continue;
+            }
+        };
+        if let Some(url) = listing.forge_url {
+            forges.insert(repo.path.clone(), url);
+        }
+        for mut tree in listing.worktrees {
+            if let Ok(path) = tree.path.canonicalize() {
+                tree.path = path;
+            }
+            let name = tree
+                .branch
+                .clone()
+                .unwrap_or_else(|| state::dir_name(&tree.path));
+            let group = group_from_name(ticket, &name);
+            state.add_item(
+                &tree.path,
+                "worktree",
+                Some(&repo.path),
+                &group,
+                &repo.default_workspace,
+            )?;
+            let item = state.require_item(&tree.path)?;
+            listed.insert(tree.path.clone());
+            work.push(Work {
+                repo: repo.path.clone(),
+                repo_name: repo.name(),
+                workspace: item.workspace,
+                group: item.group,
+                tab: state.tab(&tree.path)?.is_some(),
+                tree,
+            });
+        }
+    }
+    for item in state.items()? {
+        if item.repo.is_some() && !listed.contains(&item.path) && !item.path.exists() {
+            state.remove_item(&item.path)?;
+        }
+    }
+    let mut workspaces = state.workspaces()?;
+    if let Some(here) = &zellij.here
+        && let Some(index) = workspaces.iter().position(|name| name == here)
+    {
+        let here = workspaces.remove(index);
+        workspaces.insert(0, here);
+    }
+    let snapshot = Snapshot {
+        here: zellij.here.clone(),
+        workspaces,
+        repos,
+        work,
+        forges,
+    };
+    Ok((snapshot, problems))
+}
+
+fn execute(context: &Context, state: &mut State, zellij: &Zellij, job: Job) -> Result<()> {
+    let runner = zellij.runner;
+    let failures = |results: Vec<Result<()>>| -> Result<()> {
+        let errors: Vec<String> = results
+            .into_iter()
+            .filter_map(|result| result.err().map(|err| err.to_string()))
+            .collect();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(eyre!(errors.join("; ")))
+        }
+    };
+    match job {
+        Job::Refresh { .. } | Job::Commits(_) => unreachable!("run handles these"),
+        Job::Open(paths) => failures(
+            paths
+                .iter()
+                .map(|path| zellij.open_tab(state, path).map(drop))
+                .collect(),
+        ),
+        Job::Close(paths) => failures(
+            paths
+                .iter()
+                .map(|path| zellij.close_tab(state, path))
+                .collect(),
+        ),
+        Job::Pull(paths) => failures(
+            paths
+                .iter()
+                .map(|path| {
+                    let path = path.to_string_lossy();
+                    runner
+                        .output("git", &["-C", &path, "pull", "--ff-only"])
+                        .map(drop)
+                })
+                .collect(),
+        ),
+        Job::Create {
+            repo,
+            branch,
+            workspace,
+            group,
+        } => create(state, runner, &repo, &branch, &workspace, &group),
+        Job::Remove(removals) => failures(
+            removals
+                .iter()
+                .map(|removal| remove(state, zellij, removal))
+                .collect(),
+        ),
+        Job::Move { paths, workspace } => failures(
+            paths
+                .iter()
+                .map(|path| {
+                    let had_tab = state.tab(path)?.is_some();
+                    zellij.close_tab(state, path)?;
+                    state.set_workspace(path, &workspace)?;
+                    if had_tab {
+                        zellij.open_tab(state, path)?;
+                    }
+                    Ok(())
+                })
+                .collect(),
+        ),
+        Job::Regroup { paths, group } => {
+            let mut repos = HashSet::new();
+            for path in &paths {
+                state.set_group(path, &group)?;
+                repos.extend(state.require_item(path)?.repo);
+            }
+            for repo in repos {
+                zellij.sync_names(state, &repo)?;
+            }
+            Ok(())
+        }
+        Job::SetAlias { repo, alias } => {
+            state.update_repo(&repo.to_string_lossy(), Some(&alias), None)?;
+            zellij.sync_names(state, &repo)
+        }
+        Job::SetRepoWorkspace { repo, workspace } => {
+            state.update_repo(&repo.to_string_lossy(), None, Some(&workspace))
+        }
+        Job::Forget(repo) => {
+            zellij.close_repo_tabs(state, &repo)?;
+            state.remove_repo(&repo)
+        }
+        Job::AddWorkspace(name) => state.add_workspace(&name),
+        Job::RemoveWorkspace(name) => state.remove_workspace(&name),
+        Job::SwitchWorkspace(name) => zellij.open_session(&name),
+        Job::Browse(url) => browse(context, &url),
+    }
+}
+
+/// Creates a worktree through worktrunk, whose hooks record it and open its tab.
+fn create(
+    state: &State,
+    runner: &dyn Runner,
+    repo: &Path,
+    branch: &str,
+    workspace: &str,
+    group: &str,
+) -> Result<()> {
+    let repo_arg = repo.to_string_lossy();
+    // Succeeds either way, so a new branch does not show as a failure in the log.
+    let exists = !runner
+        .output("git", &["-C", &repo_arg, "branch", "--list", branch])?
+        .is_empty();
+    let workspace_env = format!("ATELIER_WORKSPACE={workspace}");
+    let group_env = format!("ATELIER_GROUP_HINT={group}");
+    let mut args = vec![
+        workspace_env.as_str(),
+        &group_env,
+        "wt",
+        "-C",
+        &repo_arg,
+        "switch",
+    ];
+    if !exists {
+        args.push("--create");
+    }
+    args.extend([branch, "--no-cd", "--yes"]);
+    runner.output("env", &args)?;
+    // Without atelier's hooks installed nothing recorded it: do it here.
+    let listing = worktrunk::list(runner, repo, false)?;
+    if let Some(tree) = listing
+        .worktrees
+        .iter()
+        .find(|tree| tree.branch.as_deref() == Some(branch))
+    {
+        let path = tree
+            .path
+            .canonicalize()
+            .unwrap_or_else(|_| tree.path.clone());
+        state.add_item(&path, "worktree", Some(repo), group, workspace)?;
+    }
+    Ok(())
+}
+
+fn remove(state: &State, zellij: &Zellij, removal: &Removal) -> Result<()> {
+    let repo = removal.repo.to_string_lossy();
+    let path = removal.path.to_string_lossy();
+    let target = removal.branch.as_deref().unwrap_or(&path);
+    let mut args = vec!["-C", &repo, "remove", "--foreground", "--yes"];
+    if removal.force {
+        args.push("--force");
+    }
+    args.push(target);
+    zellij.runner.output("wt", &args)?;
+    zellij.close_tab(state, &removal.path)?;
+    state.remove_item(&removal.path)
+}
+
+fn browse(context: &Context, url: &str) -> Result<()> {
+    let opener = context.config.browser().unwrap_or_else(|| {
+        if cfg!(target_os = "macos") {
+            "open".into()
+        } else {
+            "xdg-open".into()
+        }
+    });
+    let mut words = opener.split_whitespace();
+    let program = words
+        .next()
+        .ok_or_else(|| eyre!("the browser command is empty"))?;
+    // Detached: a browser may not exit until its window closes.
+    std::process::Command::new(program)
+        .args(words)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|err| eyre!("{opener} {url}: {err}"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::Connection;
+
+    use super::*;
+    use crate::process::fake::Fake;
+
+    fn zellij(fake: &Fake) -> Zellij<'_> {
+        Zellij {
+            runner: fake,
+            here: Some("side".into()),
+            layouts: Layouts {
+                session: "S".into(),
+                worktree: "W".into(),
+            },
+            anchor: "editor".into(),
+        }
+    }
+
+    const LISTING: &str = r#"{"repo":{"forge":{"url":"https://forge/r"}},"items":[
+        {"branch":"main","worktree":{"path":"/r","main":true}},
+        {"branch":"ABC-1-x","worktree":{"path":"/r.ABC-1-x"}}]}"#;
+
+    #[test]
+    fn load_records_new_worktrees_and_forgets_vanished_ones() {
+        let state =
+            State::from_connection(Connection::open_in_memory().unwrap(), "default").unwrap();
+        state.add_workspace("side").unwrap();
+        state.add_repo("/r", None, "default").unwrap();
+        state
+            .add_item("/r.gone", "worktree", Some(Path::new("/r")), "", "default")
+            .unwrap();
+        state
+            .add_item("/r.ABC-1-x", "worktree", Some(Path::new("/r")), "", "side")
+            .unwrap();
+        let fake = Fake::default().always("wt -C /r", Some(LISTING));
+        let ticket = Config::default().ticket_regex().unwrap();
+        let (snapshot, problems) = load(&state, &zellij(&fake), &ticket, false).unwrap();
+        assert!(problems.is_empty());
+        assert_eq!(snapshot.workspaces, ["side", "default"]);
+        assert_eq!(snapshot.forges[Path::new("/r")], "https://forge/r");
+        let work: Vec<_> = snapshot
+            .work
+            .iter()
+            .map(|w| (w.title(), w.workspace.clone(), w.group.clone()))
+            .collect();
+        assert_eq!(
+            work,
+            [
+                ("r:main".into(), "default".into(), String::new()),
+                ("r:ABC-1-x".into(), "side".into(), String::new())
+            ],
+            "a recorded item keeps its workspace and group"
+        );
+        assert!(state.item("/r").unwrap().is_some());
+        assert!(state.item("/r.gone").unwrap().is_none());
+        assert!(load(&state, &zellij(&fake), &ticket, true).is_ok());
+        assert!(fake.calls().iter().any(|call| call.ends_with("--full")));
+    }
+
+    #[test]
+    fn a_failed_listing_keeps_the_repos_items() {
+        let state =
+            State::from_connection(Connection::open_in_memory().unwrap(), "default").unwrap();
+        state.add_repo("/r", None, "default").unwrap();
+        state
+            .add_item("/r.gone", "worktree", Some(Path::new("/r")), "", "default")
+            .unwrap();
+        let fake = Fake::default().always("wt", None);
+        let ticket = Config::default().ticket_regex().unwrap();
+        let (snapshot, problems) = load(&state, &zellij(&fake), &ticket, false).unwrap();
+        assert!(snapshot.work.is_empty());
+        assert_eq!(problems[0].command, "wt list in r");
+        assert!(state.item("/r.gone").unwrap().is_some());
+    }
+
+    #[test]
+    fn create_passes_the_workspace_and_group_to_the_hooks() {
+        let state =
+            State::from_connection(Connection::open_in_memory().unwrap(), "default").unwrap();
+        state.add_workspace("side").unwrap();
+        state.add_repo("/r", None, "default").unwrap();
+        let fake = Fake::default().always("wt -C /r --config-set", Some(LISTING));
+        create(&state, &fake, Path::new("/r"), "ABC-1-x", "side", "ABC-1").unwrap();
+        assert!(fake.calls().contains(
+            &"env ATELIER_WORKSPACE=side ATELIER_GROUP_HINT=ABC-1 wt -C /r switch --create ABC-1-x --no-cd --yes"
+                .into()
+        ));
+        let item = state.require_item("/r.ABC-1-x").unwrap();
+        assert_eq!(
+            (item.workspace.as_str(), item.group.as_str()),
+            ("side", "ABC-1")
+        );
+        let fake = Fake::default()
+            .always("git -C /r branch", Some("  ABC-1-x"))
+            .always("wt -C /r --config-set", Some(LISTING));
+        create(&state, &fake, Path::new("/r"), "ABC-1-x", "side", "").unwrap();
+        assert!(fake.calls()[1].ends_with("switch ABC-1-x --no-cd --yes"));
+    }
+
+    #[test]
+    fn remove_forces_dirty_worktrees_and_forgets_them() {
+        let state =
+            State::from_connection(Connection::open_in_memory().unwrap(), "default").unwrap();
+        state.add_repo("/r", None, "default").unwrap();
+        state
+            .add_item("/r.x", "worktree", Some(Path::new("/r")), "", "default")
+            .unwrap();
+        let fake = Fake::default();
+        let removal = Removal {
+            repo: "/r".into(),
+            path: "/r.x".into(),
+            branch: Some("x".into()),
+            force: true,
+        };
+        remove(&state, &zellij(&fake), &removal).unwrap();
+        assert_eq!(
+            fake.calls(),
+            ["wt -C /r remove --foreground --yes --force x"]
+        );
+        assert!(state.item("/r.x").unwrap().is_none());
+    }
+}

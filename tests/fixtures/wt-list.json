@@ -1,0 +1,110 @@
+{
+  "schema": 2,
+  "repo": {
+    "default_branch": "main",
+    "forge": {
+      "url": "https://github.com/remigourdon/atelier",
+      "provider": "github",
+      "host": "github.com",
+      "owner": "remigourdon",
+      "name": "atelier",
+      "remote": "origin"
+    }
+  },
+  "collected": {
+    "ci": false,
+    "summary": false
+  },
+  "items": [
+    {
+      "branch": "main",
+      "head": {
+        "sha": "e5c1dffcdea5d2de8196c70c604024bd4c8180cc",
+        "short_sha": "e5c1dff",
+        "subject": "Phase 1: core, CLI and hooks (#9)",
+        "committed_at": "2026-10-04T15:50:08Z"
+      },
+      "worktree": {
+        "path": "/home/remi/atelier",
+        "main": true,
+        "current": true,
+        "previous": false,
+        "detached": false,
+        "branch_mismatch": false,
+        "duplicate_branch": false,
+        "changes": {
+          "staged": false,
+          "modified": false,
+          "untracked": false,
+          "renamed": false,
+          "deleted": false,
+          "conflicted": false,
+          "diff": {
+            "added": 0,
+            "deleted": 0
+          }
+        }
+      },
+      "upstream": {
+        "remote": "origin",
+        "branch": "main",
+        "ahead": 0,
+        "behind": 2
+      },
+      "display": {
+        "state": "is_main",
+        "symbols": "^|",
+        "statusline": "main  \u001b[2m^\u001b[22m\u001b[2m|\u001b[22m"
+      }
+    },
+    {
+      "branch": "ABC-12-tui",
+      "head": {
+        "sha": "1b2c3d4e5f60718293a4b5c6d7e8f9012345678a",
+        "short_sha": "1b2c3d4",
+        "subject": "Add the TUI frame",
+        "committed_at": "2026-10-04T16:10:00Z"
+      },
+      "worktree": {
+        "path": "/home/remi/atelier.ABC-12-tui",
+        "main": false,
+        "current": false,
+        "previous": false,
+        "detached": false,
+        "branch_mismatch": false,
+        "duplicate_branch": false,
+        "changes": {
+          "staged": false,
+          "modified": true,
+          "untracked": true,
+          "renamed": false,
+          "deleted": false,
+          "conflicted": false,
+          "diff": {
+            "added": 12,
+            "deleted": 3
+          }
+        }
+      },
+      "display": {
+        "state": "ahead",
+        "symbols": "!?↑",
+        "statusline": "ABC-12-tui  !?↑"
+      }
+    },
+    {
+      "branch": "old-branch",
+      "head": {
+        "sha": "0000000000000000000000000000000000000000",
+        "short_sha": "0000000",
+        "subject": "Old work",
+        "committed_at": "2026-01-01T00:00:00Z"
+      },
+      "display": {
+        "state": "branch",
+        "symbols": "",
+        "statusline": "old-branch"
+      }
+    }
+  ]
+}

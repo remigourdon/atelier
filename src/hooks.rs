@@ -50,6 +50,26 @@ pub struct Payload {
     pub repo_path: Option<PathBuf>,
 }
 
+/// What the caller knows about a new worktree, passed through worktrunk in the environment.
+#[derive(Debug, Default)]
+pub struct Hints {
+    /// `ATELIER_GROUP_HINT`: a name to take the group from when the branch has no ticket key.
+    pub group: String,
+    /// `ATELIER_WORKSPACE`: the workspace a new worktree goes to, over the caller's session.
+    pub workspace: Option<String>,
+}
+
+impl Hints {
+    pub fn from_env() -> Self {
+        Self {
+            group: std::env::var("ATELIER_GROUP_HINT").unwrap_or_default(),
+            workspace: std::env::var("ATELIER_WORKSPACE")
+                .ok()
+                .filter(|name| !name.is_empty()),
+        }
+    }
+}
+
 /// The canonical path, resolving the parent of one that does not exist yet (pre-start).
 fn resolve(path: &Path) -> PathBuf {
     let resolved = path
@@ -69,7 +89,7 @@ pub fn handle(
     ticket: &Regex,
     phase: Phase,
     payload: &Payload,
-    group_hint: &str,
+    hints: &Hints,
 ) -> Result<Option<Tab>> {
     let path = resolve(&payload.worktree_path);
     let branch = payload
@@ -101,10 +121,10 @@ pub fn handle(
         bail!("hook payload has neither primary_worktree_path nor repo_path");
     };
     let repo_path = resolve(repo_path);
-    let here = zellij
-        .here
-        .clone()
-        .filter(|session| state.has_workspace(session).unwrap_or(false));
+    let known = |name: &&String| state.has_workspace(name).unwrap_or(false);
+    let here = (hints.workspace.iter().find(known))
+        .or(zellij.here.iter().find(known))
+        .cloned();
     let repo = match state.repo_by_path(&repo_path)? {
         Some(repo) => repo,
         None => {
@@ -121,7 +141,7 @@ pub fn handle(
     };
     let mut group = group_from_name(ticket, &branch);
     if group.is_empty() {
-        group = group_from_name(ticket, group_hint);
+        group = group_from_name(ticket, &hints.group);
     }
     let workspace = here.unwrap_or(repo.default_workspace);
     state.add_item(&path, "worktree", Some(&repo_path), &group, &workspace)?;
@@ -194,6 +214,17 @@ mod tests {
         }
 
         fn run(&self, fake: &Fake, here: Option<&str>, phase: Phase, branch: &str) -> Option<Tab> {
+            self.run_with(fake, here, phase, branch, &Hints::default())
+        }
+
+        fn run_with(
+            &self,
+            fake: &Fake,
+            here: Option<&str>,
+            phase: Phase,
+            branch: &str,
+            hints: &Hints,
+        ) -> Option<Tab> {
             let zellij = Zellij {
                 runner: fake,
                 here: here.map(Into::into),
@@ -210,7 +241,7 @@ mod tests {
                 &ticket,
                 phase,
                 &self.payload(branch),
-                "",
+                hints,
             )
             .unwrap()
         }
@@ -254,6 +285,40 @@ mod tests {
         let fake = w.fake();
         let tab = w
             .run(&fake, Some("default"), Phase::PreSwitch, "ABC-1-x")
+            .unwrap();
+        assert_eq!(tab.session, "w");
+    }
+
+    #[test]
+    fn hints_name_the_workspace_and_group_of_a_new_worktree() {
+        let w = world();
+        w.state.add_repo(w.path("repo"), None, "default").unwrap();
+        let fake = w.fake();
+        let hints = Hints {
+            group: "XYZ-9".into(),
+            workspace: Some("w".into()),
+        };
+        let tab = w
+            .run_with(&fake, Some("default"), Phase::PreStart, "plain", &hints)
+            .unwrap();
+        assert_eq!(tab.session, "w");
+        let item = w.state.require_item(w.path("wt")).unwrap();
+        assert_eq!(
+            (item.group.as_str(), item.workspace.as_str()),
+            ("XYZ-9", "w")
+        );
+    }
+
+    #[test]
+    fn an_unknown_workspace_hint_is_ignored() {
+        let w = world();
+        let fake = w.fake();
+        let hints = Hints {
+            group: String::new(),
+            workspace: Some("nope".into()),
+        };
+        let tab = w
+            .run_with(&fake, Some("w"), Phase::PreStart, "x", &hints)
             .unwrap();
         assert_eq!(tab.session, "w");
     }
