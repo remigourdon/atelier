@@ -407,6 +407,19 @@ fn detail(model: &Model) -> Vec<(String, String)> {
     }
 }
 
+/// The selected worktree's recent commits, once loaded.
+fn commits(model: &Model) -> Option<&Vec<String>> {
+    match (model.active(), model.line()?) {
+        (List::Work, Line::Item(index)) => model.commits.get(model.snapshot.work[index].path()),
+        _ => None,
+    }
+}
+
+/// How many lines the main view holds, so scrolling stops at its end.
+pub fn main_len(model: &Model) -> usize {
+    detail(model).len() + commits(model).map_or(0, |commits| commits.len() + 2)
+}
+
 fn render_main(frame: &mut Frame, model: &Model, theme: &Theme, rect: Rect) {
     let focused = model.focus == Focus::Main;
     let block = block(Text::from(" Main "), focused, theme);
@@ -421,10 +434,7 @@ fn render_main(frame: &mut Frame, model: &Model, theme: &Theme, rect: Rect) {
             ])
         })
         .collect();
-    if model.active() == List::Work
-        && let Some(Line::Item(index)) = model.line()
-        && let Some(commits) = model.commits.get(model.snapshot.work[index].path())
-    {
+    if let Some(commits) = commits(model) {
         lines.push(Text::raw(""));
         lines.push(Text::styled(
             "Recent commits",

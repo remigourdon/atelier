@@ -230,7 +230,7 @@ fn execute(context: &Context, state: &mut State, zellij: &Zellij, job: Job) -> R
             branch,
             workspace,
             group,
-        } => create(state, runner, &repo, &branch, &workspace, &group),
+        } => create(state, zellij, &repo, &branch, &workspace, &group),
         Job::Remove(removals) => failures(
             removals
                 .iter()
@@ -276,19 +276,20 @@ fn execute(context: &Context, state: &mut State, zellij: &Zellij, job: Job) -> R
         Job::AddWorkspace(name) => state.add_workspace(&name),
         Job::RemoveWorkspace(name) => state.remove_workspace(&name),
         Job::SwitchWorkspace(name) => zellij.open_session(&name),
-        Job::Browse(url) => browse(context, &url),
+        Job::Browse(url) => browse(context, runner, &url),
     }
 }
 
 /// Creates a worktree through worktrunk, whose hooks record it and open its tab.
 fn create(
     state: &State,
-    runner: &dyn Runner,
+    zellij: &Zellij,
     repo: &Path,
     branch: &str,
     workspace: &str,
     group: &str,
 ) -> Result<()> {
+    let runner = zellij.runner;
     let repo_arg = repo.to_string_lossy();
     // Succeeds either way, so a new branch does not show as a failure in the log.
     let exists = !runner
@@ -309,7 +310,7 @@ fn create(
     }
     args.extend([branch, "--no-cd", "--yes"]);
     runner.output("env", &args)?;
-    // Without atelier's hooks installed nothing recorded it: do it here.
+    // Without atelier's hooks installed nothing recorded it or opened its tab: do it here.
     let listing = worktrunk::list(runner, repo, false)?;
     if let Some(tree) = listing
         .worktrees
@@ -321,6 +322,9 @@ fn create(
             .canonicalize()
             .unwrap_or_else(|_| tree.path.clone());
         state.add_item(&path, "worktree", Some(repo), group, workspace)?;
+        if state.tab(&path)?.is_none() {
+            zellij.open_tab(state, &path)?;
+        }
     }
     Ok(())
 }
@@ -339,7 +343,7 @@ fn remove(state: &State, zellij: &Zellij, removal: &Removal) -> Result<()> {
     state.remove_item(&removal.path)
 }
 
-fn browse(context: &Context, url: &str) -> Result<()> {
+fn browse(context: &Context, runner: &dyn Runner, url: &str) -> Result<()> {
     let opener = context.config.browser().unwrap_or_else(|| {
         if cfg!(target_os = "macos") {
             "open".into()
@@ -351,16 +355,10 @@ fn browse(context: &Context, url: &str) -> Result<()> {
     let program = words
         .next()
         .ok_or_else(|| eyre!("the browser command is empty"))?;
+    let mut args: Vec<&str> = words.collect();
+    args.push(url);
     // Detached: a browser may not exit until its window closes.
-    std::process::Command::new(program)
-        .args(words)
-        .arg(url)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|err| eyre!("{opener} {url}: {err}"))?;
-    Ok(())
+    runner.spawn(program, &args)
 }
 
 #[cfg(test)]
@@ -445,8 +443,28 @@ mod tests {
             State::from_connection(Connection::open_in_memory().unwrap(), "default").unwrap();
         state.add_workspace("side").unwrap();
         state.add_repo("/r", None, "default").unwrap();
-        let fake = Fake::default().always("wt -C /r --config-set", Some(LISTING));
-        create(&state, &fake, Path::new("/r"), "ABC-1-x", "side", "ABC-1").unwrap();
+        let fake = Fake::default()
+            .always("wt -C /r --config-set", Some(LISTING))
+            .always("zellij --session side action list-tabs", Some("[]"))
+            .always("zellij --session side action new-tab", Some("4"))
+            .always(
+                "zellij --session side action list-panes",
+                Some(r#"[{"id":7,"tab_id":4,"title":"editor","pane_cwd":"/r.ABC-1-x"}]"#),
+            );
+        create(
+            &state,
+            &zellij(&fake),
+            Path::new("/r"),
+            "ABC-1-x",
+            "side",
+            "ABC-1",
+        )
+        .unwrap();
+        assert_eq!(
+            state.tab("/r.ABC-1-x").unwrap().map(|tab| tab.session),
+            Some("side".into()),
+            "without hooks, create opens the tab itself"
+        );
         assert!(fake.calls().contains(
             &"env ATELIER_WORKSPACE=side ATELIER_GROUP_HINT=ABC-1 wt -C /r switch --create ABC-1-x --no-cd --yes"
                 .into()
@@ -459,8 +477,36 @@ mod tests {
         let fake = Fake::default()
             .always("git -C /r branch", Some("  ABC-1-x"))
             .always("wt -C /r --config-set", Some(LISTING));
-        create(&state, &fake, Path::new("/r"), "ABC-1-x", "side", "").unwrap();
+        create(
+            &state,
+            &zellij(&fake),
+            Path::new("/r"),
+            "ABC-1-x",
+            "side",
+            "",
+        )
+        .unwrap();
         assert!(fake.calls()[1].ends_with("switch ABC-1-x --no-cd --yes"));
+        assert!(
+            !fake.calls().iter().any(|call| call.contains("new-tab")),
+            "the first create opened the tab"
+        );
+    }
+
+    #[test]
+    fn browse_spawns_the_configured_browser() {
+        let context = Context {
+            config: Config::parse("browser = \"firefox --new-tab\"").unwrap(),
+            db: PathBuf::new(),
+            layouts: Layouts {
+                session: "S".into(),
+                worktree: "W".into(),
+            },
+            ticket: Config::default().ticket_regex().unwrap(),
+        };
+        let fake = Fake::default();
+        browse(&context, &fake, "https://forge/r").unwrap();
+        assert_eq!(fake.calls(), ["firefox --new-tab https://forge/r"]);
     }
 
     #[test]

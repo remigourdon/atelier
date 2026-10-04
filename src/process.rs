@@ -12,6 +12,9 @@ pub trait Runner {
 
     /// Runs a command attached to the terminal, as `zellij attach` needs.
     fn interactive(&self, program: &str, args: &[&str]) -> Result<()>;
+
+    /// Starts a command detached, without waiting for it, as a browser needs.
+    fn spawn(&self, program: &str, args: &[&str]) -> Result<()>;
 }
 
 pub struct System;
@@ -37,6 +40,16 @@ impl Runner for System {
         if !status.success() {
             bail!("{program} {} failed", args.join(" "));
         }
+        Ok(())
+    }
+
+    fn spawn(&self, program: &str, args: &[&str]) -> Result<()> {
+        Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
         Ok(())
     }
 }
@@ -85,6 +98,10 @@ impl Runner for Recorder<'_> {
 
     fn interactive(&self, program: &str, args: &[&str]) -> Result<()> {
         self.record(program, args, self.inner.interactive(program, args))
+    }
+
+    fn spawn(&self, program: &str, args: &[&str]) -> Result<()> {
+        self.record(program, args, self.inner.spawn(program, args))
     }
 }
 
@@ -188,6 +205,10 @@ pub mod fake {
         }
 
         fn interactive(&self, program: &str, args: &[&str]) -> Result<()> {
+            self.output(program, args).map(drop)
+        }
+
+        fn spawn(&self, program: &str, args: &[&str]) -> Result<()> {
             self.output(program, args).map(drop)
         }
     }

@@ -11,7 +11,7 @@ use super::app::{
     Action, Cmd, Effect, FAST_REFRESH, FULL_REFRESH, Focus, Job, KEYMAP, Line, List, LogEntry,
     MenuEntry, Modal, Model, Panel, Removal, Screen, Submit, lookup,
 };
-use super::view::{areas, offset};
+use super::view::{areas, main_len, offset};
 
 pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
     match action {
@@ -218,6 +218,9 @@ fn commits(model: &mut Model) -> Vec<Effect> {
 }
 
 fn key_press(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return command(model, Cmd::Quit);
+    }
     if let Some(modal) = model.modal.take() {
         return modal_key(model, modal, key);
     }
@@ -298,6 +301,15 @@ fn modal_key(model: &mut Model, modal: Modal, key: KeyEvent) -> Vec<Effect> {
                 KeyCode::Char('k') | KeyCode::Up => selected = selected.saturating_sub(1),
                 KeyCode::Home | KeyCode::Char('<') => selected = 0,
                 KeyCode::End | KeyCode::Char('>' | 'G') => selected = last,
+                KeyCode::Char(c) => {
+                    let shortcut = entries
+                        .iter()
+                        .find(|entry| entry.key.chars().eq([c]))
+                        .map(|entry| entry.action.clone());
+                    if let Some(action) = shortcut {
+                        return update(model, action);
+                    }
+                }
                 _ => {}
             }
             model.modal = Some(Modal::Menu {
@@ -370,10 +382,12 @@ fn focus_panel(model: &mut Model, panel: Panel) -> Vec<Effect> {
     commits(model)
 }
 
+/// Scrolls the main view, stopping when its last line reaches the bottom.
 fn scroll(model: &mut Model, down: i32, right: i32) {
     let (y, x) = model.scroll;
+    let end = main_len(model).saturating_sub(main_height(model) as usize) as i32;
     model.scroll = (
-        (y as i32 + down).max(0) as u16,
+        (y as i32 + down).clamp(0, end.max(0)) as u16,
         (x as i32 + right).max(0) as u16,
     );
 }
@@ -387,6 +401,9 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
         Cmd::Up if in_main => scroll(model, -1, 0),
         Cmd::Down => return select_moved(model, list, index + 1),
         Cmd::Up => return select_moved(model, list, index.saturating_sub(1)),
+        Cmd::PageDown if in_main => scroll(model, main_height(model) as i32, 0),
+        Cmd::PageUp if in_main => scroll(model, -(main_height(model) as i32), 0),
+        Cmd::Bottom if in_main => scroll(model, i32::MAX / 2, 0),
         Cmd::PageDown => return select_moved(model, list, index + page(model)),
         Cmd::PageUp => return select_moved(model, list, index.saturating_sub(page(model))),
         Cmd::Top if in_main => model.scroll.0 = 0,
@@ -1037,7 +1054,7 @@ pub mod tests {
 
     #[test]
     fn panels_and_sub_tabs() {
-        let mut model = model();
+        let mut model = tall_main();
         press(&mut model, "h");
         assert_eq!(model.focus, Focus::Panel(Panel::Workspaces));
         press(&mut model, "]");
@@ -1268,6 +1285,55 @@ pub mod tests {
         assert_eq!(
             jobs(update(&mut model, Action::Tick)),
             [Job::Refresh { full: true }]
+        );
+    }
+
+    #[test]
+    fn control_c_quits_from_anywhere() {
+        let ctrl_c = Action::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        for keys in ["n", "/", "?", "d"] {
+            let mut model = model();
+            press(&mut model, keys);
+            assert_eq!(update(&mut model, ctrl_c.clone()), [Effect::Quit], "{keys}");
+        }
+    }
+
+    /// A short terminal with a worktree selected whose commits overflow the main view.
+    fn tall_main() -> Model {
+        let mut model = model();
+        model.size = (120, 12);
+        press(&mut model, "j");
+        let commits = (0..20).map(|n| format!("commit {n}")).collect();
+        update(
+            &mut model,
+            Action::Commits("/src/api.ABC-1-login".into(), commits),
+        );
+        model
+    }
+
+    #[test]
+    fn list_keys_scroll_the_focused_main_view() {
+        let mut model = tall_main();
+        press(&mut model, "0G");
+        let bottom = model.scroll.0;
+        press(&mut model, ".J");
+        assert_eq!(model.scroll.0, bottom, "stops at the end");
+        assert_eq!(model.index(List::Work), 1);
+        assert!(model.scroll.0 > 0);
+        press(&mut model, ",<");
+        assert_eq!(model.scroll.0, 0);
+    }
+
+    #[test]
+    fn menu_entries_answer_to_their_key() {
+        let mut model = model();
+        model.snapshot.workspaces.push("third".into());
+        press(&mut model, "m2");
+        assert!(model.modal.is_none());
+        press(&mut model, "?n");
+        assert!(
+            matches!(model.modal, Some(Modal::Prompt { .. })),
+            "? then n asks for a branch"
         );
     }
 
