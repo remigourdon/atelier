@@ -103,21 +103,6 @@ pub enum Row {
     Item(usize),
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct LogEntry {
-    pub command: String,
-    pub error: Option<String>,
-}
-
-impl From<Logged> for LogEntry {
-    fn from(logged: Logged) -> Self {
-        Self {
-            command: logged.command,
-            error: logged.error,
-        }
-    }
-}
-
 /// A removal: the worktree, and whether it has changes that will be discarded.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Removal {
@@ -164,13 +149,31 @@ pub enum Job {
     Browse(String),
 }
 
+/// What the hint bar shows as loading: worktree listings, commit listings, or actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Source {
+    Wt,
+    Git,
+    Run,
+}
+
+impl Source {
+    pub fn label(self) -> &'static str {
+        match self {
+            Source::Wt => "wt",
+            Source::Git => "git",
+            Source::Run => "run",
+        }
+    }
+}
+
 impl Job {
     /// The loading indicator it shows in the hint bar.
-    pub fn source(&self) -> &'static str {
+    pub fn source(&self) -> Source {
         match self {
-            Job::Refresh { .. } => "wt",
-            Job::Commits(_) => "git",
-            _ => "run",
+            Job::Refresh { .. } => Source::Wt,
+            Job::Commits(_) => Source::Git,
+            _ => Source::Run,
         }
     }
 }
@@ -241,12 +244,12 @@ pub enum Action {
     Copy(String),
     Loaded {
         snapshot: Result<Snapshot, String>,
-        log: Vec<LogEntry>,
+        log: Vec<Logged>,
     },
     Commits(PathBuf, Vec<String>),
     Finished {
         job: Job,
-        log: Vec<LogEntry>,
+        log: Vec<Logged>,
         error: Option<String>,
     },
 }
@@ -484,9 +487,9 @@ pub struct Model {
     pub scroll: (u16, u16),
     pub screen: Screen,
     pub show_log: bool,
-    pub log: Vec<LogEntry>,
+    pub log: Vec<Logged>,
     /// Jobs in flight by source.
-    pub loading: BTreeMap<&'static str, usize>,
+    pub loading: BTreeMap<Source, usize>,
     pub commits: HashMap<PathBuf, Vec<String>>,
     /// Worktrees with a pull in flight, which show a spinner.
     pub pulling: HashSet<PathBuf>,
@@ -558,7 +561,7 @@ impl Model {
         self.selected.get(&list).copied().unwrap_or(0)
     }
 
-    pub fn push_log(&mut self, entries: impl IntoIterator<Item = LogEntry>) {
+    pub fn push_log(&mut self, entries: impl IntoIterator<Item = Logged>) {
         self.log.extend(entries);
         let excess = self.log.len().saturating_sub(LOG_LIMIT);
         self.log.drain(..excess);

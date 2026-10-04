@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 use color_eyre::eyre::{Result, eyre};
 use regex::Regex;
 
-use super::app::{Action, Job, LogEntry, Removal, Snapshot, Work};
+use super::app::{Action, Job, Removal, Snapshot, Work};
 use crate::config::Config;
-use crate::process::{Recorder, Runner, System};
+use crate::process::{Logged, Recorder, Runner, System};
 use crate::state::{self, State};
 use crate::zellij::{self, Layouts, Zellij};
 use crate::{sync, worktrunk};
@@ -48,16 +48,14 @@ impl Context {
 pub fn run(context: &Context, job: Job) -> Action {
     let recorder = Recorder::new(&System);
     let zellij = context.zellij(&recorder);
-    let log = |recorder: &Recorder| -> Vec<LogEntry> {
-        recorder.take().into_iter().map(Into::into).collect()
-    };
     match job {
         // Refreshes and commit listings run constantly: log only their failures.
         Job::Refresh { full } => {
             let loaded = context
                 .state()
                 .and_then(|state| load(&state, &zellij, &context.ticket, full));
-            let mut log: Vec<LogEntry> = log(&recorder)
+            let mut log: Vec<Logged> = recorder
+                .take()
                 .into_iter()
                 .filter(|entry| entry.error.is_some())
                 .collect();
@@ -81,7 +79,7 @@ pub fn run(context: &Context, job: Job) -> Action {
                 .map(|err| err.to_string());
             Action::Finished {
                 job,
-                log: log(&recorder),
+                log: recorder.take(),
                 error,
             }
         }
@@ -89,10 +87,10 @@ pub fn run(context: &Context, job: Job) -> Action {
 }
 
 /// Attaches to a session from outside zellij; the caller hands over the terminal.
-pub fn attach(context: &Context, session: &str) -> Vec<LogEntry> {
+pub fn attach(context: &Context, session: &str) -> Vec<Logged> {
     let recorder = Recorder::new(&System);
     let _ = context.zellij(&recorder).open_session(session);
-    recorder.take().into_iter().map(Into::into).collect()
+    recorder.take()
 }
 
 fn commits(runner: &dyn Runner, path: &Path) -> Result<Vec<String>> {
@@ -111,14 +109,14 @@ pub fn load(
     zellij: &Zellij,
     ticket: &Regex,
     full: bool,
-) -> Result<(Snapshot, Vec<LogEntry>)> {
+) -> Result<(Snapshot, Vec<Logged>)> {
     // A reconcile failure (zellij not running) should not hide the worktrees.
     let _ = zellij.reconcile(state);
     let synced = sync::sync(state, zellij.runner, ticket, full)?;
     let problems = synced
         .failures
         .iter()
-        .map(|(repo, err)| LogEntry {
+        .map(|(repo, err)| Logged {
             command: format!("wt list in {}", repo.name()),
             error: Some(format!("{err:#}")),
         })

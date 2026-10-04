@@ -559,7 +559,7 @@ fn render_hints(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect)
             spans.push(Span::raw(format!(" {}", short_help(binding.help))));
         }
     }
-    let loading: Vec<&str> = model.loading.keys().copied().collect();
+    let loading: Vec<&str> = model.loading.keys().map(|source| source.label()).collect();
     let [left, right] = Layout::horizontal([
         Constraint::Fill(1),
         Constraint::Length(if loading.is_empty() {

@@ -8,11 +8,12 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use super::app::{
-    Action, Binding, Cmd, Effect, FAST_REFRESH, FULL_REFRESH, Focus, Job, KEYMAP, List, LogEntry,
-    MenuEntry, Modal, Model, On, Panel, Popup, PopupCmd, Removal, Row, Screen, Submit, lookup,
+    Action, Binding, Cmd, Effect, FAST_REFRESH, FULL_REFRESH, Focus, Job, KEYMAP, List, MenuEntry,
+    Modal, Model, On, Panel, Popup, PopupCmd, Removal, Row, Screen, Source, Submit, lookup,
     popup_lookup,
 };
 use super::view::{areas, main_len, offset};
+use crate::process::Logged;
 
 pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
     match action {
@@ -44,14 +45,14 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
             Vec::new()
         }
         Action::Copy(text) => {
-            model.push_log([LogEntry {
+            model.push_log([Logged {
                 command: format!("copy {text}"),
                 error: None,
             }]);
             vec![Effect::Copy(text)]
         }
         Action::Loaded { snapshot, log } => {
-            done(model, "wt");
+            done(model, Source::Wt);
             model.push_log(log);
             match snapshot {
                 Ok(snapshot) => {
@@ -63,7 +64,7 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
                     commits(model)
                 }
                 Err(error) => {
-                    model.push_log([LogEntry {
+                    model.push_log([Logged {
                         command: "refresh".into(),
                         error: Some(error),
                     }]);
@@ -72,7 +73,7 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
             }
         }
         Action::Commits(path, lines) => {
-            done(model, "git");
+            done(model, Source::Git);
             model.commits.insert(path, lines);
             Vec::new()
         }
@@ -88,7 +89,7 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
             if let Some(error) = error
                 && logged_error.as_ref() != Some(&error)
             {
-                model.push_log([LogEntry {
+                model.push_log([Logged {
                     command: "atelier".into(),
                     error: Some(error),
                 }]);
@@ -113,11 +114,11 @@ fn run(model: &mut Model, job: Job) -> Effect {
     Effect::Run(job)
 }
 
-fn done(model: &mut Model, source: &'static str) {
-    if let Some(count) = model.loading.get_mut(source) {
+fn done(model: &mut Model, source: Source) {
+    if let Some(count) = model.loading.get_mut(&source) {
         *count -= 1;
         if *count == 0 {
-            model.loading.remove(source);
+            model.loading.remove(&source);
         }
     }
 }
@@ -127,7 +128,7 @@ fn tick(model: &mut Model) -> Vec<Effect> {
     model.idle += 1;
     model.since_refresh += 1;
     model.since_full += 1;
-    if model.loading.contains_key("wt") {
+    if model.loading.contains_key(&Source::Wt) {
         return Vec::new();
     }
     if model.since_full >= FULL_REFRESH {
@@ -363,7 +364,7 @@ fn submit(model: &mut Model, then: Submit, value: &str) -> Vec<Effect> {
 }
 
 fn note(model: &mut Model, message: &str) -> Vec<Effect> {
-    model.push_log([LogEntry {
+    model.push_log([Logged {
         command: message.into(),
         error: None,
     }]);
@@ -1159,7 +1160,7 @@ pub mod tests {
                 group: "ABC-1".into(),
             }]
         );
-        assert!(model.loading.contains_key("run"));
+        assert!(model.loading.contains_key(&Source::Run));
     }
 
     #[test]
@@ -1284,7 +1285,7 @@ pub mod tests {
             &mut model,
             Action::Finished {
                 job: Job::Pull(vec!["/src/api".into()]),
-                log: vec![LogEntry {
+                log: vec![Logged {
                     command: "git pull".into(),
                     error: Some("boom".into()),
                 }],
@@ -1293,7 +1294,7 @@ pub mod tests {
         );
         assert_eq!(effects, [Effect::Run(Job::Refresh { full: false })]);
         assert_eq!(model.log.len(), 1);
-        assert_eq!(model.loading.keys().collect::<Vec<_>>(), [&"wt"]);
+        assert_eq!(model.loading.keys().collect::<Vec<_>>(), [&Source::Wt]);
     }
 
     #[test]
@@ -1437,7 +1438,10 @@ pub mod tests {
         assert_eq!(menu_keys(&model)[0], "Space");
         press(&mut model, "\n");
         assert!(model.modal.is_none());
-        assert!(model.loading.contains_key("run"), "Space opened the group");
+        assert!(
+            model.loading.contains_key(&Source::Run),
+            "Space opened the group"
+        );
     }
 
     #[test]

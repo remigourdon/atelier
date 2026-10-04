@@ -163,7 +163,7 @@ mod tests {
             Action::Commits(path, vec!["abc1234 Add login (2 hours ago, R)".into()]),
         );
         model.loading.clear();
-        model.log.push(app::LogEntry {
+        model.log.push(crate::process::Logged {
             command: "git -C /src/api pull --ff-only".into(),
             error: None,
         });
