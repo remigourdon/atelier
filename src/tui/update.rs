@@ -494,7 +494,10 @@ fn submit(model: &mut Model, then: Submit, value: &str) -> Vec<Effect> {
         _ if value.is_empty()
             && matches!(
                 then,
-                Submit::Branch { .. } | Submit::Start { .. } | Submit::Workspace
+                Submit::Branch { .. }
+                    | Submit::Start { .. }
+                    | Submit::Carnet { .. }
+                    | Submit::Workspace
             ) =>
         {
             return Vec::new();
@@ -518,6 +521,11 @@ fn submit(model: &mut Model, then: Submit, value: &str) -> Vec<Effect> {
             branch: value.into(),
             workspace,
             issue,
+        },
+        Submit::Carnet { workspace, group } => Job::NewCarnet {
+            name: value.into(),
+            workspace,
+            group,
         },
         Submit::Group(paths) => Job::Regroup {
             paths,
@@ -660,7 +668,11 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
             }
         }
         Cmd::Pull => {
-            let paths = paths(&work_targets(model));
+            let trees: Vec<_> = work_targets(model)
+                .into_iter()
+                .filter(|work| !work.is_carnet())
+                .collect();
+            let paths = paths(&trees);
             if !paths.is_empty() {
                 return vec![run(model, Job::Pull(paths))];
             }
@@ -829,7 +841,10 @@ fn activate(model: &mut Model) -> Vec<Effect> {
 fn ask_start(model: &mut Model, issue: Issue) -> Vec<Effect> {
     let linked = model.issue_work(&issue);
     let workspace = |repo: &Repo| {
-        let work = (linked.iter().find(|work| work.repo == repo.path)).or(linked.first());
+        let work = (linked
+            .iter()
+            .find(|work| work.repo.as_ref() == Some(&repo.path)))
+        .or(linked.first());
         work.map_or(repo.default_workspace.clone(), |work| {
             work.workspace.clone()
         })
@@ -837,7 +852,7 @@ fn ask_start(model: &mut Model, issue: Issue) -> Vec<Effect> {
     let own = (issue.project_url.as_deref()).and_then(|url| model.project_repo(url));
     let mut repos: Vec<&Repo> = model.snapshot.repos.iter().collect();
     repos.sort_by_key(|repo| {
-        let suggested = linked.iter().any(|work| work.repo == repo.path);
+        let suggested = (linked.iter()).any(|work| work.repo.as_ref() == Some(&repo.path));
         let own = own.is_some_and(|own| own.path == repo.path);
         (!suggested, !own)
     });
@@ -904,29 +919,52 @@ fn new(model: &mut Model) -> Vec<Effect> {
                     group: group.clone(),
                 },
             };
-            if let Some(work) = model.targets().first() {
-                let action = ask(work.repo.clone(), work.repo_name.clone());
-                return update(model, action);
+            // The selected worktree's repo, else every repo.
+            let selected = (model.targets().first())
+                .and_then(|work| Some((work.repo.clone()?, work.repo_name.clone())));
+            let mut entries: Vec<MenuEntry> = match selected {
+                Some((repo, name)) if !model.carnets => return update(model, ask(repo, name)),
+                Some((repo, name)) => vec![MenuEntry {
+                    key: "w".into(),
+                    label: format!("worktree of {name}"),
+                    action: ask(repo, name),
+                }],
+                None => (model.snapshot.repos.iter().enumerate())
+                    .map(|(index, repo)| MenuEntry {
+                        key: (index + 1).to_string(),
+                        label: if model.carnets {
+                            format!("worktree of {}", repo.name())
+                        } else {
+                            repo.name()
+                        },
+                        action: ask(repo.path.clone(), repo.name()),
+                    })
+                    .collect(),
+            };
+            if model.carnets {
+                entries.push(MenuEntry {
+                    key: "c".into(),
+                    label: "carnet".into(),
+                    action: Action::Ask {
+                        title: "New carnet: name".into(),
+                        initial: String::new(),
+                        then: Submit::Carnet { workspace, group },
+                    },
+                });
             }
-            let entries: Vec<MenuEntry> = model
-                .snapshot
-                .repos
-                .iter()
-                .enumerate()
-                .map(|(index, repo)| MenuEntry {
-                    key: (index + 1).to_string(),
-                    label: repo.name(),
-                    action: ask(repo.path.clone(), repo.name()),
-                })
-                .collect();
             if entries.is_empty() {
                 return note(
                     model,
                     "no repos yet: register one with `atelier add <path>`",
                 );
             }
+            let title = if model.carnets {
+                "New"
+            } else {
+                "New worktree in"
+            };
             model.modal = Some(Modal::Menu {
-                title: "New worktree in".into(),
+                title: title.into(),
                 entries,
                 selected: 0,
             });
@@ -1077,14 +1115,16 @@ fn remove(model: &mut Model) -> Vec<Effect> {
             if removals.is_empty() {
                 return note(model, "main worktrees are never removed");
             }
-            let mut lines = vec!["Remove these worktrees?".to_owned()];
+            let mut lines = vec!["Remove these?".to_owned()];
             for work in targets.iter().filter(|work| !work.tree.main) {
-                let dirty = if work.tree.dirty {
+                let note = if work.is_carnet() {
+                    "  (forgotten: its folder stays on disk)"
+                } else if work.tree.dirty {
                     "  (uncommitted changes will be lost)"
                 } else {
                     ""
                 };
-                lines.push(format!("  {}{dirty}", work.title()));
+                lines.push(format!("  {}{note}", work.title()));
             }
             confirm(model, "Remove".into(), lines, Job::Remove(removals))
         }
@@ -1124,7 +1164,7 @@ fn url(model: &Model) -> Option<String> {
         List::Work => match model.work_row()? {
             Row::Item(index) => {
                 let work = &model.snapshot.work[index];
-                let forge = forges.get(&work.repo)?;
+                let forge = forges.get(work.repo.as_ref()?)?;
                 Some(match &work.tree.branch {
                     Some(branch) => forge.branch_url(branch),
                     None => forge.url.clone(),
@@ -1205,7 +1245,7 @@ pub mod tests {
             PathBuf::from(format!("/src/{repo}.{branch}"))
         };
         Work {
-            repo: PathBuf::from(format!("/src/{repo}")),
+            repo: Some(PathBuf::from(format!("/src/{repo}"))),
             repo_name: repo.into(),
             workspace: workspace.into(),
             group: group.into(),
@@ -1218,7 +1258,33 @@ pub mod tests {
                 subject: "Commit".into(),
                 ..Worktree::default()
             },
+            readme: None,
         }
+    }
+
+    pub fn carnet(name: &str, group: &str, workspace: &str) -> Work {
+        Work {
+            repo: None,
+            repo_name: String::new(),
+            workspace: workspace.into(),
+            group: group.into(),
+            tab: false,
+            tree: Worktree {
+                path: PathBuf::from(format!("/data/{name}")),
+                ..Worktree::default()
+            },
+            readme: Some(format!("# {name}\n\nWhat I found **so far**.\n")),
+        }
+    }
+
+    /// With carnets enabled, one in the ABC-1 group and one ungrouped.
+    pub fn with_carnets(mut model: Model) -> Model {
+        model.carnets = true;
+        model.snapshot.work.extend([
+            carnet("2026-10-01-ABC-1-logs", "ABC-1", "default"),
+            carnet("2026-10-02-ideas", "", "default"),
+        ]);
+        model
     }
 
     pub fn snapshot() -> Snapshot {
@@ -2202,5 +2268,88 @@ pub mod tests {
         update(&mut model, Action::Mouse(click));
         assert_eq!(model.focus, Focus::Panel(Panel::Workspaces));
         assert_eq!(model.workspace(), Some("side"));
+    }
+
+    #[test]
+    fn carnets_follow_the_worktrees_of_their_group() {
+        let model = with_carnets(model());
+        assert_eq!(
+            titles(&model),
+            [
+                "[ABC-1]",
+                "api:ABC-1-login",
+                "web:ABC-1-form",
+                "2026-10-01-ABC-1-logs",
+                "api:main",
+                "2026-10-02-ideas"
+            ]
+        );
+    }
+
+    #[test]
+    fn new_offers_a_carnet_in_the_selections_group_when_carnets_are_on() {
+        let mut model = with_carnets(model());
+        press(&mut model, "jn");
+        assert_eq!(menu_labels(&model), ["worktree of api", "carnet"]);
+        press(&mut model, "c");
+        assert!(matches!(&model.modal, Some(Modal::Prompt { .. })));
+        assert!(jobs(press(&mut model, "\n")).is_empty(), "no name");
+        press(&mut model, "nc");
+        assert_eq!(
+            jobs(press(&mut model, "logs\n")),
+            [Job::NewCarnet {
+                name: "logs".into(),
+                workspace: "default".into(),
+                group: "ABC-1".into(),
+            }]
+        );
+        press(&mut model, "nw");
+        let Some(Modal::Prompt { title, .. }) = &model.modal else {
+            panic!("no branch prompt");
+        };
+        assert!(title.contains("of api"), "{title}");
+        press(&mut model, "\x1bGn");
+        assert_eq!(
+            menu_labels(&model),
+            ["worktree of api", "worktree of web", "carnet"],
+            "a carnet has no repo to suggest"
+        );
+    }
+
+    #[test]
+    fn pull_skips_carnets() {
+        let mut model = with_carnets(model());
+        assert_eq!(
+            jobs(press(&mut model, "p")),
+            [Job::Pull(vec![
+                "/src/api.ABC-1-login".into(),
+                "/src/web.ABC-1-form".into()
+            ])]
+        );
+        assert!(jobs(press(&mut model, "Gp")).is_empty());
+    }
+
+    #[test]
+    fn removing_a_carnet_forgets_it_and_keeps_its_folder() {
+        let mut model = with_carnets(model());
+        press(&mut model, "Gd");
+        let Some(Modal::Confirm { lines, .. }) = &model.modal else {
+            panic!("no confirmation");
+        };
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("2026-10-02-ideas") && line.contains("stays on disk")),
+            "{lines:?}"
+        );
+        assert_eq!(
+            jobs(press(&mut model, "y")),
+            [Job::Remove(vec![Removal {
+                repo: None,
+                path: "/data/2026-10-02-ideas".into(),
+                branch: None,
+                force: false,
+            }])]
+        );
     }
 }

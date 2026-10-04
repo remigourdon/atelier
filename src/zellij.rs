@@ -53,13 +53,7 @@ impl Layouts {
 }
 
 fn expand(path: &str) -> String {
-    match path.strip_prefix("~/") {
-        Some(rest) => crate::config::home()
-            .join(rest)
-            .to_string_lossy()
-            .into_owned(),
-        None => path.to_owned(),
-    }
+    crate::config::expand(path).to_string_lossy().into_owned()
 }
 
 fn kdl_string(value: &str) -> String {
@@ -484,13 +478,19 @@ impl Zellij<'_> {
     /// Renames every open tab of a repo, so duplicates in a group show their branch.
     pub fn sync_names(&self, state: &State, repo: &Path) -> Result<()> {
         for item in state.repo_items(repo)? {
-            if let Some(tab) = state.tab(&item.path)? {
-                let name = self.name_for(state, &item.path)?;
-                self.action(
-                    &tab.session,
-                    &["rename-tab-by-id", &tab.tab_id.to_string(), &name],
-                )?;
-            }
+            self.rename_tab(state, &item.path)?;
+        }
+        Ok(())
+    }
+
+    /// Renames an item's open tab, as after its group changed.
+    pub fn rename_tab(&self, state: &State, path: &Path) -> Result<()> {
+        if let Some(tab) = state.tab(path)? {
+            let name = self.name_for(state, path)?;
+            self.action(
+                &tab.session,
+                &["rename-tab-by-id", &tab.tab_id.to_string(), &name],
+            )?;
         }
         Ok(())
     }

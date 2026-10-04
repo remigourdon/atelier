@@ -116,20 +116,28 @@ pub struct Snapshot {
     pub forges: HashMap<PathBuf, Forge>,
 }
 
-/// A worktree with what atelier records about it.
+/// A worktree or a carnet, with what atelier records about it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Work {
-    pub repo: PathBuf,
+    /// A worktree's repo; a carnet has none.
+    pub repo: Option<PathBuf>,
     pub repo_name: String,
     pub workspace: String,
     pub group: String,
     pub tab: bool,
+    /// A worktree's listing; a carnet's holds only its path.
     pub tree: Worktree,
+    /// A carnet's `README.md`, when it has one.
+    pub readme: Option<String>,
 }
 
 impl Work {
     pub fn path(&self) -> &PathBuf {
         &self.tree.path
+    }
+
+    pub fn is_carnet(&self) -> bool {
+        self.repo.is_none()
     }
 
     /// The branch, else the directory name of a detached worktree.
@@ -140,7 +148,11 @@ impl Work {
             .unwrap_or_else(|| crate::state::dir_name(&self.tree.path))
     }
 
+    /// `repo:branch`, or a carnet's folder name.
     pub fn title(&self) -> String {
+        if self.is_carnet() {
+            return crate::state::dir_name(self.path());
+        }
         format!("{}:{}", self.repo_name, self.branch())
     }
 }
@@ -158,10 +170,11 @@ pub enum Row {
     Item(usize),
 }
 
-/// A removal: the worktree, and whether it has changes that will be discarded.
+/// A removal: the worktree, and whether it has changes that will be discarded. A carnet, with
+/// no repo, is only forgotten.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Removal {
-    pub repo: PathBuf,
+    pub repo: Option<PathBuf>,
     pub path: PathBuf,
     pub branch: Option<String>,
     pub force: bool,
@@ -184,6 +197,12 @@ pub enum Job {
         group: String,
     },
     Remove(Vec<Removal>),
+    /// Creates a carnet and opens its tab.
+    NewCarnet {
+        name: String,
+        workspace: String,
+        group: String,
+    },
     Move {
         paths: Vec<PathBuf>,
         workspace: String,
@@ -301,6 +320,11 @@ pub enum Submit {
         repo: PathBuf,
         workspace: String,
         issue: Box<Issue>,
+    },
+    /// A new carnet's name.
+    Carnet {
+        workspace: String,
+        group: String,
     },
     Group(Vec<PathBuf>),
     Alias(PathBuf),
@@ -495,7 +519,7 @@ pub const KEYMAP: &[Binding] = &[
     Binding { keys: &[code(KeyCode::Enter)], label: "Enter", cmd: Cmd::Enter, help: "fold group · focus the main view", hint: NONE, on: On::Lists(WORK) },
     Binding { keys: &[ch('-')], label: "-", cmd: Cmd::CollapseAll, help: "collapse all groups", hint: NONE, on: On::Lists(WORK) },
     Binding { keys: &[ch('=')], label: "=", cmd: Cmd::ExpandAll, help: "expand all groups", hint: NONE, on: On::Lists(WORK) },
-    Binding { keys: &[ch('n')], label: "n", cmd: Cmd::New, help: "new worktree · new workspace", hint: &[Kind::Workspaces, Kind::Work, Kind::Issues], on: On::Lists(&[Kind::Workspaces, Kind::Work, Kind::Issues]) },
+    Binding { keys: &[ch('n')], label: "n", cmd: Cmd::New, help: "new worktree or carnet · new workspace", hint: &[Kind::Workspaces, Kind::Work, Kind::Issues], on: On::Lists(&[Kind::Workspaces, Kind::Work, Kind::Issues]) },
     Binding { keys: &[ch('e')], label: "e", cmd: Cmd::Edit, help: "edit group · edit repo alias", hint: &[Kind::Repos, Kind::Work], on: On::Lists(&[Kind::Repos, Kind::Work]) },
     Binding { keys: &[ch('m')], label: "m", cmd: Cmd::Move, help: "move to workspace · set repo workspace", hint: &[Kind::Repos, Kind::Work], on: On::Lists(&[Kind::Repos, Kind::Work]) },
     Binding { keys: &[ch('d')], label: "d", cmd: Cmd::Remove, help: "remove", hint: LOCAL, on: On::Lists(LOCAL) },
@@ -601,6 +625,8 @@ const LOG_LIMIT: usize = 500;
 pub struct Model {
     pub snapshot: Snapshot,
     pub loaded: bool,
+    /// Whether `[carnets]` is configured, so `n` offers one.
+    pub carnets: bool,
     pub focus: Focus,
     /// The side panel focus returns to from the main view.
     pub panel: Panel,
@@ -647,6 +673,7 @@ impl Model {
         Self {
             snapshot: Snapshot::default(),
             loaded: false,
+            carnets: false,
             focus: Focus::Panel(Panel::Work),
             panel: Panel::Work,
             sub: HashMap::new(),
@@ -810,7 +837,8 @@ impl Model {
     pub fn review_work(&self, review: &Review) -> Option<&Work> {
         let repo = self.project_repo(&review.project_url)?;
         self.snapshot.work.iter().find(|work| {
-            work.repo == repo.path && work.tree.branch.as_deref() == Some(review.branch.as_str())
+            work.repo.as_ref() == Some(&repo.path)
+                && work.tree.branch.as_deref() == Some(review.branch.as_str())
         })
     }
 
@@ -864,7 +892,7 @@ impl Model {
         self.repos().get(self.index(List::Repos)).copied()
     }
 
-    /// Panel 2's rows: named groups, foldable, then ungrouped worktrees.
+    /// Panel 2's rows: named groups, foldable, then ungrouped items; carnets after worktrees.
     pub fn work_rows(&self) -> Vec<Row> {
         let Some(workspace) = self.workspace() else {
             return Vec::new();
@@ -890,6 +918,7 @@ impl Model {
             (
                 work.group.is_empty(),
                 work.group.clone(),
+                work.is_carnet(),
                 work.repo_name.clone(),
                 !work.tree.main,
                 work.branch(),

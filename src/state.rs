@@ -357,6 +357,24 @@ impl State {
         paths.iter().map(|path| self.require_item(path)).collect()
     }
 
+    /// The recorded carnets, by path.
+    pub fn carnets(&self) -> Result<Vec<Item>> {
+        let mut statement = self
+            .db
+            .prepare("SELECT path FROM items WHERE kind = 'carnet' ORDER BY path")?;
+        let paths: Vec<PathBuf> = statement
+            .query_map([], |row| path_column(row, 0))?
+            .collect::<rusqlite::Result<_>>()?;
+        paths.iter().map(|path| self.require_item(path)).collect()
+    }
+
+    /// Today's local date, `YYYY-MM-DD`.
+    pub fn today(&self) -> Result<String> {
+        Ok(self
+            .db
+            .query_row("SELECT date('now', 'localtime')", [], |row| row.get(0))?)
+    }
+
     pub fn set_group(&self, path: impl AsRef<Path>, group: &str) -> Result<()> {
         let path = path.as_ref();
         self.require_item(path)?;

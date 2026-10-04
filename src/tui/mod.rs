@@ -43,6 +43,7 @@ async fn drive(
     let size = terminal.size()?;
     let mut model = Model::new((size.width, size.height));
     model.tracker_config = context.config.tracker.clone();
+    model.carnets = context.config.carnet_root().is_some();
     let (sender, mut results) = mpsc::unbounded_channel::<Action>();
     let mut events = EventStream::new();
     let mut ticks = tokio::time::interval(Duration::from_secs(1));
@@ -237,6 +238,14 @@ mod tests {
         for c in ['4', '[', '+'] {
             update(&mut model, Action::Key(key(c)));
         }
+        insta::assert_snapshot!(render(&model, 120, 30));
+    }
+
+    #[test]
+    fn carnet_shows_its_rendered_readme() {
+        let mut model = update::tests::with_carnets(loaded(120, 30));
+        update(&mut model, Action::Key(key('G')));
+        model.loading.clear();
         insta::assert_snapshot!(render(&model, 120, 30));
     }
 
