@@ -158,7 +158,8 @@ impl Forge for Gh<'_> {
     }
 }
 
-/// GitLab through `glab api`, whose `/merge_requests` spans every project.
+/// GitLab through `glab api`, whose `/merge_requests` spans every project. The endpoints and
+/// fields are the ones the Python prototype ran against a live GitLab.
 pub struct Glab<'a> {
     pub runner: &'a dyn Runner,
     pub host: String,
@@ -166,8 +167,10 @@ pub struct Glab<'a> {
 
 impl Glab<'_> {
     fn api(&self, endpoint: &str) -> Result<String> {
-        self.runner
-            .output("glab", &["api", "--hostname", &self.host, endpoint])
+        self.runner.output(
+            "glab",
+            &["api", "--paginate", "--hostname", &self.host, endpoint],
+        )
     }
 }
 
@@ -181,21 +184,19 @@ impl Forge for Glab<'_> {
     }
 
     fn reviews(&self, role: Role) -> Result<Vec<Review>> {
-        let filter = match role {
-            // The API takes no `@me` for reviewers, so ask who I am first.
-            Role::ToReview => {
-                #[derive(Deserialize)]
-                struct User {
-                    username: String,
-                }
-                let user: User =
-                    serde_json::from_str(&self.api("user")?).wrap_err("parsing glab user")?;
-                format!("scope=all&reviewer_username={}", user.username)
-            }
-            Role::Mine => "scope=created_by_me".into(),
+        // The API takes no `@me`, so ask who I am first.
+        #[derive(Deserialize)]
+        struct User {
+            username: String,
+        }
+        let user: User = serde_json::from_str(&self.api("/user")?).wrap_err("parsing glab user")?;
+        let who = match role {
+            Role::ToReview => "reviewer_username",
+            Role::Mine => "author_username",
         };
         let json = self.api(&format!(
-            "merge_requests?state=opened&{filter}&per_page=100"
+            "/merge_requests?state=opened&scope=all&{who}={}&per_page=100",
+            user.username
         ))?;
         parse_glab(&json, role)
     }
@@ -445,10 +446,16 @@ mod tests {
     }
 
     #[test]
-    fn glab_asks_who_i_am_for_reviews_requested_of_me() {
+    fn glab_asks_who_i_am_then_lists_merge_requests() {
         let fake = Fake::default()
-            .always("glab api --hostname h user", Some(r#"{"username":"me"}"#))
-            .always("glab api --hostname h merge_requests", Some(GLAB));
+            .always(
+                "glab api --paginate --hostname h /user",
+                Some(r#"{"username":"me"}"#),
+            )
+            .always(
+                "glab api --paginate --hostname h /merge_requests",
+                Some(GLAB),
+            );
         let glab = Glab {
             runner: &fake,
             host: "h".into(),
@@ -458,9 +465,10 @@ mod tests {
         assert_eq!(
             fake.calls(),
             [
-                "glab api --hostname h user",
-                "glab api --hostname h merge_requests?state=opened&scope=all&reviewer_username=me&per_page=100",
-                "glab api --hostname h merge_requests?state=opened&scope=created_by_me&per_page=100",
+                "glab api --paginate --hostname h /user",
+                "glab api --paginate --hostname h /merge_requests?state=opened&scope=all&reviewer_username=me&per_page=100",
+                "glab api --paginate --hostname h /user",
+                "glab api --paginate --hostname h /merge_requests?state=opened&scope=all&author_username=me&per_page=100",
             ]
         );
     }
