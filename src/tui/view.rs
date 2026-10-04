@@ -3,10 +3,12 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
-use super::app::{Focus, KEYMAP, List, Model, Panel, Popup, Row, Screen, Source, popup_hints};
+use super::app::{
+    Focus, KEYMAP, List, Model, Panel, Popup, Row, Screen, Source, Work, WorkKind, popup_hints,
+};
 use super::widgets;
 use crate::config::Icons;
 use crate::issues::State;
@@ -34,6 +36,7 @@ pub struct Glyphs {
     pub workspace: &'static str,
     pub repo: &'static str,
     pub worktree: &'static str,
+    pub carnet: &'static str,
     pub review: &'static str,
     pub issue: &'static str,
     pub open: &'static str,
@@ -51,6 +54,7 @@ impl Glyphs {
                 workspace: "",
                 repo: "",
                 worktree: "",
+                carnet: "",
                 review: "",
                 issue: "",
                 open: "●",
@@ -59,12 +63,13 @@ impl Glyphs {
                 unfolded: "▾",
                 spinner,
             },
-            // Nerd Fonts: fa-desktop, oct-repo, dev-git_branch, oct-git_pull_request,
+            // Nerd Fonts: fa-desktop, oct-repo, dev-git_branch, fa-book, oct-git_pull_request,
             // oct-issue_opened, fa-circle, fa-circle_o, fa-folder, fa-folder_open.
             Icons::Nerd => Self {
                 workspace: "\u{f108}",
                 repo: "\u{f401}",
                 worktree: "\u{e725}",
+                carnet: "\u{f02d}",
                 review: "\u{f407}",
                 issue: "\u{f41b}",
                 open: "\u{f111}",
@@ -347,12 +352,13 @@ fn rows<'a>(model: &'a Model, palette: &Palette, list: List) -> Vec<Line<'a>> {
                     Line::from(vec![
                         Span::styled(
                             format!(
-                                "{} {name}",
+                                "{} {}",
                                 if folded {
                                     palette.glyphs.folded
                                 } else {
                                     palette.glyphs.unfolded
-                                }
+                                },
+                                group_name(&name)
                             ),
                             Style::new().fg(palette.info).bold(),
                         ),
@@ -362,7 +368,11 @@ fn rows<'a>(model: &'a Model, palette: &Palette, list: List) -> Vec<Line<'a>> {
                 Row::Item(index) => {
                     let work = &model.snapshot.work[index];
                     let glyphs = &palette.glyphs;
-                    let indent = if work.group.is_empty() { "" } else { "  " };
+                    let indent = if work.group.is_empty() && !work.in_carnets_group() {
+                        ""
+                    } else {
+                        "  "
+                    };
                     let marker = if model.pulling.contains(work.path()) {
                         let frame = glyphs.spinner[model.frame % glyphs.spinner.len()];
                         Span::styled(format!("{frame} "), Style::new().fg(palette.info))
@@ -371,18 +381,25 @@ fn rows<'a>(model: &'a Model, palette: &Palette, list: List) -> Vec<Line<'a>> {
                     } else {
                         Span::styled(format!("{} ", glyphs.closed), dim)
                     };
-                    let status = if work.tree.dirty {
-                        Style::new().fg(palette.warn)
-                    } else {
-                        dim
-                    };
                     let mut spans = vec![Span::raw(indent), marker];
-                    spans.extend(icon(glyphs.worktree, dim));
+                    let glyph = if work.is_carnet() {
+                        glyphs.carnet
+                    } else {
+                        glyphs.worktree
+                    };
+                    spans.extend(icon(glyph, dim));
                     spans.push(Span::raw(work.title()));
-                    if !work.tree.symbols.is_empty() {
-                        spans.push(Span::styled(format!(" {}", work.tree.symbols), status));
+                    let tree = work.tree();
+                    if let Some(tree) = tree.filter(|tree| !tree.symbols.is_empty()) {
+                        let status = if tree.dirty {
+                            Style::new().fg(palette.warn)
+                        } else {
+                            dim
+                        };
+                        spans.push(Span::styled(format!(" {}", tree.symbols), status));
                     }
-                    if let Some((_, behind)) = work.tree.upstream.filter(|&(_, behind)| behind > 0)
+                    if let Some((_, behind)) =
+                        (tree.and_then(|tree| tree.upstream)).filter(|&(_, behind)| behind > 0)
                     {
                         spans.push(Span::styled(
                             format!(" ↓{behind}"),
@@ -480,6 +497,7 @@ fn detail(model: &Model) -> Vec<(String, String)> {
                 .iter()
                 .filter(|work| work.workspace == name)
                 .collect();
+            let carnets = work.iter().filter(|work| work.is_carnet()).count();
             let repos: Vec<String> = model
                 .snapshot
                 .repos
@@ -487,7 +505,7 @@ fn detail(model: &Model) -> Vec<(String, String)> {
                 .filter(|repo| repo.default_workspace == name)
                 .map(|repo| repo.name())
                 .collect();
-            vec![
+            let mut pairs = vec![
                 pair("Workspace", name.to_owned()),
                 pair(
                     "Session",
@@ -497,13 +515,19 @@ fn detail(model: &Model) -> Vec<(String, String)> {
                         "other".into()
                     },
                 ),
-                pair("Worktrees", work.len().to_string()),
+                pair("Worktrees", (work.len() - carnets).to_string()),
+            ];
+            if model.carnets {
+                pairs.push(pair("Carnets", carnets.to_string()));
+            }
+            pairs.extend([
                 pair(
                     "Open tabs",
                     work.iter().filter(|work| work.tab).count().to_string(),
                 ),
                 pair("Default for", repos.join(", ")),
-            ]
+            ]);
+            pairs
         }
         List::Repos => {
             let Some(repo) = model.repo() else {
@@ -513,7 +537,7 @@ fn detail(model: &Model) -> Vec<(String, String)> {
                 .snapshot
                 .work
                 .iter()
-                .filter(|work| work.repo == repo.path)
+                .filter(|work| work.repo() == Some(&repo.path))
                 .count();
             vec![
                 pair("Repo", repo.name()),
@@ -534,18 +558,29 @@ fn detail(model: &Model) -> Vec<(String, String)> {
         }
         List::Work => match model.work_row() {
             Some(Row::Group { name, members, .. }) => {
-                let mut pairs = vec![pair("Group", name)];
+                let mut pairs = vec![pair("Group", group_name(&name).to_owned())];
                 pairs.extend(members.iter().map(|&index| {
                     let work = &model.snapshot.work[index];
-                    pair("Worktree", work.title())
+                    pair(kind(work), work.title())
                 }));
                 pairs
             }
             Some(Row::Item(index)) => {
                 let work = &model.snapshot.work[index];
-                let tree = &work.tree;
+                let WorkKind::Worktree {
+                    repo_name, tree, ..
+                } = &work.kind
+                else {
+                    return vec![
+                        pair("Carnet", work.title()),
+                        pair("Path", work.path.display().to_string()),
+                        pair("Workspace", work.workspace.clone()),
+                        pair("Group", work.group.clone()),
+                        pair("Tab", if work.tab { "open" } else { "closed" }.into()),
+                    ];
+                };
                 vec![
-                    pair("Repo", work.repo_name.clone()),
+                    pair("Repo", repo_name.clone()),
                     pair("Branch", work.branch()),
                     pair("Path", tree.path.display().to_string()),
                     pair("Workspace", work.workspace.clone()),
@@ -635,13 +670,38 @@ fn detail(model: &Model) -> Vec<(String, String)> {
             pairs.extend(work.into_iter().map(|work| {
                 let tab = if work.tab { "open" } else { "closed" };
                 pair(
-                    "Worktree",
+                    kind(work),
                     format!("{} · {} · tab {tab}", work.title(), work.workspace),
                 )
             }));
             pairs
         }
     }
+}
+
+/// What the main view calls an item.
+fn kind(work: &Work) -> &'static str {
+    if work.is_carnet() {
+        "Carnet"
+    } else {
+        "Worktree"
+    }
+}
+
+/// The selected carnet's README, rendered once read.
+fn readme(model: &Model) -> Option<Text<'_>> {
+    match (model.active(), model.work_row()?) {
+        (List::Work, Row::Item(index)) => {
+            let readme = model.readmes.get(model.snapshot.work[index].path())?;
+            Some(tui_markdown::from_str(readme.as_deref()?))
+        }
+        _ => None,
+    }
+}
+
+/// How a group row is named; the `Carnets` group has no group name.
+pub fn group_name(name: &str) -> &str {
+    if name.is_empty() { "Carnets" } else { name }
 }
 
 /// The selected worktree's recent commits, once loaded.
@@ -654,7 +714,9 @@ fn commits(model: &Model) -> Option<&Vec<String>> {
 
 /// How many lines the main view holds, so scrolling stops at its end.
 pub fn main_len(model: &Model) -> usize {
-    detail(model).len() + commits(model).map_or(0, |commits| commits.len() + 2)
+    detail(model).len()
+        + readme(model).map_or(0, |readme| readme.lines.len() + 1)
+        + commits(model).map_or(0, |commits| commits.len() + 2)
 }
 
 fn render_main(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect) {
@@ -671,6 +733,10 @@ fn render_main(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect) 
             ])
         })
         .collect();
+    if let Some(readme) = readme(model) {
+        lines.push(Line::raw(""));
+        lines.extend(readme.lines);
+    }
     if let Some(commits) = commits(model) {
         lines.push(Line::raw(""));
         lines.push(Line::styled(

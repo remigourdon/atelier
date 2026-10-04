@@ -140,7 +140,10 @@ fn baseline_database_is_read_and_extended() {
     assert_eq!(home.ok(&["ws", "ls"]), "conf\ndefault\nvrac\n");
     assert_eq!(home.ok(&["ls"]), "configue\tconf\t/home/me/configue\n");
     assert!(home.fails(&["ws", "rm", "conf"]).contains("repo default"));
-    assert!(home.fails(&["ws", "rm", "vrac"]).contains("owns items"));
+    assert!(
+        home.fails(&["ws", "rm", "vrac"])
+            .contains("owns carnets: /home/me/Data/2026-09-30-notes")
+    );
     home.ok(&["ws", "add", "new"]);
     home.ok(&["ws", "rm", "new"]);
 }
@@ -194,4 +197,56 @@ fn shell_init_fish_wraps_wt() {
     assert!(script.contains("function wt"));
     assert!(script.contains("ATELIER_HOOK_TARGET"));
     assert!(script.contains("atelier open"));
+}
+
+#[test]
+fn carnets_are_created_and_added_once_a_root_is_configured() {
+    let home = Home::new();
+    assert!(
+        home.fails(&["carnet", "new", "notes"])
+            .contains("[carnets]")
+    );
+    std::fs::create_dir_all(home.path("config/atelier")).unwrap();
+    std::fs::write(
+        home.path("config/atelier/config.toml"),
+        "[carnets]\nroot = \"~/Data\"\n",
+    )
+    .unwrap();
+    let created = home.ok(&["carnet", "new", "ABC-1 slow login"]);
+    let path = created
+        .strip_prefix("created ")
+        .and_then(|rest| rest.strip_suffix(" in default\n"))
+        .unwrap_or_else(|| panic!("{created}"));
+    let path = Path::new(path);
+    assert_eq!(
+        path.parent().unwrap(),
+        home.path("Data").canonicalize().unwrap()
+    );
+    assert!(path.to_string_lossy().ends_with("-ABC-1-slow-login"));
+    assert!(path.join("README.md").exists());
+    assert!(path.join(".git").exists());
+
+    let outside = home.git_repo("2026-01-01-outside");
+    assert!(
+        home.fails(&["carnet", "add", &outside])
+            .contains("not directly under")
+    );
+    let folder = home.git_repo("Data/2026-01-02-ORD-7-old-notes");
+    assert!(
+        home.fails(&["carnet", "add", &folder, "-w", "nope"])
+            .contains("unknown workspace")
+    );
+    home.ok(&["ws", "add", "w"]);
+    assert_eq!(
+        home.ok(&["carnet", "add", &folder, "-w", "w"]),
+        format!("recorded {folder} in w\n")
+    );
+    assert!(
+        home.fails(&["carnet", "add", &folder])
+            .contains("already recorded")
+    );
+    assert!(home.fails(&["ws", "rm", "w"]).contains("owns carnets"));
+    home.ok(&["ws", "rm", "w", "--forget-carnets"]);
+    assert!(Path::new(&folder).exists());
+    home.ok(&["carnet", "add", &folder]);
 }

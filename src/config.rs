@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use color_eyre::eyre::{Result, WrapErr};
+use color_eyre::eyre::{Result, WrapErr, eyre};
 use regex::Regex;
 use serde::Deserialize;
 
@@ -19,6 +19,9 @@ pub struct Config {
     pub theme: Theme,
     pub icons: Icons,
     pub zellij: Zellij,
+    pub carnets: Option<Carnets>,
+    /// The legacy spelling of `[carnets] root`.
+    pub carnet_root: Option<String>,
     pub tracker: crate::issues::TrackerConfig,
 }
 
@@ -50,6 +53,12 @@ pub struct Zellij {
     pub anchor_pane: Option<String>,
 }
 
+/// Absent: carnets are disabled.
+#[derive(Debug, Deserialize)]
+pub struct Carnets {
+    pub root: String,
+}
+
 impl Config {
     pub fn load() -> Result<Self> {
         let path = config_home().join("atelier/config.toml");
@@ -76,6 +85,25 @@ impl Config {
         self.zellij.anchor_pane.as_deref().unwrap_or("editor")
     }
 
+    /// Where carnets live, or `None` when they are disabled.
+    pub fn carnet_root(&self) -> Option<PathBuf> {
+        let root = match &self.carnets {
+            Some(carnets) => &carnets.root,
+            None => self.carnet_root.as_ref()?,
+        };
+        Some(expand(root))
+    }
+
+    pub fn carnets_enabled(&self) -> bool {
+        self.carnet_root().is_some()
+    }
+
+    /// Where carnets live, or why there are none.
+    pub fn require_carnet_root(&self) -> Result<PathBuf> {
+        self.carnet_root()
+            .ok_or_else(|| eyre!("carnets are disabled: set `root` under [carnets] in the config"))
+    }
+
     /// The configured browser, else `$BROWSER`; `None` means the platform opener.
     pub fn browser(&self) -> Option<String> {
         self.browser.clone().or_else(|| non_empty_var("BROWSER"))
@@ -99,12 +127,16 @@ impl Config {
             .or_else(|| non_empty_var("EDITOR"))
     }
 
+    /// The ticket key pattern, undelimited.
+    pub fn ticket_pattern(&self) -> &str {
+        self.ticket_pattern
+            .as_deref()
+            .unwrap_or(DEFAULT_TICKET_PATTERN)
+    }
+
     /// The ticket key pattern, delimited so it never matches inside a longer word.
     pub fn ticket_regex(&self) -> Result<Regex> {
-        let pattern = self
-            .ticket_pattern
-            .as_deref()
-            .unwrap_or(DEFAULT_TICKET_PATTERN);
+        let pattern = self.ticket_pattern();
         Ok(Regex::new(&format!(
             "(?:^|[^A-Za-z0-9])({pattern})(?:$|[^A-Za-z0-9])"
         ))?)
@@ -117,6 +149,14 @@ pub fn group_from_name(ticket: &Regex, name: &str) -> String {
         .captures(name)
         .map(|captures| captures[1].to_owned())
         .unwrap_or_default()
+}
+
+/// A path with a leading `~/` resolved against the home directory.
+pub fn expand(path: &str) -> PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => home().join(rest),
+        None => path.into(),
+    }
 }
 
 fn non_empty_var(name: &str) -> Option<String> {
@@ -203,5 +243,16 @@ mod tests {
             Icons::Nerd
         );
         assert!(Config::parse("icons = \"emoji\"").is_err());
+    }
+
+    #[test]
+    fn carnets_are_off_unless_a_root_is_set() {
+        assert_eq!(Config::parse("").unwrap().carnet_root(), None);
+        let config = Config::parse("[carnets]\nroot = \"/data\"\n").unwrap();
+        assert_eq!(config.carnet_root(), Some(PathBuf::from("/data")));
+        let config = Config::parse("carnet_root = \"~/Data\"\n").unwrap();
+        assert_eq!(config.carnet_root(), Some(home().join("Data")));
+        let config = Config::parse("carnet_root = \"/old\"\n[carnets]\nroot = \"/new\"\n").unwrap();
+        assert_eq!(config.carnet_root(), Some(PathBuf::from("/new")));
     }
 }

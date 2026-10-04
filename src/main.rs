@@ -1,3 +1,4 @@
+mod carnet;
 mod cli;
 mod config;
 mod hooks;

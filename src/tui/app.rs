@@ -112,43 +112,100 @@ pub struct Snapshot {
     pub workspaces: Vec<String>,
     pub repos: Vec<Repo>,
     pub work: Vec<Work>,
+    /// Every recorded carnet, shown or not, so removing a workspace can name the ones it owns.
+    pub all_carnets: Vec<crate::state::Item>,
     /// Each repo's forge web page, by repo path.
     pub forges: HashMap<PathBuf, Forge>,
 }
 
-/// A worktree with what atelier records about it.
+/// A worktree or a carnet, with what atelier records about it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Work {
-    pub repo: PathBuf,
-    pub repo_name: String,
+    pub path: PathBuf,
     pub workspace: String,
     pub group: String,
     pub tab: bool,
-    pub tree: Worktree,
+    pub kind: WorkKind,
+}
+
+/// What only a worktree has; a carnet is a folder and its README.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkKind {
+    Worktree {
+        repo: PathBuf,
+        repo_name: String,
+        tree: Box<Worktree>,
+    },
+    Carnet,
 }
 
 impl Work {
     pub fn path(&self) -> &PathBuf {
-        &self.tree.path
+        &self.path
     }
 
-    /// The branch, else the directory name of a detached worktree.
+    pub fn is_carnet(&self) -> bool {
+        self.kind == WorkKind::Carnet
+    }
+
+    /// An ungrouped carnet, listed in the `Carnets` group.
+    pub fn in_carnets_group(&self) -> bool {
+        self.group.is_empty() && self.is_carnet()
+    }
+
+    /// A worktree's repo.
+    pub fn repo(&self) -> Option<&PathBuf> {
+        match &self.kind {
+            WorkKind::Worktree { repo, .. } => Some(repo),
+            WorkKind::Carnet => None,
+        }
+    }
+
+    /// A worktree's listing.
+    pub fn tree(&self) -> Option<&Worktree> {
+        match &self.kind {
+            WorkKind::Worktree { tree, .. } => Some(tree),
+            WorkKind::Carnet => None,
+        }
+    }
+
+    /// A worktree's listing, for tests that change it.
+    #[cfg(test)]
+    pub fn tree_mut(&mut self) -> &mut Worktree {
+        match &mut self.kind {
+            WorkKind::Worktree { tree, .. } => tree,
+            WorkKind::Carnet => panic!("a carnet has no worktree"),
+        }
+    }
+
+    /// A worktree's branch, else its directory name: detached, or a carnet's folder.
     pub fn branch(&self) -> String {
-        self.tree
-            .branch
-            .clone()
-            .unwrap_or_else(|| crate::state::dir_name(&self.tree.path))
+        (self.tree().and_then(|tree| tree.branch.clone()))
+            .unwrap_or_else(|| crate::state::dir_name(&self.path))
     }
 
+    /// A worktree that is not its repo's main one, so it can be removed.
+    pub fn removable(&self) -> bool {
+        !self.tree().is_some_and(|tree| tree.main)
+    }
+
+    /// `repo:branch`, or a carnet's folder name.
     pub fn title(&self) -> String {
-        format!("{}:{}", self.repo_name, self.branch())
+        match &self.kind {
+            WorkKind::Worktree { repo_name, .. } => format!("{repo_name}:{}", self.branch()),
+            WorkKind::Carnet => crate::state::dir_name(&self.path),
+        }
     }
 }
+
+/// The end of the key of a workspace's `Carnets` group, which no group name can produce.
+const CARNETS_KEY: &str = "\0\0carnets";
 
 /// A row of the Work panel.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Row {
-    /// A group header; `members` index `Snapshot::work`.
+    /// A group header; `members` index `Snapshot::work`. The `Carnets` group, of ungrouped
+    /// carnets, has an empty `name`.
     Group {
         key: String,
         name: String,
@@ -158,11 +215,17 @@ pub enum Row {
     Item(usize),
 }
 
-/// A removal: the worktree, and whether it has changes that will be discarded.
+/// A removal: a worktree, removed through worktrunk, or a carnet, only forgotten.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Removal {
-    pub repo: PathBuf,
     pub path: PathBuf,
+    pub worktree: Option<RemovedWorktree>,
+}
+
+/// A worktree to remove, and whether it has changes that will be discarded.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemovedWorktree {
+    pub repo: PathBuf,
     pub branch: Option<String>,
     pub force: bool,
 }
@@ -174,6 +237,8 @@ pub enum Job {
         full: bool,
     },
     Commits(PathBuf),
+    /// Reads a carnet's README.
+    Readme(PathBuf),
     Open(Vec<PathBuf>),
     Close(Vec<PathBuf>),
     Pull(Vec<PathBuf>),
@@ -184,6 +249,12 @@ pub enum Job {
         group: String,
     },
     Remove(Vec<Removal>),
+    /// Creates a carnet and opens its tab.
+    NewCarnet {
+        name: String,
+        workspace: String,
+        group: String,
+    },
     Move {
         paths: Vec<PathBuf>,
         workspace: String,
@@ -202,7 +273,11 @@ pub enum Job {
     },
     Forget(PathBuf),
     AddWorkspace(String),
-    RemoveWorkspace(String),
+    /// Removes a workspace, forgetting the carnets its confirmation listed.
+    RemoveWorkspace {
+        name: String,
+        carnets: Vec<PathBuf>,
+    },
     SwitchWorkspace(String),
     Browse(String),
     /// Lists my reviews on each host, from the cache unless `force`.
@@ -269,7 +344,7 @@ impl Job {
     pub fn source(&self) -> Source {
         match self {
             Job::Refresh { .. } => Source::Wt,
-            Job::Commits(_) => Source::Git,
+            Job::Commits(_) | Job::Readme(_) => Source::Git,
             Job::Reviews { provider, .. } => Source::Reviews(*provider),
             Job::Issues { tracker, .. } => Source::Issues(*tracker),
             _ => Source::Run,
@@ -301,6 +376,11 @@ pub enum Submit {
         repo: PathBuf,
         workspace: String,
         issue: Box<Issue>,
+    },
+    /// A new carnet's name.
+    Carnet {
+        workspace: String,
+        group: String,
     },
     Group(Vec<PathBuf>),
     Alias(PathBuf),
@@ -353,6 +433,7 @@ pub enum Action {
         log: Vec<Logged>,
     },
     Commits(PathBuf, Vec<String>),
+    Readme(PathBuf, Option<String>),
     /// A provider's reviews, replacing the ones listed before.
     Reviews {
         provider: Provider,
@@ -495,7 +576,7 @@ pub const KEYMAP: &[Binding] = &[
     Binding { keys: &[code(KeyCode::Enter)], label: "Enter", cmd: Cmd::Enter, help: "fold group · focus the main view", hint: NONE, on: On::Lists(WORK) },
     Binding { keys: &[ch('-')], label: "-", cmd: Cmd::CollapseAll, help: "collapse all groups", hint: NONE, on: On::Lists(WORK) },
     Binding { keys: &[ch('=')], label: "=", cmd: Cmd::ExpandAll, help: "expand all groups", hint: NONE, on: On::Lists(WORK) },
-    Binding { keys: &[ch('n')], label: "n", cmd: Cmd::New, help: "new worktree · new workspace", hint: &[Kind::Workspaces, Kind::Work, Kind::Issues], on: On::Lists(&[Kind::Workspaces, Kind::Work, Kind::Issues]) },
+    Binding { keys: &[ch('n')], label: "n", cmd: Cmd::New, help: "new worktree or carnet · new workspace", hint: &[Kind::Workspaces, Kind::Work, Kind::Issues], on: On::Lists(&[Kind::Workspaces, Kind::Work, Kind::Issues]) },
     Binding { keys: &[ch('e')], label: "e", cmd: Cmd::Edit, help: "edit group · edit repo alias", hint: &[Kind::Repos, Kind::Work], on: On::Lists(&[Kind::Repos, Kind::Work]) },
     Binding { keys: &[ch('m')], label: "m", cmd: Cmd::Move, help: "move to workspace · set repo workspace", hint: &[Kind::Repos, Kind::Work], on: On::Lists(&[Kind::Repos, Kind::Work]) },
     Binding { keys: &[ch('d')], label: "d", cmd: Cmd::Remove, help: "remove", hint: LOCAL, on: On::Lists(LOCAL) },
@@ -601,6 +682,8 @@ const LOG_LIMIT: usize = 500;
 pub struct Model {
     pub snapshot: Snapshot,
     pub loaded: bool,
+    /// Whether `[carnets]` is configured, so `n` offers one.
+    pub carnets: bool,
     pub focus: Focus,
     /// The side panel focus returns to from the main view.
     pub panel: Panel,
@@ -610,7 +693,7 @@ pub struct Model {
     pub filters: HashMap<List, Input>,
     /// The list whose filter is being typed.
     pub filtering: Option<List>,
-    /// Folded group keys.
+    /// Group keys toggled from their default: folded, except the `Carnets` group, unfolded.
     pub folded: HashSet<String>,
     /// The main view's vertical and horizontal scroll.
     pub scroll: (u16, u16),
@@ -620,6 +703,8 @@ pub struct Model {
     /// Jobs in flight by source.
     pub loading: BTreeMap<Source, usize>,
     pub commits: HashMap<PathBuf, Vec<String>>,
+    /// Carnets' READMEs, read once selected; `None` when a carnet has none.
+    pub readmes: HashMap<PathBuf, Option<String>>,
     /// Both providers' reviews in both roles, most recently updated first.
     pub reviews: Vec<Review>,
     pub reviews_due: Due,
@@ -647,6 +732,7 @@ impl Model {
         Self {
             snapshot: Snapshot::default(),
             loaded: false,
+            carnets: false,
             focus: Focus::Panel(Panel::Work),
             panel: Panel::Work,
             sub: HashMap::new(),
@@ -660,6 +746,7 @@ impl Model {
             log: Vec::new(),
             loading: BTreeMap::new(),
             commits: HashMap::new(),
+            readmes: HashMap::new(),
             reviews: Vec::new(),
             // At startup, so the panels fill.
             reviews_due: Due::Cached,
@@ -810,7 +897,9 @@ impl Model {
     pub fn review_work(&self, review: &Review) -> Option<&Work> {
         let repo = self.project_repo(&review.project_url)?;
         self.snapshot.work.iter().find(|work| {
-            work.repo == repo.path && work.tree.branch.as_deref() == Some(review.branch.as_str())
+            work.repo() == Some(&repo.path)
+                && (work.tree()).and_then(|tree| tree.branch.as_deref())
+                    == Some(review.branch.as_str())
         })
     }
 
@@ -864,54 +953,91 @@ impl Model {
         self.repos().get(self.index(List::Repos)).copied()
     }
 
-    /// Panel 2's rows: named groups, foldable, then ungrouped worktrees.
+    /// Whether a group row is folded; the `Carnets` group starts folded.
+    pub fn is_folded(&self, key: &str) -> bool {
+        self.folded.contains(key) != key.ends_with(CARNETS_KEY)
+    }
+
+    pub fn set_folded(&mut self, key: &str, folded: bool) {
+        if folded == key.ends_with(CARNETS_KEY) {
+            self.folded.remove(key);
+        } else {
+            self.folded.insert(key.to_owned());
+        }
+    }
+
+    /// Panel 2's rows: named groups, foldable, then ungrouped worktrees, then the ungrouped
+    /// carnets in a `Carnets` group. Worktrees come before carnets, which are newest first.
     pub fn work_rows(&self) -> Vec<Row> {
         let Some(workspace) = self.workspace() else {
             return Vec::new();
         };
+        let work = &self.snapshot.work;
         let filtering = !self.filter(List::Work).is_empty();
-        let mut members: Vec<usize> = (0..self.snapshot.work.len())
+        let mut members: Vec<usize> = (0..work.len())
             .filter(|&index| {
-                let work = &self.snapshot.work[index];
+                let work = &work[index];
                 work.workspace == workspace
                     && self.matches(
                         List::Work,
-                        &[
-                            &work.repo_name,
-                            &work.branch(),
-                            &work.group,
-                            &work.path().to_string_lossy(),
-                        ],
+                        &[&work.title(), &work.group, &work.path.to_string_lossy()],
                     )
             })
             .collect();
-        members.sort_by_key(|&index| {
-            let work = &self.snapshot.work[index];
+        // Named groups, then ungrouped worktrees, then ungrouped carnets.
+        let section = |work: &Work| {
             (
                 work.group.is_empty(),
+                work.in_carnets_group(),
                 work.group.clone(),
-                work.repo_name.clone(),
-                !work.tree.main,
-                work.branch(),
             )
+        };
+        members.sort_by(|&a, &b| {
+            let (a, b) = (&work[a], &work[b]);
+            section(a)
+                .cmp(&section(b))
+                .then_with(|| match (&a.kind, &b.kind) {
+                    (
+                        WorkKind::Worktree {
+                            repo_name: x,
+                            tree: tx,
+                            ..
+                        },
+                        WorkKind::Worktree {
+                            repo_name: y,
+                            tree: ty,
+                            ..
+                        },
+                    ) => (x, !tx.main, a.branch()).cmp(&(y, !ty.main, b.branch())),
+                    (WorkKind::Worktree { .. }, WorkKind::Carnet) => std::cmp::Ordering::Less,
+                    (WorkKind::Carnet, WorkKind::Worktree { .. }) => std::cmp::Ordering::Greater,
+                    (WorkKind::Carnet, WorkKind::Carnet) => {
+                        b.path.file_name().cmp(&a.path.file_name())
+                    }
+                })
         });
         let mut lines = Vec::new();
         let mut index = 0;
         while index < members.len() {
-            let group = &self.snapshot.work[members[index]].group;
+            let first = &work[members[index]];
+            let carnets = first.in_carnets_group();
             let end = members[index..]
                 .iter()
-                .position(|&other| self.snapshot.work[other].group != *group)
+                .position(|&other| section(&work[other]) != section(first))
                 .map_or(members.len(), |offset| index + offset);
             let slice = &members[index..end];
-            if group.is_empty() {
+            if first.group.is_empty() && !carnets {
                 lines.extend(slice.iter().map(|&member| Row::Item(member)));
             } else {
-                let key = format!("{workspace}\0{group}");
-                let folded = !filtering && self.folded.contains(&key);
+                let key = if carnets {
+                    format!("{workspace}{CARNETS_KEY}")
+                } else {
+                    format!("{workspace}\0{}", first.group)
+                };
+                let folded = !filtering && self.is_folded(&key);
                 lines.push(Row::Group {
                     key,
-                    name: group.clone(),
+                    name: first.group.clone(),
                     members: slice.to_vec(),
                     folded,
                 });

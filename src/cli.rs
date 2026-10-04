@@ -61,6 +61,9 @@ enum Command {
         #[arg(add = ArgValueCandidates::new(complete_workspaces))]
         workspace: String,
     },
+    /// Manage carnets, the investigation folders under `[carnets] root`.
+    #[command(subcommand)]
+    Carnet(Carnet),
     /// Open the lazygit-style interface.
     Tui,
     /// Manage atelier's hooks in worktrunk's user config.
@@ -82,9 +85,31 @@ enum Ws {
     Rm {
         #[arg(add = ArgValueCandidates::new(complete_workspaces))]
         name: String,
+        /// Forget the carnets it owns; their folders stay on disk.
+        #[arg(long)]
+        forget_carnets: bool,
     },
     /// List workspaces.
     Ls,
+}
+
+#[derive(Subcommand)]
+enum Carnet {
+    /// Create a carnet `<root>/YYYY-MM-DD-[KEY-]<name>`: a git repo with a README.
+    New {
+        name: String,
+        /// Its workspace (default: the current session's, else the default workspace).
+        #[arg(short, long, add = ArgValueCandidates::new(complete_workspaces))]
+        workspace: Option<String>,
+    },
+    /// Record a dated git repo directly under the root as a carnet.
+    Add {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Its workspace (default: the current session's, else the default workspace).
+        #[arg(short, long, add = ArgValueCandidates::new(complete_workspaces))]
+        workspace: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -147,7 +172,16 @@ fn zellij_for<'a>(config: &Config, runner: &'a dyn Runner) -> Result<Zellij<'a>>
 fn run_state(command: Command, config: &Config, state: &mut State) -> Result<()> {
     match command {
         Command::Ws(Ws::Add { name }) => state.add_workspace(&name),
-        Command::Ws(Ws::Rm { name }) => state.remove_workspace(&name),
+        Command::Ws(Ws::Rm {
+            name,
+            forget_carnets,
+        }) => {
+            let forget = match forget_carnets {
+                true => state.workspace_carnets(&name)?,
+                false => Vec::new(),
+            };
+            state.remove_workspace(&name, &forget)
+        }
         Command::Ws(Ws::Ls) => {
             for name in state.workspaces()? {
                 println!("{name}");
@@ -198,10 +232,40 @@ fn run_state(command: Command, config: &Config, state: &mut State) -> Result<()>
             state.require_workspace(&workspace)?;
             zellij_for(config, &System)?.open_session(&workspace)
         }
+        Command::Carnet(command) => {
+            let root = config.require_carnet_root()?;
+            let names = crate::carnet::Names::new(config.ticket_pattern())?;
+            match command {
+                Carnet::New { name, workspace } => {
+                    let workspace = item_workspace(state, workspace)?;
+                    let path = crate::carnet::create(
+                        state, &System, &names, &root, &name, &workspace, "",
+                    )?;
+                    println!("created {} in {workspace}", path.display());
+                }
+                Carnet::Add { path, workspace } => {
+                    let workspace = item_workspace(state, workspace)?;
+                    let path = crate::carnet::add(state, &names, &root, &path, &workspace)?;
+                    println!("recorded {} in {workspace}", path.display());
+                }
+            }
+            Ok(())
+        }
         Command::Hooks(_) | Command::Shell(_) | Command::Hook { .. } | Command::Tui => {
             unreachable!()
         }
     }
+}
+
+/// The workspace a new item goes to: the one given, else the current session's when it is a
+/// workspace, else the default one.
+fn item_workspace(state: &State, workspace: Option<String>) -> Result<String> {
+    if let Some(workspace) = workspace {
+        state.require_workspace(&workspace)?;
+        return Ok(workspace);
+    }
+    let here = zellij::current_session().filter(|name| state.has_workspace(name).unwrap_or(false));
+    Ok(here.unwrap_or_else(|| state.default_workspace().to_owned()))
 }
 
 /// The main worktree of the repository containing `path`.

@@ -53,13 +53,7 @@ impl Layouts {
 }
 
 fn expand(path: &str) -> String {
-    match path.strip_prefix("~/") {
-        Some(rest) => crate::config::home()
-            .join(rest)
-            .to_string_lossy()
-            .into_owned(),
-        None => path.to_owned(),
-    }
+    crate::config::expand(path).to_string_lossy().into_owned()
 }
 
 fn kdl_string(value: &str) -> String {
@@ -484,13 +478,19 @@ impl Zellij<'_> {
     /// Renames every open tab of a repo, so duplicates in a group show their branch.
     pub fn sync_names(&self, state: &State, repo: &Path) -> Result<()> {
         for item in state.repo_items(repo)? {
-            if let Some(tab) = state.tab(&item.path)? {
-                let name = self.name_for(state, &item.path)?;
-                self.action(
-                    &tab.session,
-                    &["rename-tab-by-id", &tab.tab_id.to_string(), &name],
-                )?;
-            }
+            self.rename_tab(state, &item.path)?;
+        }
+        Ok(())
+    }
+
+    /// Renames an item's open tab, as after its group changed.
+    pub fn rename_tab(&self, state: &State, path: &Path) -> Result<()> {
+        if let Some(tab) = state.tab(path)? {
+            let name = self.name_for(state, path)?;
+            self.action(
+                &tab.session,
+                &["rename-tab-by-id", &tab.tab_id.to_string(), &name],
+            )?;
         }
         Ok(())
     }
@@ -502,6 +502,7 @@ mod tests {
 
     use super::*;
     use crate::process::fake::Fake;
+    use crate::state::ItemKind;
 
     #[test]
     fn group_and_duplicate_repo() {
@@ -580,7 +581,7 @@ mod tests {
         state.add_workspace("w").unwrap();
         state.add_repo("/r", None, "w").unwrap();
         state
-            .add_item("/r/a", "worktree", Some(Path::new("/r")), "", "w")
+            .add_item("/r/a", ItemKind::Worktree, Some(Path::new("/r")), "", "w")
             .unwrap();
         state
     }
@@ -658,7 +659,9 @@ mod tests {
         // Reconcile forgets tabs whose path is gone, so use a real directory.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
-        state.add_item(path, "carnet", None, "", "w").unwrap();
+        state
+            .add_item(path, ItemKind::Carnet, None, "", "w")
+            .unwrap();
         state
             .set_tab(&Tab {
                 path: path.into(),
@@ -686,7 +689,9 @@ mod tests {
         std::fs::create_dir(&gone).unwrap();
         for path in [&alive, &gone] {
             let path = path.to_str().unwrap();
-            state.add_item(path, "carnet", None, "", "w").unwrap();
+            state
+                .add_item(path, ItemKind::Carnet, None, "", "w")
+                .unwrap();
             state
                 .set_tab(&Tab {
                     path: path.into(),
@@ -696,7 +701,9 @@ mod tests {
                 })
                 .unwrap();
         }
-        state.add_item("/missing", "carnet", None, "", "w").unwrap();
+        state
+            .add_item("/missing", ItemKind::Carnet, None, "", "w")
+            .unwrap();
         state
             .set_tab(&Tab {
                 path: "/missing".into(),
@@ -742,7 +749,7 @@ mod tests {
     fn closing_a_duplicate_renames_the_remaining_tab() {
         let state = state();
         state
-            .add_item("/r/b", "worktree", Some(Path::new("/r")), "", "w")
+            .add_item("/r/b", ItemKind::Worktree, Some(Path::new("/r")), "", "w")
             .unwrap();
         for (path, id) in [("/r/a", 1), ("/r/b", 2)] {
             state
@@ -755,10 +762,22 @@ mod tests {
                 .unwrap();
         }
         state
-            .add_item("/r/c", "worktree", Some(Path::new("/r")), "G-1", "w")
+            .add_item(
+                "/r/c",
+                ItemKind::Worktree,
+                Some(Path::new("/r")),
+                "G-1",
+                "w",
+            )
             .unwrap();
         state
-            .add_item("/r/d", "worktree", Some(Path::new("/r")), "G-1", "w")
+            .add_item(
+                "/r/d",
+                ItemKind::Worktree,
+                Some(Path::new("/r")),
+                "G-1",
+                "w",
+            )
             .unwrap();
         for (path, id) in [("/r/c", 3), ("/r/d", 4)] {
             state

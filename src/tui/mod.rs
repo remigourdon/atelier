@@ -43,6 +43,7 @@ async fn drive(
     let size = terminal.size()?;
     let mut model = Model::new((size.width, size.height));
     model.tracker_config = context.config.tracker.clone();
+    model.carnets = context.config.carnets_enabled();
     let (sender, mut results) = mpsc::unbounded_channel::<Action>();
     let mut events = EventStream::new();
     let mut ticks = tokio::time::interval(Duration::from_secs(1));
@@ -155,9 +156,9 @@ mod tests {
         model.size = (width, height);
         let path = model.snapshot.work[1].path().clone();
         model.snapshot.work[1].tab = true;
-        model.snapshot.work[1].tree.dirty = true;
-        model.snapshot.work[1].tree.symbols = "!".into();
-        model.snapshot.work[0].tree.upstream = Some((0, 3));
+        model.snapshot.work[1].tree_mut().dirty = true;
+        model.snapshot.work[1].tree_mut().symbols = "!".into();
+        model.snapshot.work[0].tree_mut().upstream = Some((0, 3));
         update(&mut model, Action::Key(key('j')));
         update(
             &mut model,
@@ -203,7 +204,7 @@ mod tests {
     #[test]
     fn reviews_panel() {
         let mut model = loaded(120, 30);
-        model.snapshot.work[0].tree.branch = Some("change-2".into());
+        model.snapshot.work[0].tree_mut().branch = Some("change-2".into());
         update(&mut model, Action::Key(key('3')));
         insta::assert_snapshot!(render(&model, 120, 30));
     }
@@ -237,6 +238,22 @@ mod tests {
         for c in ['4', '[', '+'] {
             update(&mut model, Action::Key(key(c)));
         }
+        insta::assert_snapshot!(render(&model, 120, 30));
+    }
+
+    #[test]
+    fn carnet_shows_its_rendered_readme() {
+        let mut model = update::tests::with_carnets(loaded(120, 30));
+        let enter = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter);
+        for key in [key('G'), enter, key('j')] {
+            update(&mut model, Action::Key(key));
+        }
+        let readme = "# 2026-10-02-ideas\n\nWhat I found **so far**.\n";
+        update(
+            &mut model,
+            Action::Readme("/data/2026-10-02-ideas".into(), Some(readme.into())),
+        );
+        model.loading.clear();
         insta::assert_snapshot!(render(&model, 120, 30));
     }
 

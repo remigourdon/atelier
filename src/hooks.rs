@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::config::group_from_name;
 use crate::process;
-use crate::state::{State, Tab};
+use crate::state::{ItemKind, State, Tab};
 use crate::zellij::Zellij;
 
 /// The worktrunk hooks atelier handles.
@@ -125,6 +125,10 @@ pub fn handle(
         bail!("hook payload has neither primary_worktree_path nor repo_path");
     };
     let repo_path = resolve(repo_path);
+    // A carnet is never a repo: worktrees made of it are not tracked.
+    if state.item(&repo_path)?.is_some_and(|item| item.is_carnet()) {
+        return Ok(None);
+    }
     let known = |name: &&String| state.has_workspace(name).unwrap_or(false);
     let here = (hints.workspace.iter().find(known))
         .or(zellij.here.iter().find(known))
@@ -148,7 +152,13 @@ pub fn handle(
         group = group_from_name(ticket, &hints.group);
     }
     let workspace = here.unwrap_or(repo.default_workspace);
-    state.add_item(&path, "worktree", Some(&repo_path), &group, &workspace)?;
+    state.add_item(
+        &path,
+        ItemKind::Worktree,
+        Some(&repo_path),
+        &group,
+        &workspace,
+    )?;
     zellij.open_tab(state, &path).map(Some)
 }
 
@@ -284,13 +294,32 @@ mod tests {
         let w = world();
         w.state.add_repo(w.path("repo"), None, "default").unwrap();
         w.state
-            .add_item(w.path("wt"), "worktree", Some(&w.path("repo")), "", "w")
+            .add_item(
+                w.path("wt"),
+                ItemKind::Worktree,
+                Some(&w.path("repo")),
+                "",
+                "w",
+            )
             .unwrap();
         let fake = w.fake();
         let tab = w
             .run(&fake, Some("default"), Phase::PreSwitch, "ABC-1-x")
             .unwrap();
         assert_eq!(tab.session, "w");
+    }
+
+    #[test]
+    fn worktrees_of_a_carnet_are_not_tracked() {
+        let w = world();
+        w.state
+            .add_item(w.path("repo"), ItemKind::Carnet, None, "", "w")
+            .unwrap();
+        let fake = w.fake();
+        assert_eq!(w.run(&fake, Some("w"), Phase::PreStart, "ABC-1-x"), None);
+        assert_eq!(w.state.repos().unwrap(), []);
+        assert_eq!(w.state.item(w.path("wt")).unwrap(), None);
+        assert_eq!(fake.calls(), Vec::<String>::new());
     }
 
     #[test]
