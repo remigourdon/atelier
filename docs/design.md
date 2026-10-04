@@ -12,7 +12,7 @@ Goals: a fast lazygit-style TUI and CLI over worktrunk and zellij, and no assump
 Single crate. `src/tui` depends on core modules, never the reverse.
 
 ```
-src/  cli  config  state  sync  hooks  shell  process  zellij  worktrunk  reviews  issues  tui/{app,update,view,widgets,jobs}
+src/  cli  config  state  sync  hooks  shell  process  zellij  worktrunk  reviews  issues  carnet  tui/{app,update,view,widgets,jobs}
 ```
 
 - **Processes**: every external command goes through the `process::Runner` trait, so orchestration is tested against a fake that records calls.
@@ -105,7 +105,7 @@ Lazygit model: numbered side panels on the left, the main view on the right show
 | 3 | To review │ Mine | Reviews |
 | 4 | one per section | Issues; when the sections do not fit the title, only the active one shows, with its position |
 
-The main view is a structured key/value detail for each kind, plus recent commits. A carnet shows its rendered README, read like the commits only once selected; an issue shows its linked work. Errors go to the command log, not toasts.
+The main view is a structured key/value detail for each kind, plus recent commits. A carnet shows its rendered README, read like the commits only for the selected carnet; an issue shows its linked work. Errors go to the command log, not toasts.
 
 Layout: below ~100 columns the main view is hidden (`+` shows it). On short terminals the focused side panel expands and the others collapse to their titles. Mouse: click to focus or select, wheel to scroll. The accent colour is Catppuccin mauve. Work rows show `↓N` when behind upstream and a spinner while `p` runs; `icons = "nerd"` swaps the row glyphs for Nerd Font icons.
 

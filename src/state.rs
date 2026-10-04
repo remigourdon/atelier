@@ -62,15 +62,44 @@ impl Repo {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Item {
     pub path: PathBuf,
+    pub kind: ItemKind,
+    /// A worktree's repo; a carnet has none.
     pub repo: Option<PathBuf>,
     pub group: String,
     pub workspace: String,
 }
 
 impl Item {
-    /// A carnet is the only item without a repo.
     pub fn is_carnet(&self) -> bool {
-        self.repo.is_none()
+        self.kind == ItemKind::Carnet
+    }
+}
+
+/// The `items.kind` column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemKind {
+    Worktree,
+    Carnet,
+}
+
+impl ItemKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            ItemKind::Worktree => "worktree",
+            ItemKind::Carnet => "carnet",
+        }
+    }
+
+    fn parse(kind: &str) -> rusqlite::Result<Self> {
+        match kind {
+            "worktree" => Ok(ItemKind::Worktree),
+            "carnet" => Ok(ItemKind::Carnet),
+            other => Err(rusqlite::Error::InvalidColumnType(
+                1,
+                format!("kind {other}"),
+                rusqlite::types::Type::Text,
+            )),
+        }
     }
 }
 
@@ -174,9 +203,9 @@ impl State {
         Ok(())
     }
 
-    /// Removes an unused workspace. One owning carnets is removed only when `forget_carnets`,
-    /// which forgets them and keeps their folders.
-    pub fn remove_workspace(&self, name: &str, forget_carnets: bool) -> Result<()> {
+    /// Removes an unused workspace, forgetting the carnets in `forget` and keeping their
+    /// folders. It fails while it owns any other carnet, so none is forgotten unseen.
+    pub fn remove_workspace(&self, name: &str, forget: &[PathBuf]) -> Result<()> {
         if name == self.default_workspace {
             bail!("{name} is the default workspace and cannot be removed");
         }
@@ -197,17 +226,18 @@ impl State {
         if used("SELECT 1 FROM items WHERE workspace = ? AND kind <> 'carnet'")? {
             bail!("{name} owns worktrees");
         }
-        let carnets: Vec<String> = (self.workspace_carnets(name)?.iter())
+        let carnets = self.workspace_carnets(name)?;
+        let unlisted: Vec<String> = (carnets.iter())
+            .filter(|path| !forget.contains(path))
             .map(|path| path.display().to_string())
             .collect();
-        if !carnets.is_empty() && !forget_carnets {
-            bail!("{name} owns carnets: {}", carnets.join(", "));
+        if !unlisted.is_empty() {
+            bail!("{name} owns carnets: {}", unlisted.join(", "));
         }
         let transaction = self.db.unchecked_transaction()?;
-        transaction.execute(
-            "DELETE FROM items WHERE workspace = ? AND kind = 'carnet'",
-            [name],
-        )?;
+        for path in &carnets {
+            transaction.execute("DELETE FROM items WHERE path = ?", [text(path)])?;
+        }
         transaction.execute("DELETE FROM workspaces WHERE name = ?", [name])?;
         transaction.commit()?;
         Ok(())
@@ -342,7 +372,7 @@ impl State {
     pub fn add_item(
         &self,
         path: impl AsRef<Path>,
-        kind: &str,
+        kind: ItemKind,
         repo: Option<&Path>,
         group: &str,
         workspace: &str,
@@ -351,7 +381,13 @@ impl State {
         let added = self.db.execute(
             "INSERT OR IGNORE INTO items(path, kind, repo, group_key, workspace) \
              VALUES (?, ?, ?, ?, ?)",
-            params![text(path.as_ref()), kind, repo.map(text), group, workspace],
+            params![
+                text(path.as_ref()),
+                kind.as_str(),
+                repo.map(text),
+                group,
+                workspace
+            ],
         )?;
         Ok(added > 0)
     }
@@ -360,14 +396,15 @@ impl State {
         Ok(self
             .db
             .query_row(
-                "SELECT path, repo, group_key, workspace FROM items WHERE path = ?",
+                "SELECT path, kind, repo, group_key, workspace FROM items WHERE path = ?",
                 [text(path.as_ref())],
                 |row| {
                     Ok(Item {
                         path: path_column(row, 0)?,
-                        repo: row.get::<_, Option<String>>(1)?.map(PathBuf::from),
-                        group: row.get(2)?,
-                        workspace: row.get(3)?,
+                        kind: ItemKind::parse(&row.get::<_, String>(1)?)?,
+                        repo: row.get::<_, Option<String>>(2)?.map(PathBuf::from),
+                        group: row.get(3)?,
+                        workspace: row.get(4)?,
                     })
                 },
             )
@@ -589,7 +626,13 @@ mod tests {
         state.add_repo("/r", None, "default").unwrap();
         for path in ["/r", "/r/a"] {
             state
-                .add_item(path, "worktree", Some(Path::new("/r")), "", "default")
+                .add_item(
+                    path,
+                    ItemKind::Worktree,
+                    Some(Path::new("/r")),
+                    "",
+                    "default",
+                )
                 .unwrap();
         }
         state.set_group("/r/a", "ABC-1").unwrap();
@@ -649,10 +692,10 @@ mod tests {
     #[test]
     fn default_workspace_cannot_be_removed() {
         let state = fresh();
-        assert!(state.remove_workspace("default", false).is_err());
+        assert!(state.remove_workspace("default", &[]).is_err());
         state.add_workspace("w").unwrap();
-        state.remove_workspace("w", false).unwrap();
-        assert!(state.remove_workspace("w", false).is_err());
+        state.remove_workspace("w", &[]).unwrap();
+        assert!(state.remove_workspace("w", &[]).is_err());
     }
 
     #[test]
@@ -662,18 +705,18 @@ mod tests {
         state.add_repo("/r", None, "w").unwrap();
         assert!(
             state
-                .remove_workspace("w", false)
+                .remove_workspace("w", &[])
                 .unwrap_err()
                 .to_string()
                 .contains("repo default")
         );
         state.update_repo("r", None, Some("default")).unwrap();
         state
-            .add_item("/r/x", "worktree", Some(Path::new("/r")), "", "w")
+            .add_item("/r/x", ItemKind::Worktree, Some(Path::new("/r")), "", "w")
             .unwrap();
         assert!(
             state
-                .remove_workspace("w", true)
+                .remove_workspace("w", &[])
                 .unwrap_err()
                 .to_string()
                 .contains("owns worktrees")
@@ -684,17 +727,32 @@ mod tests {
     fn a_workspace_owning_carnets_is_removed_only_forgetting_them() {
         let state = fresh();
         state.add_workspace("w").unwrap();
-        state.add_item("/c1", "carnet", None, "", "w").unwrap();
         state
-            .add_item("/c2", "carnet", None, "", "default")
+            .add_item("/c1", ItemKind::Carnet, None, "", "w")
+            .unwrap();
+        state
+            .add_item("/c2", ItemKind::Carnet, None, "", "default")
             .unwrap();
         assert_eq!(
             state.workspace_carnets("w").unwrap(),
             [PathBuf::from("/c1")]
         );
-        let error = state.remove_workspace("w", false).unwrap_err().to_string();
+        let error = state.remove_workspace("w", &[]).unwrap_err().to_string();
         assert!(error.contains("owns carnets: /c1"), "{error}");
-        state.remove_workspace("w", true).unwrap();
+        state
+            .add_item("/c3", ItemKind::Carnet, None, "", "w")
+            .unwrap();
+        let error = (state.remove_workspace("w", &["/c1".into()]).unwrap_err()).to_string();
+        assert!(
+            error.contains("owns carnets: /c3"),
+            "one recorded since: {error}"
+        );
+        assert!(
+            state.item("/c1").unwrap().is_some(),
+            "nothing forgotten on failure"
+        );
+        let forget = state.workspace_carnets("w").unwrap();
+        state.remove_workspace("w", &forget).unwrap();
         assert!(!state.has_workspace("w").unwrap());
         assert_eq!(state.item("/c1").unwrap(), None);
         assert!(state.item("/c2").unwrap().is_some());
@@ -724,7 +782,13 @@ mod tests {
         let mut state = fresh();
         state.add_repo("/r", None, "default").unwrap();
         state
-            .add_item("/r", "worktree", Some(Path::new("/r")), "", "default")
+            .add_item(
+                "/r",
+                ItemKind::Worktree,
+                Some(Path::new("/r")),
+                "",
+                "default",
+            )
             .unwrap();
         let tab = Tab {
             path: "/r".into(),
@@ -787,16 +851,30 @@ mod tests {
     fn items_keep_their_first_workspace() {
         let state = fresh();
         state.add_workspace("w").unwrap();
-        assert!(state.add_item("/x", "carnet", None, "", "w").unwrap());
-        assert!(!state.add_item("/x", "carnet", None, "", "default").unwrap());
+        assert!(
+            state
+                .add_item("/x", ItemKind::Carnet, None, "", "w")
+                .unwrap()
+        );
+        assert!(
+            !state
+                .add_item("/x", ItemKind::Carnet, None, "", "default")
+                .unwrap()
+        );
         assert_eq!(state.require_item("/x").unwrap().workspace, "w");
-        assert!(state.add_item("/y", "carnet", None, "", "nope").is_err());
+        assert!(
+            state
+                .add_item("/y", ItemKind::Carnet, None, "", "nope")
+                .is_err()
+        );
     }
 
     #[test]
     fn a_carnet_is_never_registered_as_a_repo() {
         let state = fresh();
-        state.add_item("/x", "carnet", None, "", "default").unwrap();
+        state
+            .add_item("/x", ItemKind::Carnet, None, "", "default")
+            .unwrap();
         assert!(
             (state
                 .add_repo("/x", None, "default")

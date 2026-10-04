@@ -11,7 +11,7 @@ use crate::config::{Config, group_from_name};
 use crate::issues::{self, Issue, TrackerConfig};
 use crate::process::{Logged, Recorder, Runner, System};
 use crate::reviews::{self, Provider, Review, Role};
-use crate::state::{self, State};
+use crate::state::{self, ItemKind, State};
 use crate::zellij::{self, Layouts, Zellij};
 use crate::{carnet, hooks, sync, worktrunk};
 
@@ -55,7 +55,7 @@ pub fn run(context: &Context, job: Job) -> Action {
     match job {
         // Refreshes and commit listings run constantly: log only their failures.
         Job::Refresh { full } => {
-            let carnets = context.config.carnet_root().is_some();
+            let carnets = context.config.carnets_enabled();
             let loaded = context
                 .state()
                 .and_then(|state| load(&state, &zellij, &context.ticket, full, carnets));
@@ -274,7 +274,7 @@ pub fn load(
         workspaces,
         repos: state.repos()?,
         work,
-        carnets: all_carnets,
+        all_carnets,
         forges: synced.forges,
     };
     Ok((snapshot, problems))
@@ -411,7 +411,7 @@ fn execute(context: &Context, state: &mut State, zellij: &Zellij, job: Job) -> R
             state.remove_repo(&repo)
         }
         Job::AddWorkspace(name) => state.add_workspace(&name),
-        Job::RemoveWorkspace(name) => state.remove_workspace(&name, true),
+        Job::RemoveWorkspace { name, carnets } => state.remove_workspace(&name, &carnets),
         Job::SwitchWorkspace(name) => zellij.open_session(&name),
         Job::Browse(url) => browse(context, runner, &url),
     }
@@ -519,7 +519,7 @@ fn switch(
         return Ok(None);
     };
     let path = sync::canonical(&tree.path);
-    state.add_item(&path, "worktree", Some(repo), group, workspace)?;
+    state.add_item(&path, ItemKind::Worktree, Some(repo), group, workspace)?;
     Ok(Some(path))
 }
 
@@ -667,7 +667,7 @@ mod tests {
         state.add_workspace("side").unwrap();
         state.add_repo("/r", None, "default").unwrap();
         state
-            .add_item(&tree, "worktree", Some(Path::new("/r")), "", "side")
+            .add_item(&tree, ItemKind::Worktree, Some(Path::new("/r")), "", "side")
             .unwrap();
         state
             .set_tab(&state::Tab {
@@ -805,7 +805,13 @@ mod tests {
         state.add_repo("/r", None, "default").unwrap();
         // As the hooks record it: a GitHub issue's branch names no ticket, so no group.
         state
-            .add_item("/r.5-fix", "worktree", Some(Path::new("/r")), "", "default")
+            .add_item(
+                "/r.5-fix",
+                ItemKind::Worktree,
+                Some(Path::new("/r")),
+                "",
+                "default",
+            )
             .unwrap();
         state
             .set_tab(&state::Tab {
@@ -863,7 +869,13 @@ mod tests {
             State::from_connection(Connection::open_in_memory().unwrap(), "default").unwrap();
         state.add_repo("/r", None, "default").unwrap();
         state
-            .add_item("/r.x", "worktree", Some(Path::new("/r")), "", "default")
+            .add_item(
+                "/r.x",
+                ItemKind::Worktree,
+                Some(Path::new("/r")),
+                "",
+                "default",
+            )
             .unwrap();
         let fake = Fake::default();
         let removal = Removal {
@@ -893,14 +905,18 @@ mod tests {
         std::fs::create_dir(&bare).unwrap();
         for path in [&notes, &bare, &dir.path().join("gone")] {
             state
-                .add_item(path, "carnet", None, "G-1", "default")
+                .add_item(path, ItemKind::Carnet, None, "G-1", "default")
                 .unwrap();
         }
         let fake = Fake::default();
         let ticket = Config::default().ticket_regex().unwrap();
         let (snapshot, _) = load(&state, &zellij(&fake), &ticket, false, false).unwrap();
         assert!(snapshot.work.is_empty());
-        assert_eq!(snapshot.carnets.len(), 2, "hidden carnets are still known");
+        assert_eq!(
+            snapshot.all_carnets.len(),
+            2,
+            "hidden carnets are still known"
+        );
         let (snapshot, _) = load(&state, &zellij(&fake), &ticket, false, true).unwrap();
         let carnets: Vec<_> = (snapshot.work.iter())
             .map(|work| (work.title(), work.group.as_str()))
@@ -922,7 +938,7 @@ mod tests {
             State::from_connection(Connection::open_in_memory().unwrap(), "default").unwrap();
         let dir = tempfile::tempdir().unwrap();
         state
-            .add_item(dir.path(), "carnet", None, "", "default")
+            .add_item(dir.path(), ItemKind::Carnet, None, "", "default")
             .unwrap();
         let fake = Fake::default();
         let removal = Removal {

@@ -644,8 +644,9 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
         }
         Cmd::Activate => return activate(model),
         Cmd::Enter => match model.work_row() {
-            Some(Row::Group { key, folded, .. }) if list == List::Work => {
-                model.set_folded(&key, !folded);
+            // Not the row's `folded`: a filter shows every group unfolded.
+            Some(Row::Group { key, .. }) if list == List::Work => {
+                model.set_folded(&key, !model.is_folded(&key));
             }
             _ => model.focus = Focus::Main,
         },
@@ -1085,22 +1086,19 @@ fn remove(model: &mut Model) -> Vec<Effect> {
                 return Vec::new();
             };
             let mut lines = vec![format!("Remove the workspace {name}?")];
-            let carnets: Vec<_> = (model.snapshot.carnets.iter())
+            let carnets: Vec<PathBuf> = (model.snapshot.all_carnets.iter())
                 .filter(|carnet| carnet.workspace == name)
+                .map(|carnet| carnet.path.clone())
                 .collect();
             if !carnets.is_empty() {
                 lines.push("Its carnets will be forgotten; their folders stay on disk:".into());
-                lines.extend(
-                    carnets
-                        .iter()
-                        .map(|carnet| format!("  {}", carnet.path.display())),
-                );
+                lines.extend(carnets.iter().map(|path| format!("  {}", path.display())));
             }
             confirm(
                 model,
                 "Remove workspace".into(),
                 lines,
-                Job::RemoveWorkspace(name),
+                Job::RemoveWorkspace { name, carnets },
             )
         }
         List::Repos => {
@@ -1305,16 +1303,18 @@ pub mod tests {
             carnet("2026-09-20-old", "", "default"),
             carnet("2026-10-02-ideas", "", "default"),
         ]);
-        model.snapshot.carnets = (model.snapshot.work.iter())
+        model.snapshot.all_carnets = (model.snapshot.work.iter())
             .filter(|work| work.is_carnet())
             .map(|work| crate::state::Item {
                 path: work.path.clone(),
+                kind: crate::state::ItemKind::Carnet,
                 repo: None,
                 group: work.group.clone(),
                 workspace: work.workspace.clone(),
             })
             .chain([crate::state::Item {
                 path: "/data/2026-08-01-hidden".into(),
+                kind: crate::state::ItemKind::Carnet,
                 repo: None,
                 group: String::new(),
                 workspace: "side".into(),
@@ -1339,7 +1339,7 @@ pub mod tests {
                 work("web", "ABC-1-form", "ABC-1", "default"),
                 work("web", "main", "", "side"),
             ],
-            carnets: Vec::new(),
+            all_carnets: Vec::new(),
             forges: [(
                 PathBuf::from("/src/api"),
                 Forge {
@@ -1516,7 +1516,10 @@ pub mod tests {
         press(&mut model, "jd");
         assert_eq!(
             jobs(press(&mut model, "y")),
-            [Job::RemoveWorkspace("side".into())]
+            [Job::RemoveWorkspace {
+                name: "side".into(),
+                carnets: Vec::new()
+            }]
         );
         press(&mut model, "]d");
         assert_eq!(
@@ -1660,6 +1663,15 @@ pub mod tests {
         assert_eq!(model.filter(List::Work), "form");
         press(&mut model, "\x1b");
         assert_eq!(titles(&model).len(), 4);
+    }
+
+    #[test]
+    fn enter_under_a_filter_toggles_a_groups_fold() {
+        let mut model = model();
+        press(&mut model, "\n");
+        assert_eq!(titles(&model), ["[ABC-1]", "api:main"]);
+        press(&mut model, "/form\ngg\n\x1b");
+        assert_eq!(titles(&model).len(), 4, "unfolded while filtered");
     }
 
     #[test]
@@ -2386,7 +2398,13 @@ pub mod tests {
                 .any(|line| line.contains("/data/2026-08-01-hidden")),
             "a hidden carnet is named: {lines:?}"
         );
-        assert_eq!(*job, Job::RemoveWorkspace("side".into()));
+        assert_eq!(
+            *job,
+            Job::RemoveWorkspace {
+                name: "side".into(),
+                carnets: vec!["/data/2026-08-01-hidden".into()]
+            }
+        );
     }
 
     #[test]

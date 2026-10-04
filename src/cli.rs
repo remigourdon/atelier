@@ -175,7 +175,13 @@ fn run_state(command: Command, config: &Config, state: &mut State) -> Result<()>
         Command::Ws(Ws::Rm {
             name,
             forget_carnets,
-        }) => state.remove_workspace(&name, forget_carnets),
+        }) => {
+            let forget = match forget_carnets {
+                true => state.workspace_carnets(&name)?,
+                false => Vec::new(),
+            };
+            state.remove_workspace(&name, &forget)
+        }
         Command::Ws(Ws::Ls) => {
             for name in state.workspaces()? {
                 println!("{name}");

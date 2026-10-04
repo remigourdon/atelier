@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::config::group_from_name;
 use crate::process;
-use crate::state::{State, Tab};
+use crate::state::{ItemKind, State, Tab};
 use crate::zellij::Zellij;
 
 /// The worktrunk hooks atelier handles.
@@ -152,7 +152,13 @@ pub fn handle(
         group = group_from_name(ticket, &hints.group);
     }
     let workspace = here.unwrap_or(repo.default_workspace);
-    state.add_item(&path, "worktree", Some(&repo_path), &group, &workspace)?;
+    state.add_item(
+        &path,
+        ItemKind::Worktree,
+        Some(&repo_path),
+        &group,
+        &workspace,
+    )?;
     zellij.open_tab(state, &path).map(Some)
 }
 
@@ -288,7 +294,13 @@ mod tests {
         let w = world();
         w.state.add_repo(w.path("repo"), None, "default").unwrap();
         w.state
-            .add_item(w.path("wt"), "worktree", Some(&w.path("repo")), "", "w")
+            .add_item(
+                w.path("wt"),
+                ItemKind::Worktree,
+                Some(&w.path("repo")),
+                "",
+                "w",
+            )
             .unwrap();
         let fake = w.fake();
         let tab = w
@@ -301,7 +313,7 @@ mod tests {
     fn worktrees_of_a_carnet_are_not_tracked() {
         let w = world();
         w.state
-            .add_item(w.path("repo"), "carnet", None, "", "w")
+            .add_item(w.path("repo"), ItemKind::Carnet, None, "", "w")
             .unwrap();
         let fake = w.fake();
         assert_eq!(w.run(&fake, Some("w"), Phase::PreStart, "ABC-1-x"), None);

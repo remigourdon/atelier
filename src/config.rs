@@ -94,6 +94,10 @@ impl Config {
         Some(expand(root))
     }
 
+    pub fn carnets_enabled(&self) -> bool {
+        self.carnet_root().is_some()
+    }
+
     /// Where carnets live, or why there are none.
     pub fn require_carnet_root(&self) -> Result<PathBuf> {
         self.carnet_root()

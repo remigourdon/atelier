@@ -43,7 +43,7 @@ async fn drive(
     let size = terminal.size()?;
     let mut model = Model::new((size.width, size.height));
     model.tracker_config = context.config.tracker.clone();
-    model.carnets = context.config.carnet_root().is_some();
+    model.carnets = context.config.carnets_enabled();
     let (sender, mut results) = mpsc::unbounded_channel::<Action>();
     let mut events = EventStream::new();
     let mut ticks = tokio::time::interval(Duration::from_secs(1));

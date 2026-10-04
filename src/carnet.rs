@@ -6,7 +6,7 @@ use color_eyre::eyre::{Result, bail};
 use regex::Regex;
 
 use crate::process::Runner;
-use crate::state::{State, dir_name};
+use crate::state::{ItemKind, State, dir_name};
 
 /// How carnet names carry a ticket key: right after the date in a folder name, and at the
 /// start of a typed name.
@@ -83,9 +83,16 @@ pub fn create(
     }
     std::fs::create_dir_all(&path)?;
     let path = path.canonicalize()?;
-    std::fs::write(path.join("README.md"), format!("# {name}\n"))?;
-    runner.output("git", &["-C", &path.to_string_lossy(), "init", "--quiet"])?;
-    state.add_item(&path, "carnet", None, &group, workspace)?;
+    let made = (|| {
+        std::fs::write(path.join("README.md"), format!("# {name}\n"))?;
+        runner.output("git", &["-C", &path.to_string_lossy(), "init", "--quiet"])?;
+        state.add_item(&path, ItemKind::Carnet, None, &group, workspace)
+    })();
+    // A half-made folder would block retrying under the same name.
+    if let Err(err) = made {
+        let _ = std::fs::remove_dir_all(&path);
+        return Err(err);
+    }
     Ok(path)
 }
 
@@ -116,7 +123,19 @@ pub fn add(
     if !path.join(".git").exists() {
         bail!("{} is not a git repo", path.display());
     }
-    if !state.add_item(&path, "carnet", None, &names.group(&name), workspace)? {
+    if state.repo_by_path(&path)?.is_some() {
+        bail!(
+            "{} is a registered repo, which is never a carnet",
+            path.display()
+        );
+    }
+    if !state.add_item(
+        &path,
+        ItemKind::Carnet,
+        None,
+        &names.group(&name),
+        workspace,
+    )? {
         bail!("{} is already recorded", path.display());
     }
     Ok(path)
@@ -237,6 +256,26 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_creation_leaves_nothing_behind() {
+        let state = state();
+        let root = tempfile::tempdir().unwrap();
+        let failing = Fake::default().always("git", None);
+        assert!(create(&state, &failing, &names(), root.path(), "notes", "w", "").is_err());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        assert_eq!(state.carnets().unwrap(), []);
+        create(
+            &state,
+            &Fake::default(),
+            &names(),
+            root.path(),
+            "notes",
+            "w",
+            "",
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn a_carnets_group_is_the_key_right_after_its_date() {
         let names = names();
         assert_eq!(names.group("2026-01-02-ORD-7-crash"), "ORD-7");
@@ -265,6 +304,11 @@ mod tests {
                 .to_string()
         };
         assert!(error(&folder).contains("already"));
+        let registered = repo(&root, "2026-01-06-registered");
+        state
+            .add_repo(registered.canonicalize().unwrap(), None, "w")
+            .unwrap();
+        assert!(error(&registered).contains("registered repo"));
         assert!(add(&state, &names(), &root, &root.join("missing"), "w").is_err());
         let file = root.join("file");
         std::fs::write(&file, "").unwrap();

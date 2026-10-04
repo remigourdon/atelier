@@ -368,8 +368,7 @@ fn rows<'a>(model: &'a Model, palette: &Palette, list: List) -> Vec<Line<'a>> {
                 Row::Item(index) => {
                     let work = &model.snapshot.work[index];
                     let glyphs = &palette.glyphs;
-                    // Ungrouped carnets sit in the `Carnets` group.
-                    let indent = if work.group.is_empty() && !work.is_carnet() {
+                    let indent = if work.group.is_empty() && !work.in_carnets_group() {
                         ""
                     } else {
                         "  "

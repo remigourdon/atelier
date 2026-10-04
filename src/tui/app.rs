@@ -113,7 +113,7 @@ pub struct Snapshot {
     pub repos: Vec<Repo>,
     pub work: Vec<Work>,
     /// Every recorded carnet, shown or not, so removing a workspace can name the ones it owns.
-    pub carnets: Vec<crate::state::Item>,
+    pub all_carnets: Vec<crate::state::Item>,
     /// Each repo's forge web page, by repo path.
     pub forges: HashMap<PathBuf, Forge>,
 }
@@ -146,6 +146,11 @@ impl Work {
 
     pub fn is_carnet(&self) -> bool {
         self.kind == WorkKind::Carnet
+    }
+
+    /// An ungrouped carnet, listed in the `Carnets` group.
+    pub fn in_carnets_group(&self) -> bool {
+        self.group.is_empty() && self.is_carnet()
     }
 
     /// A worktree's repo.
@@ -268,7 +273,11 @@ pub enum Job {
     },
     Forget(PathBuf),
     AddWorkspace(String),
-    RemoveWorkspace(String),
+    /// Removes a workspace, forgetting the carnets its confirmation listed.
+    RemoveWorkspace {
+        name: String,
+        carnets: Vec<PathBuf>,
+    },
     SwitchWorkspace(String),
     Browse(String),
     /// Lists my reviews on each host, from the cache unless `force`.
@@ -977,8 +986,11 @@ impl Model {
             .collect();
         // Named groups, then ungrouped worktrees, then ungrouped carnets.
         let section = |work: &Work| {
-            let ungrouped = work.group.is_empty();
-            (ungrouped, ungrouped && work.is_carnet(), work.group.clone())
+            (
+                work.group.is_empty(),
+                work.in_carnets_group(),
+                work.group.clone(),
+            )
         };
         members.sort_by(|&a, &b| {
             let (a, b) = (&work[a], &work[b]);
@@ -1008,7 +1020,7 @@ impl Model {
         let mut index = 0;
         while index < members.len() {
             let first = &work[members[index]];
-            let carnets = first.group.is_empty() && first.is_carnet();
+            let carnets = first.in_carnets_group();
             let end = members[index..]
                 .iter()
                 .position(|&other| section(&work[other]) != section(first))
