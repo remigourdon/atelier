@@ -292,7 +292,6 @@ fn run_hooks(command: Hooks) -> Result<()> {
     if doc.to_string() == text {
         return Ok(());
     }
-    hooks::check_writable(&path)?;
     std::fs::create_dir_all(path.parent().unwrap())?;
     std::fs::write(&path, doc.to_string())?;
     println!("updated {}", path.display());

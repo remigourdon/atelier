@@ -121,7 +121,7 @@ programs.atelier = {
 };
 ```
 
-The module never writes worktrunk's config; whoever generates it merges `worktrunk.hooks`. Users without Nix run `atelier hooks install`, which adds named `atelier` entries with `toml_edit` and refuses to touch a file that links into `/nix/store`.
+The module never writes worktrunk's config; whoever generates it merges `worktrunk.hooks`. Users without Nix run `atelier hooks install`, which adds named `atelier` entries with `toml_edit`.
 
 ## Testing and CI
 

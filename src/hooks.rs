@@ -185,19 +185,6 @@ pub fn worktrunk_config() -> PathBuf {
     crate::config::config_home().join("worktrunk/config.toml")
 }
 
-/// Refuses to edit a file managed by Nix, which would be lost or fail anyway.
-pub fn check_writable(path: &Path) -> Result<()> {
-    if let Ok(target) = std::fs::canonicalize(path)
-        && target.starts_with("/nix/store")
-    {
-        bail!(
-            "{} links into /nix/store; add the hooks through Nix (programs.atelier.worktrunk.hooks)",
-            path.display()
-        );
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
@@ -257,20 +244,6 @@ mod tests {
         assert!(d.get("pre-start").is_none());
         assert!(d.get("pre-switch").is_none());
         assert_eq!(d["post-remove"]["stop"].as_str(), Some("kill"));
-    }
-
-    #[test]
-    fn nix_store_links_are_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let plain = dir.path().join("config.toml");
-        std::fs::write(&plain, "").unwrap();
-        check_writable(&plain).unwrap();
-        check_writable(&dir.path().join("missing.toml")).unwrap();
-        if Path::new("/nix/store").is_dir() {
-            let link = dir.path().join("link.toml");
-            std::os::unix::fs::symlink("/nix/store", &link).unwrap();
-            assert!(check_writable(&link).is_err());
-        }
     }
 
     struct World {
