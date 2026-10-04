@@ -24,9 +24,24 @@
           default = pkgs.rustPlatform.buildRustPackage {
             pname = cargoToml.package.name;
             version = cargoToml.package.version;
-            src = self;
+            src = pkgs.lib.fileset.toSource {
+              root = ./.;
+              fileset = pkgs.lib.fileset.unions [
+                ./Cargo.toml
+                ./Cargo.lock
+                ./src
+                ./tests
+              ];
+            };
             cargoLock.lockFile = ./Cargo.lock;
-            meta.mainProgram = "atelier";
+            meta = {
+              inherit (cargoToml.package) description;
+              license = with pkgs.lib.licenses; [
+                mit
+                asl20
+              ];
+              mainProgram = cargoToml.package.name;
+            };
           };
         }
       );
