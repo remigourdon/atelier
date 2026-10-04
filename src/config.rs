@@ -17,7 +17,17 @@ pub struct Config {
     pub ticket_pattern: Option<String>,
     pub browser: Option<String>,
     pub theme: Theme,
+    pub icons: Icons,
     pub zellij: Zellij,
+}
+
+/// Plain Unicode glyphs work in any font; Nerd Font icons need one installed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Icons {
+    #[default]
+    Unicode,
+    Nerd,
 }
 
 /// A Catppuccin flavor.
@@ -176,6 +186,7 @@ mod tests {
         assert_eq!(config.anchor_pane(), "editor");
         assert_eq!(config.agent_command(), "claude");
         assert_eq!(config.flavor().name, catppuccin::PALETTE.mocha.name);
+        assert_eq!(config.icons, Icons::Unicode);
         let config = Config::parse(
             "default_workspace = \"vrac\"\ntheme = \"latte\"\n[zellij]\nanchor_pane = \"main\"\n",
         )
@@ -186,5 +197,10 @@ mod tests {
         let config = Config::parse("browser = \"firefox\"\n").unwrap();
         assert_eq!(config.browser().as_deref(), Some("firefox"));
         assert!(Config::parse("theme = \"neon\"").is_err());
+        assert_eq!(
+            Config::parse("icons = \"nerd\"").unwrap().icons,
+            Icons::Nerd
+        );
+        assert!(Config::parse("icons = \"emoji\"").is_err());
     }
 }

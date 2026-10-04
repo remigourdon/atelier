@@ -8,6 +8,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use super::app::{Focus, KEYMAP, Line, List, Model, Panel, Screen};
 use super::widgets;
+use crate::config::Icons;
 
 /// Below this width the main view is hidden until `+`.
 pub const NARROW: u16 = 100;
@@ -24,12 +25,61 @@ pub struct Theme {
     pub error: Color,
     pub warn: Color,
     pub info: Color,
+    pub glyphs: Glyphs,
+}
+
+/// The symbols rows are drawn with; an empty one is left out.
+pub struct Glyphs {
+    pub workspace: &'static str,
+    pub repo: &'static str,
+    pub worktree: &'static str,
+    pub open: &'static str,
+    pub closed: &'static str,
+    pub folded: &'static str,
+    pub unfolded: &'static str,
+    pub spinner: [&'static str; 4],
+}
+
+impl Glyphs {
+    pub fn new(icons: Icons) -> Self {
+        let spinner = ["◐", "◓", "◑", "◒"];
+        match icons {
+            Icons::Unicode => Self {
+                workspace: "",
+                repo: "",
+                worktree: "",
+                open: "●",
+                closed: "○",
+                folded: "▸",
+                unfolded: "▾",
+                spinner,
+            },
+            // Nerd Fonts: fa-desktop, oct-repo, dev-git_branch, fa-circle, fa-circle_o,
+            // fa-folder, fa-folder_open.
+            Icons::Nerd => Self {
+                workspace: "\u{f108}",
+                repo: "\u{f401}",
+                worktree: "\u{e725}",
+                open: "\u{f111}",
+                closed: "\u{f10c}",
+                folded: "\u{f07b}",
+                unfolded: "\u{f07c}",
+                spinner,
+            },
+        }
+    }
+}
+
+/// A glyph and its separating space, or nothing for an empty glyph.
+fn icon(glyph: &'static str, style: Style) -> Option<Span<'static>> {
+    (!glyph.is_empty()).then(|| Span::styled(format!("{glyph} "), style))
 }
 
 impl Theme {
-    pub fn new(flavor: catppuccin::Flavor) -> Self {
+    pub fn new(flavor: catppuccin::Flavor, icons: Icons) -> Self {
         let colors = flavor.colors;
         Self {
+            glyphs: Glyphs::new(icons),
             accent: colors.mauve.into(),
             text: colors.text.into(),
             dim: colors.overlay1.into(),
@@ -227,7 +277,8 @@ fn rows<'a>(model: &'a Model, theme: &Theme, list: List) -> Vec<Text<'a>> {
                     .iter()
                     .filter(|work| work.workspace == *name && work.tab)
                     .count();
-                let mut spans = vec![Span::raw(name.as_str())];
+                let mut spans: Vec<Span> = icon(theme.glyphs.workspace, dim).into_iter().collect();
+                spans.push(Span::raw(name.as_str()));
                 if model.snapshot.here.as_ref() == Some(name) {
                     spans.push(Span::styled(" (here)", Style::new().fg(theme.accent)));
                 }
@@ -241,10 +292,10 @@ fn rows<'a>(model: &'a Model, theme: &Theme, list: List) -> Vec<Text<'a>> {
             .repos()
             .into_iter()
             .map(|repo| {
-                Text::from(vec![
-                    Span::raw(repo.name()),
-                    Span::styled(format!(" → {}", repo.default_workspace), dim),
-                ])
+                let mut spans: Vec<Span> = icon(theme.glyphs.repo, dim).into_iter().collect();
+                spans.push(Span::raw(repo.name()));
+                spans.push(Span::styled(format!(" → {}", repo.default_workspace), dim));
+                Text::from(spans)
             })
             .collect(),
         List::Work => model
@@ -263,7 +314,14 @@ fn rows<'a>(model: &'a Model, theme: &Theme, list: List) -> Vec<Text<'a>> {
                         .count();
                     Text::from(vec![
                         Span::styled(
-                            format!("{} {name}", if folded { "▸" } else { "▾" }),
+                            format!(
+                                "{} {name}",
+                                if folded {
+                                    theme.glyphs.folded
+                                } else {
+                                    theme.glyphs.unfolded
+                                }
+                            ),
                             Style::new().fg(theme.info).bold(),
                         ),
                         Span::styled(format!(" {} · {open} open", members.len()), dim),
@@ -271,23 +329,35 @@ fn rows<'a>(model: &'a Model, theme: &Theme, list: List) -> Vec<Text<'a>> {
                 }
                 Line::Item(index) => {
                     let work = &model.snapshot.work[index];
+                    let glyphs = &theme.glyphs;
                     let indent = if work.group.is_empty() { "" } else { "  " };
-                    let marker = if work.tab {
-                        Span::styled("● ", Style::new().fg(theme.ok))
+                    let marker = if model.pulling.contains(work.path()) {
+                        let frame = glyphs.spinner[model.frame % glyphs.spinner.len()];
+                        Span::styled(format!("{frame} "), Style::new().fg(theme.info))
+                    } else if work.tab {
+                        Span::styled(format!("{} ", glyphs.open), Style::new().fg(theme.ok))
                     } else {
-                        Span::styled("○ ", dim)
+                        Span::styled(format!("{} ", glyphs.closed), dim)
                     };
                     let status = if work.tree.dirty {
                         Style::new().fg(theme.warn)
                     } else {
                         dim
                     };
-                    Text::from(vec![
-                        Span::raw(indent),
-                        marker,
-                        Span::raw(work.title()),
-                        Span::styled(format!(" {}", work.tree.symbols), status),
-                    ])
+                    let mut spans = vec![Span::raw(indent), marker];
+                    spans.extend(icon(glyphs.worktree, dim));
+                    spans.push(Span::raw(work.title()));
+                    if !work.tree.symbols.is_empty() {
+                        spans.push(Span::styled(format!(" {}", work.tree.symbols), status));
+                    }
+                    if let Some((_, behind)) = work.tree.upstream.filter(|&(_, behind)| behind > 0)
+                    {
+                        spans.push(Span::styled(
+                            format!(" ↓{behind}"),
+                            Style::new().fg(theme.warn),
+                        ));
+                    }
+                    Text::from(spans)
                 }
             })
             .collect(),

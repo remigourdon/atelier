@@ -21,7 +21,7 @@ use jobs::Context;
 use view::Theme;
 
 pub fn run(config: Config) -> Result<()> {
-    let theme = Theme::new(config.flavor());
+    let theme = Theme::new(config.flavor(), config.icons);
     let context = Arc::new(Context::new(config)?);
     tokio::runtime::Runtime::new()?.block_on(event_loop(context, theme))
 }
@@ -90,10 +90,10 @@ async fn drive(
             Some(action) = results.recv() => action,
             _ = ticks.tick() => Action::Tick,
         };
-        // A quiet tick changes nothing on screen.
+        // A quiet tick changes nothing on screen, unless a spinner is turning.
         let tick = action == Action::Tick;
         effects = update::update(&mut model, action);
-        dirty = !tick || !effects.is_empty();
+        dirty = !tick || !effects.is_empty() || model.animating();
     }
 }
 
@@ -125,6 +125,7 @@ mod tests {
     use super::app::{Action, Model};
     use super::update::update;
     use super::*;
+    use crate::config::Icons;
 
     #[test]
     fn base64_pads() {
@@ -136,8 +137,12 @@ mod tests {
     }
 
     fn render(model: &Model, width: u16, height: u16) -> String {
+        render_with(model, width, height, Icons::Unicode)
+    }
+
+    fn render_with(model: &Model, width: u16, height: u16, icons: Icons) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        let theme = Theme::new(catppuccin::PALETTE.mocha);
+        let theme = Theme::new(catppuccin::PALETTE.mocha, icons);
         terminal
             .draw(|frame| view::render(frame, model, &theme))
             .unwrap();
@@ -151,6 +156,7 @@ mod tests {
         model.snapshot.work[1].tab = true;
         model.snapshot.work[1].tree.dirty = true;
         model.snapshot.work[1].tree.symbols = "!".into();
+        model.snapshot.work[0].tree.upstream = Some((0, 3));
         update(&mut model, Action::Key(key('j')));
         update(
             &mut model,
@@ -174,6 +180,13 @@ mod tests {
     #[test]
     fn main_layout() {
         insta::assert_snapshot!(render(&loaded(120, 30), 120, 30));
+    }
+
+    #[test]
+    fn nerd_icons_and_a_pull_in_flight() {
+        let mut model = loaded(120, 16);
+        update(&mut model, Action::Key(key('p')));
+        insta::assert_snapshot!(render_with(&model, 120, 16, Icons::Nerd));
     }
 
     #[test]

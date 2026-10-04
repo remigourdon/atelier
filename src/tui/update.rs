@@ -8,8 +8,8 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use super::app::{
-    Action, Cmd, Effect, FAST_REFRESH, FULL_REFRESH, Focus, Job, KEYMAP, Line, List, LogEntry,
-    MenuEntry, Modal, Model, Panel, Removal, Screen, Submit, lookup,
+    Action, Binding, Cmd, Effect, FAST_REFRESH, FULL_REFRESH, Focus, Job, KEYMAP, Line, List,
+    LogEntry, MenuEntry, Modal, Model, On, Panel, Removal, Screen, Submit, lookup,
 };
 use super::view::{areas, main_len, offset};
 
@@ -75,8 +75,13 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
             model.commits.insert(path, lines);
             Vec::new()
         }
-        Action::Finished { source, log, error } => {
-            done(model, source);
+        Action::Finished { job, log, error } => {
+            done(model, job.source());
+            if let Job::Pull(paths) = &job {
+                for path in paths {
+                    model.pulling.remove(path);
+                }
+            }
             let logged_error = log.iter().rev().find_map(|entry| entry.error.clone());
             model.push_log(log);
             if let Some(error) = error
@@ -95,6 +100,9 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
 /// Starts a job, showing its loading indicator.
 fn run(model: &mut Model, job: Job) -> Effect {
     *model.loading.entry(job.source()).or_default() += 1;
+    if let Job::Pull(paths) = &job {
+        model.pulling.extend(paths.iter().cloned());
+    }
     if let Job::Refresh { full } = job {
         model.since_refresh = 0;
         if full {
@@ -114,6 +122,7 @@ fn done(model: &mut Model, source: &'static str) {
 }
 
 fn tick(model: &mut Model) -> Vec<Effect> {
+    model.frame = model.frame.wrapping_add(1);
     model.idle += 1;
     model.since_refresh += 1;
     model.since_full += 1;
@@ -522,9 +531,10 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
         Cmd::Filter => {}
         Cmd::Refresh => return vec![run(model, Job::Refresh { full: true })],
         Cmd::Menu => {
-            let entries = KEYMAP
-                .iter()
-                .filter(|binding| binding.cmd != Cmd::Menu)
+            let here = |binding: &&Binding| matches!(binding.on, On::Lists(lists) if lists.contains(&list));
+            let global = |binding: &&Binding| binding.on == On::Global;
+            let entries = (KEYMAP.iter().filter(here))
+                .chain(KEYMAP.iter().filter(global))
                 .map(|binding| MenuEntry {
                     key: binding.label.into(),
                     label: binding.help.into(),
@@ -1255,7 +1265,7 @@ pub mod tests {
         let effects = update(
             &mut model,
             Action::Finished {
-                source: "run",
+                job: Job::Pull(vec!["/src/api".into()]),
                 log: vec![LogEntry {
                     command: "git pull".into(),
                     error: Some("boom".into()),
@@ -1266,6 +1276,34 @@ pub mod tests {
         assert_eq!(effects, [Effect::Run(Job::Refresh { full: false })]);
         assert_eq!(model.log.len(), 1);
         assert_eq!(model.loading.keys().collect::<Vec<_>>(), [&"wt"]);
+    }
+
+    #[test]
+    fn pulling_rows_spin_until_their_job_finishes() {
+        let mut model = model();
+        press(&mut model, " ");
+        model.loading.clear();
+        assert!(!model.animating());
+        let jobs = jobs(press(&mut model, "p"));
+        let paths = vec![
+            PathBuf::from("/src/api.ABC-1-login"),
+            PathBuf::from("/src/web.ABC-1-form"),
+        ];
+        assert_eq!(jobs, [Job::Pull(paths.clone())]);
+        assert!(paths.iter().all(|path| model.pulling.contains(path)));
+        assert!(model.animating());
+        let frame = model.frame;
+        update(&mut model, Action::Tick);
+        assert_eq!(model.frame, frame + 1);
+        update(
+            &mut model,
+            Action::Finished {
+                job: Job::Pull(paths),
+                log: Vec::new(),
+                error: None,
+            },
+        );
+        assert!(model.pulling.is_empty());
     }
 
     #[test]
@@ -1350,14 +1388,38 @@ pub mod tests {
         assert!(model.quit);
     }
 
+    fn menu_keys(model: &Model) -> Vec<String> {
+        match &model.modal {
+            Some(Modal::Menu { entries, .. }) => {
+                entries.iter().map(|entry| entry.key.clone()).collect()
+            }
+            _ => panic!("no menu"),
+        }
+    }
+
     #[test]
-    fn help_menu_runs_the_chosen_command() {
+    fn actions_menu_lists_the_focused_panels_actions_then_global_ones() {
+        let mut model = model();
+        press(&mut model, "1]?");
+        let keys = menu_keys(&model);
+        assert!(keys.contains(&"e".into()) && keys.contains(&"m".into()));
+        assert!(!keys.contains(&"p".into()) && !keys.contains(&"x".into()));
+        assert!(!keys.contains(&"j/↓".into()), "navigation stays out");
+        let global = keys.iter().position(|key| key == "R").unwrap();
+        assert!(keys.iter().position(|key| key == "e").unwrap() < global);
+        press(&mut model, "\x1b2?");
+        let keys = menu_keys(&model);
+        assert!(keys.contains(&"p".into()) && keys.contains(&"Space".into()));
+    }
+
+    #[test]
+    fn actions_menu_runs_the_chosen_command() {
         let mut model = model();
         press(&mut model, "?");
-        press(&mut model, "j");
+        assert_eq!(menu_keys(&model)[0], "Space");
         press(&mut model, "\n");
-        assert_eq!(model.index(List::Work), 0, "k at the top stays");
         assert!(model.modal.is_none());
+        assert!(model.loading.contains_key("run"), "Space opened the group");
     }
 
     #[test]

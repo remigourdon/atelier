@@ -48,7 +48,6 @@ impl Context {
 pub fn run(context: &Context, job: Job) -> Action {
     let recorder = Recorder::new(&System);
     let zellij = context.zellij(&recorder);
-    let source = job.source();
     let log = |recorder: &Recorder| -> Vec<LogEntry> {
         recorder.take().into_iter().map(Into::into).collect()
     };
@@ -77,11 +76,11 @@ pub fn run(context: &Context, job: Job) -> Action {
         job => {
             let error = context
                 .state()
-                .and_then(|mut state| execute(context, &mut state, &zellij, job))
+                .and_then(|mut state| execute(context, &mut state, &zellij, job.clone()))
                 .err()
                 .map(|err| err.to_string());
             Action::Finished {
-                source,
+                job,
                 log: log(&recorder),
                 error,
             }

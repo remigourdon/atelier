@@ -82,7 +82,7 @@ Lazygit model: numbered side panels on the left, the main view on the right show
 
 The main view is a structured key/value detail for each kind, plus recent commits. A carnet shows its rendered README; an issue shows its linked work. Errors go to the command log, not toasts.
 
-Layout: below ~100 columns the main view is hidden (`+` shows it). On short terminals the focused side panel expands and the others collapse to their titles. Mouse: click to focus or select, wheel to scroll. The accent colour is Catppuccin mauve.
+Layout: below ~100 columns the main view is hidden (`+` shows it). On short terminals the focused side panel expands and the others collapse to their titles. Mouse: click to focus or select, wheel to scroll. The accent colour is Catppuccin mauve. Work rows show `↓N` when behind upstream and a spinner while `p` runs; `icons = "nerd"` swaps the row glyphs for Nerd Font icons.
 
 ### Keys
 
@@ -98,14 +98,14 @@ Lazygit defaults. The keymap is one table in code that also feeds `?` and the hi
 | `Enter` | fold group header · focus main view on an item |
 | `-` `=` | collapse/expand all |
 | `n` | new worktree (menu with carnet when carnets are enabled) |
-| `e` · `m` · `d` · `x` | edit group or repo · move to workspace · remove (confirm) · close tab |
+| `e` · `m` · `d` · `x` | edit group or repo alias · move to workspace or set a repo's workspace · remove (confirm) · close tab |
 | `p` | `git pull --ff-only` on the worktree |
 | `o` · `y` `C-o` | open in browser · copy path/branch/URL via OSC 52 |
 | `/` | substring filter on the focused panel |
 | `R` · `?` · `+` `_` · `@` | refresh · actions menu · screen mode · toggle command log |
 | `Esc` · `q` `C-c` | back · quit |
 
-`Space`, `x`, `d` and `p` on a group header act on every item in the group.
+`Space`, `x`, `d` and `p` on a group header act on every item in the group. `?` lists the focused panel's actions, then the global ones.
 
 ## Nix
 
