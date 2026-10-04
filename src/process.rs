@@ -1,5 +1,6 @@
 //! External commands, behind a trait so orchestration can be tested without them.
 
+use std::cell::RefCell;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -11,6 +12,9 @@ pub trait Runner {
 
     /// Runs a command attached to the terminal, as `zellij attach` needs.
     fn interactive(&self, program: &str, args: &[&str]) -> Result<()>;
+
+    /// Starts a command detached, without waiting for it, as a browser needs.
+    fn spawn(&self, program: &str, args: &[&str]) -> Result<()>;
 }
 
 pub struct System;
@@ -38,6 +42,67 @@ impl Runner for System {
         }
         Ok(())
     }
+
+    fn spawn(&self, program: &str, args: &[&str]) -> Result<()> {
+        Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        Ok(())
+    }
+}
+
+/// One command run through a [`Recorder`], as the command log shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Logged {
+    pub command: String,
+    /// The error, when it failed.
+    pub error: Option<String>,
+}
+
+/// Runs commands through another runner and records each one.
+pub struct Recorder<'a> {
+    inner: &'a dyn Runner,
+    log: RefCell<Vec<Logged>>,
+}
+
+impl<'a> Recorder<'a> {
+    pub fn new(inner: &'a dyn Runner) -> Self {
+        Self {
+            inner,
+            log: RefCell::default(),
+        }
+    }
+
+    pub fn take(&self) -> Vec<Logged> {
+        self.log.take()
+    }
+
+    fn record<T>(&self, program: &str, args: &[&str], result: Result<T>) -> Result<T> {
+        let command = std::iter::once(program)
+            .chain(args.iter().copied())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let error = result.as_ref().err().map(|err| err.to_string());
+        self.log.borrow_mut().push(Logged { command, error });
+        result
+    }
+}
+
+impl Runner for Recorder<'_> {
+    fn output(&self, program: &str, args: &[&str]) -> Result<String> {
+        self.record(program, args, self.inner.output(program, args))
+    }
+
+    fn interactive(&self, program: &str, args: &[&str]) -> Result<()> {
+        self.record(program, args, self.inner.interactive(program, args))
+    }
+
+    fn spawn(&self, program: &str, args: &[&str]) -> Result<()> {
+        self.record(program, args, self.inner.spawn(program, args))
+    }
 }
 
 /// The branch checked out at `path`, if any.
@@ -53,8 +118,26 @@ pub fn branch(runner: &dyn Runner, path: &Path) -> Option<String> {
 }
 
 #[cfg(test)]
+mod tests {
+    use super::fake::Fake;
+    use super::*;
+
+    #[test]
+    fn recorder_logs_successes_and_failures() {
+        let fake = Fake::default().always("git fail", None);
+        let recorder = Recorder::new(&fake);
+        assert!(recorder.output("git", &["ok"]).is_ok());
+        assert!(recorder.output("git", &["fail"]).is_err());
+        let log = recorder.take();
+        assert_eq!(log[0].command, "git ok");
+        assert_eq!(log[0].error, None);
+        assert_eq!(log[1].error.as_deref(), Some("git fail failed"));
+        assert!(recorder.take().is_empty());
+    }
+}
+
+#[cfg(test)]
 pub mod fake {
-    use std::cell::RefCell;
     use std::collections::VecDeque;
 
     use super::*;
@@ -122,6 +205,10 @@ pub mod fake {
         }
 
         fn interactive(&self, program: &str, args: &[&str]) -> Result<()> {
+            self.output(program, args).map(drop)
+        }
+
+        fn spawn(&self, program: &str, args: &[&str]) -> Result<()> {
             self.output(program, args).map(drop)
         }
     }

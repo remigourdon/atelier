@@ -4,6 +4,8 @@ mod hooks;
 mod process;
 mod shell;
 mod state;
+mod sync;
+mod tui;
 mod worktrunk;
 mod zellij;
 

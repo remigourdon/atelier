@@ -15,7 +15,30 @@ pub struct Config {
     pub editor: Option<String>,
     pub agent_command: Option<String>,
     pub ticket_pattern: Option<String>,
+    pub browser: Option<String>,
+    pub theme: Theme,
+    pub icons: Icons,
     pub zellij: Zellij,
+}
+
+/// Plain Unicode glyphs work in any font; Nerd Font icons need one installed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Icons {
+    #[default]
+    Unicode,
+    Nerd,
+}
+
+/// A Catppuccin flavor.
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    Latte,
+    Frappe,
+    Macchiato,
+    #[default]
+    Mocha,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -50,6 +73,21 @@ impl Config {
 
     pub fn anchor_pane(&self) -> &str {
         self.zellij.anchor_pane.as_deref().unwrap_or("editor")
+    }
+
+    /// The configured browser, else `$BROWSER`; `None` means the platform opener.
+    pub fn browser(&self) -> Option<String> {
+        self.browser.clone().or_else(|| non_empty_var("BROWSER"))
+    }
+
+    pub fn flavor(&self) -> catppuccin::Flavor {
+        let palette = &catppuccin::PALETTE;
+        match self.theme {
+            Theme::Latte => palette.latte,
+            Theme::Frappe => palette.frappe,
+            Theme::Macchiato => palette.macchiato,
+            Theme::Mocha => palette.mocha,
+        }
     }
 
     /// The configured editor, else `$VISUAL`, else `$EDITOR`; `None` means a plain shell.
@@ -147,11 +185,22 @@ mod tests {
         assert_eq!(config.default_workspace(), "default");
         assert_eq!(config.anchor_pane(), "editor");
         assert_eq!(config.agent_command(), "claude");
+        assert_eq!(config.flavor().name, catppuccin::PALETTE.mocha.name);
+        assert_eq!(config.icons, Icons::Unicode);
         let config = Config::parse(
             "default_workspace = \"vrac\"\ntheme = \"latte\"\n[zellij]\nanchor_pane = \"main\"\n",
         )
         .unwrap();
         assert_eq!(config.default_workspace(), "vrac");
         assert_eq!(config.anchor_pane(), "main");
+        assert_eq!(config.flavor().name, catppuccin::PALETTE.latte.name);
+        let config = Config::parse("browser = \"firefox\"\n").unwrap();
+        assert_eq!(config.browser().as_deref(), Some("firefox"));
+        assert!(Config::parse("theme = \"neon\"").is_err());
+        assert_eq!(
+            Config::parse("icons = \"nerd\"").unwrap().icons,
+            Icons::Nerd
+        );
+        assert!(Config::parse("icons = \"emoji\"").is_err());
     }
 }

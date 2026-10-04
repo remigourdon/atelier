@@ -61,6 +61,8 @@ enum Command {
         #[arg(add = ArgValueCandidates::new(complete_workspaces))]
         workspace: String,
     },
+    /// Open the lazygit-style interface.
+    Tui,
     /// Manage atelier's hooks in worktrunk's user config.
     #[command(subcommand)]
     Hooks(Hooks),
@@ -117,6 +119,7 @@ pub fn run() -> Result<()> {
             Ok(())
         }
         Command::Hooks(command) => run_hooks(command),
+        Command::Tui => crate::tui::run(Config::load()?),
         Command::Hook { phase } => {
             // A hook must never abort worktrunk: report and succeed.
             if let Err(err) = run_hook(phase) {
@@ -195,7 +198,9 @@ fn run_state(command: Command, config: &Config, state: &mut State) -> Result<()>
             state.require_workspace(&workspace)?;
             zellij_for(config, &System)?.open_session(&workspace)
         }
-        Command::Hooks(_) | Command::Shell(_) | Command::Hook { .. } => unreachable!(),
+        Command::Hooks(_) | Command::Shell(_) | Command::Hook { .. } | Command::Tui => {
+            unreachable!()
+        }
     }
 }
 
@@ -223,14 +228,13 @@ fn run_hook(phase: Phase) -> Result<()> {
     let config = Config::load()?;
     let state = State::open(&state::db_path(), config.default_workspace())?;
     let zellij = zellij_for(&config, &System)?;
-    let hint = std::env::var("ATELIER_GROUP_HINT").unwrap_or_default();
     let tab = hooks::handle(
         &state,
         &zellij,
         &config.ticket_regex()?,
         phase,
         &payload,
-        &hint,
+        &hooks::Hints::from_env(),
     )?;
     if let (Some(tab), Some(target)) = (tab, std::env::var_os("ATELIER_HOOK_TARGET")) {
         std::fs::write(target, format!("{}\n", tab.session))?;

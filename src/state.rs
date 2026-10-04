@@ -343,6 +343,36 @@ impl State {
             .ok_or_else(|| eyre!("unknown item: {}", path.display()))
     }
 
+    pub fn items(&self) -> Result<Vec<Item>> {
+        let mut statement = self.db.prepare("SELECT path FROM items ORDER BY path")?;
+        let paths: Vec<PathBuf> = statement
+            .query_map([], |row| path_column(row, 0))?
+            .collect::<rusqlite::Result<_>>()?;
+        paths.iter().map(|path| self.require_item(path)).collect()
+    }
+
+    pub fn set_group(&self, path: impl AsRef<Path>, group: &str) -> Result<()> {
+        let path = path.as_ref();
+        self.require_item(path)?;
+        self.db.execute(
+            "UPDATE items SET group_key = ? WHERE path = ?",
+            params![group, text(path)],
+        )?;
+        Ok(())
+    }
+
+    /// Moves an item to another workspace. Its tab, if any, stays where it is until reopened.
+    pub fn set_workspace(&self, path: impl AsRef<Path>, workspace: &str) -> Result<()> {
+        let path = path.as_ref();
+        self.require_item(path)?;
+        self.require_workspace(workspace)?;
+        self.db.execute(
+            "UPDATE items SET workspace = ? WHERE path = ?",
+            params![workspace, text(path)],
+        )?;
+        Ok(())
+    }
+
     pub fn repo_items(&self, repo: impl AsRef<Path>) -> Result<Vec<Item>> {
         let mut statement = self
             .db
@@ -446,6 +476,28 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap()
+    }
+
+    #[test]
+    fn items_can_be_regrouped_and_moved() {
+        let state = fresh();
+        state.add_workspace("w").unwrap();
+        state.add_repo("/r", None, "default").unwrap();
+        for path in ["/r", "/r/a"] {
+            state
+                .add_item(path, "worktree", Some(Path::new("/r")), "", "default")
+                .unwrap();
+        }
+        state.set_group("/r/a", "ABC-1").unwrap();
+        state.set_workspace("/r/a", "w").unwrap();
+        let item = state.require_item("/r/a").unwrap();
+        assert_eq!(
+            (item.group.as_str(), item.workspace.as_str()),
+            ("ABC-1", "w")
+        );
+        assert_eq!(state.items().unwrap().len(), 2);
+        assert!(state.set_workspace("/r/a", "nope").is_err());
+        assert!(state.set_group("/missing", "x").is_err());
     }
 
     #[test]

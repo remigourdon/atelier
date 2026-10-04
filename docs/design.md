@@ -12,12 +12,14 @@ Goals: a fast lazygit-style TUI and CLI over worktrunk and zellij, and no assump
 Single crate. `src/tui` depends on core modules, never the reverse.
 
 ```
-src/  cli  config  state  hooks  shell  process  zellij  worktrunk  forge  tracker  tui/{app,update,view,widgets}
+src/  cli  config  state  sync  hooks  shell  process  zellij  worktrunk  forge  tracker  tui/{app,update,view,widgets,jobs}
 ```
 
 - **Processes**: every external command goes through the `process::Runner` trait, so orchestration is tested against a fake that records calls.
-- **TUI loop**: Elm architecture. `tokio::select!` over crossterm events, timers and task results produces `Action`s; `update(&mut State, Action) -> Vec<Effect>` is pure; effects run as tokio tasks and send result actions back; the UI redraws only when state is dirty.
+- **TUI loop**: Elm architecture. `tokio::select!` over crossterm events, timers and task results produces `Action`s; `update(&mut Model, Action) -> Vec<Effect>` is pure; effects run as tokio tasks and send result actions back; the UI redraws only when state is dirty.
 - **Crates**: ratatui, crossterm (`event-stream`), tokio, clap (dynamic completions), serde/serde_json, rusqlite (bundled), toml_edit, tui-input, catppuccin, tui-markdown (carnet README only), color-eyre, tracing (file log), insta.
+- **Jobs**: each effect runs on a blocking thread with its own database connection and a recording runner, so every command lands in the command log. Refreshes and commit listings log only failures, since they run constantly.
+- **worktrunk**: `wt list` always runs with `--config-set list.json-schema=2`, so the user's config cannot change the schema. A new worktree is `wt switch [--create] <branch> --no-cd`, with `ATELIER_WORKSPACE` and `ATELIER_GROUP_HINT` telling atelier's hook its workspace and group.
 - **Refresh**: a fast `wt list` every 10 s after 10 s idle, a full refresh (`--full`, reviews, issues) every 5 min, and remote responses cached 5 min in sqlite.
 
 ## State
@@ -80,7 +82,7 @@ Lazygit model: numbered side panels on the left, the main view on the right show
 
 The main view is a structured key/value detail for each kind, plus recent commits. A carnet shows its rendered README; an issue shows its linked work. Errors go to the command log, not toasts.
 
-Layout: below ~100 columns the main view is hidden (`+` shows it). On short terminals the focused side panel expands and the others collapse to their titles. Mouse: click to focus or select, wheel to scroll. The accent colour is Catppuccin mauve.
+Layout: below ~100 columns the main view is hidden (`+` shows it). On short terminals the focused side panel expands and the others collapse to their titles. Mouse: click to focus or select, wheel to scroll. The accent colour is Catppuccin mauve. Work rows show `↓N` when behind upstream and a spinner while `p` runs; `icons = "nerd"` swaps the row glyphs for Nerd Font icons.
 
 ### Keys
 
@@ -95,15 +97,15 @@ Lazygit defaults. The keymap is one table in code that also feeds `?` and the hi
 | `Space` | open/focus tab · check out review · switch workspace |
 | `Enter` | fold group header · focus main view on an item |
 | `-` `=` | collapse/expand all |
-| `n` | new worktree (menu with carnet when carnets are enabled) |
-| `e` · `m` · `d` · `x` | edit group or repo · move to workspace · remove (confirm) · close tab |
+| `n` | new worktree (menu with carnet when carnets are enabled) · new workspace in Workspaces |
+| `e` · `m` · `d` · `x` | edit group or repo alias · move to workspace or set a repo's workspace · remove worktree or workspace, forget repo (confirm) · close tab |
 | `p` | `git pull --ff-only` on the worktree |
 | `o` · `y` `C-o` | open in browser · copy path/branch/URL via OSC 52 |
 | `/` | substring filter on the focused panel |
 | `R` · `?` · `+` `_` · `@` | refresh · actions menu · screen mode · toggle command log |
 | `Esc` · `q` `C-c` | back · quit |
 
-`Space`, `x`, `d` and `p` on a group header act on every item in the group.
+`Space`, `x`, `d` and `p` on a group header act on every item in the group. `?` lists the focused panel's actions, then the global ones.
 
 ## Nix
 

@@ -1,11 +1,13 @@
-//! worktrunk's user config: atelier's entries among the user's own hooks.
+//! worktrunk: its user config, where atelier's hooks sit among the user's own, and `wt list`.
 
 use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{Result, WrapErr, bail};
+use serde::Deserialize;
 use toml_edit::{DocumentMut, Item, Table, value};
 
 use crate::hooks::Phase;
+use crate::process::Runner;
 
 /// The key atelier's command sits under in each hook's named table.
 const ENTRY: &str = "atelier";
@@ -117,6 +119,190 @@ impl HooksConfig {
     }
 }
 
+/// One repo's worktrees as `wt list --format json` reports them.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Listing {
+    pub forge: Option<Forge>,
+    pub worktrees: Vec<Worktree>,
+}
+
+/// Where a repo is hosted, as worktrunk detects it from its remote.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Forge {
+    /// The repo's web page.
+    pub url: String,
+    /// `github`, `gitlab`, …
+    pub provider: String,
+}
+
+impl Forge {
+    /// The web page of a branch.
+    pub fn branch_url(&self, branch: &str) -> String {
+        match self.provider.as_str() {
+            "gitlab" => format!("{}/-/tree/{branch}", self.url),
+            _ => format!("{}/tree/{branch}", self.url),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Worktree {
+    pub path: PathBuf,
+    /// `None` when detached.
+    pub branch: Option<String>,
+    pub main: bool,
+    pub dirty: bool,
+    /// Lines added and deleted in the working tree.
+    pub diff: (u64, u64),
+    /// Ahead and behind the upstream branch, when there is one.
+    pub upstream: Option<(u64, u64)>,
+    pub short_sha: String,
+    pub subject: String,
+    pub committed_at: String,
+    /// worktrunk's compact status, such as `!?↑`.
+    pub symbols: String,
+}
+
+/// Lists a repo's worktrees, pinning the JSON schema whatever the user's config says.
+pub fn list(runner: &dyn Runner, repo: &Path, full: bool) -> Result<Listing> {
+    let repo = repo.to_string_lossy();
+    let mut args = vec!["-C", &repo, "--config-set", "list.json-schema=2", "list"];
+    args.extend(["--format", "json"]);
+    if full {
+        args.push("--full");
+    }
+    Listing::parse(&runner.output("wt", &args)?)
+}
+
+impl Listing {
+    /// Parses the JSON, keeping items that have a worktree (`--branches` adds ones that don't).
+    pub fn parse(json: &str) -> Result<Self> {
+        let raw: raw::Listing = serde_json::from_str(json).wrap_err("parsing wt list")?;
+        let worktrees = raw
+            .items
+            .into_iter()
+            .filter_map(|item| {
+                let tree = item.worktree?;
+                let changes = tree.changes;
+                Some(Worktree {
+                    path: tree.path,
+                    branch: item.branch.filter(|_| !tree.detached),
+                    main: tree.main,
+                    dirty: changes.staged
+                        || changes.modified
+                        || changes.untracked
+                        || changes.renamed
+                        || changes.deleted
+                        || changes.conflicted,
+                    diff: (changes.diff.added, changes.diff.deleted),
+                    upstream: item.upstream.map(|up| (up.ahead, up.behind)),
+                    short_sha: item.head.short_sha,
+                    subject: item.head.subject,
+                    committed_at: item.head.committed_at,
+                    symbols: item.display.symbols,
+                })
+            })
+            .collect();
+        Ok(Self {
+            forge: raw.repo.forge.map(|forge| Forge {
+                url: forge.url,
+                provider: forge.provider,
+            }),
+            worktrees,
+        })
+    }
+}
+
+/// The subset of worktrunk's JSON schema 2 that atelier reads; everything is optional.
+mod raw {
+    use std::path::PathBuf;
+
+    use super::Deserialize;
+
+    #[derive(Deserialize)]
+    pub struct Listing {
+        #[serde(default)]
+        pub repo: Repo,
+        #[serde(default)]
+        pub items: Vec<Item>,
+    }
+
+    #[derive(Deserialize, Default)]
+    pub struct Repo {
+        pub forge: Option<Forge>,
+    }
+
+    #[derive(Deserialize)]
+    pub struct Forge {
+        pub url: String,
+        #[serde(default)]
+        pub provider: String,
+    }
+
+    #[derive(Deserialize)]
+    pub struct Item {
+        pub branch: Option<String>,
+        #[serde(default)]
+        pub head: Head,
+        pub worktree: Option<Tree>,
+        pub upstream: Option<Upstream>,
+        #[serde(default)]
+        pub display: Display,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    pub struct Head {
+        pub short_sha: String,
+        pub subject: String,
+        pub committed_at: String,
+    }
+
+    #[derive(Deserialize)]
+    pub struct Tree {
+        pub path: PathBuf,
+        #[serde(default)]
+        pub main: bool,
+        #[serde(default)]
+        pub detached: bool,
+        #[serde(default)]
+        pub changes: Changes,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    pub struct Changes {
+        pub staged: bool,
+        pub modified: bool,
+        pub untracked: bool,
+        pub renamed: bool,
+        pub deleted: bool,
+        pub conflicted: bool,
+        pub diff: Diff,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    pub struct Diff {
+        pub added: u64,
+        pub deleted: u64,
+    }
+
+    #[derive(Deserialize)]
+    pub struct Upstream {
+        #[serde(default)]
+        pub ahead: u64,
+        #[serde(default)]
+        pub behind: u64,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    pub struct Display {
+        pub symbols: String,
+    }
+}
+
 fn entry(item: &Item) -> Option<&str> {
     item.as_table_like()?.get(ENTRY)?.as_str()
 }
@@ -124,6 +310,61 @@ fn entry(item: &Item) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listing_keeps_worktrees_only() {
+        let listing = Listing::parse(include_str!("../tests/fixtures/wt-list.json")).unwrap();
+        let forge = listing.forge.unwrap();
+        assert_eq!(forge.url, "https://github.com/remigourdon/atelier");
+        assert_eq!(
+            forge.branch_url("a/b"),
+            "https://github.com/remigourdon/atelier/tree/a/b"
+        );
+        assert_eq!(listing.worktrees.len(), 2);
+        let main = &listing.worktrees[0];
+        assert_eq!(main.path, Path::new("/home/remi/atelier"));
+        assert_eq!(main.branch.as_deref(), Some("main"));
+        assert!(main.main && !main.dirty);
+        assert_eq!(main.upstream, Some((0, 2)));
+        assert_eq!(main.short_sha, "e5c1dff");
+        assert_eq!(main.subject, "Phase 1: core, CLI and hooks (#9)");
+        let feature = &listing.worktrees[1];
+        assert!(!feature.main && feature.dirty);
+        assert_eq!(feature.upstream, None);
+        assert_eq!(feature.symbols, "!?↑");
+        assert_eq!(feature.diff, (12, 3));
+    }
+
+    #[test]
+    fn list_pins_the_schema() {
+        let fake = crate::process::fake::Fake::default().always("wt", Some(r#"{"items":[]}"#));
+        list(&fake, Path::new("/r"), true).unwrap();
+        assert_eq!(
+            fake.calls(),
+            ["wt -C /r --config-set list.json-schema=2 list --format json --full"]
+        );
+    }
+
+    #[test]
+    fn gitlab_branch_urls_use_its_tree_path() {
+        let forge = Forge {
+            url: "https://gitlab.com/g/r".into(),
+            provider: "gitlab".into(),
+        };
+        assert_eq!(
+            forge.branch_url("main"),
+            "https://gitlab.com/g/r/-/tree/main"
+        );
+    }
+
+    #[test]
+    fn listing_tolerates_missing_sections() {
+        let listing =
+            Listing::parse(r#"{"items":[{"worktree":{"path":"/r","detached":true}}]}"#).unwrap();
+        assert_eq!(listing.forge, None);
+        assert_eq!(listing.worktrees[0].branch, None);
+        assert!(Listing::parse("nope").is_err());
+    }
 
     fn config(text: &str) -> (tempfile::TempDir, HooksConfig) {
         let dir = tempfile::tempdir().unwrap();

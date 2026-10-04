@@ -66,7 +66,7 @@ fn kdl_string(value: &str) -> String {
     serde_json::to_string(value).expect("strings serialise")
 }
 
-/// The session: an `atelier` tab, a plain shell until the TUI exists.
+/// The session: an `atelier` tab running the TUI.
 pub fn session_layout() -> String {
     format!(
         r#"layout {{
@@ -80,7 +80,9 @@ pub fn session_layout() -> String {
         }}
     }}
     tab name="{ATELIER_TAB}" focus=true {{
-        pane name="{ATELIER_TAB}"
+        pane name="{ATELIER_TAB}" command="atelier" {{
+            args "tui"
+        }}
     }}
 }}
 "#
@@ -566,7 +568,10 @@ mod tests {
         assert!(worktree_layout("editor", None, "claude").contains(r#"name="editor" focus=true"#));
         assert!(!worktree_layout("editor", None, "claude").contains("nvim"));
         assert!(worktree_layout("main", None, "claude").contains(r#"name="main" focus=true"#));
-        assert!(!session_layout().contains("tui"));
+        assert!(session_layout().contains(
+            r#"pane name="atelier" command="atelier" {
+            args "tui"#
+        ));
     }
 
     fn state() -> State {
