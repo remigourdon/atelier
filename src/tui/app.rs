@@ -145,6 +145,9 @@ pub enum Job {
         repo: PathBuf,
         workspace: String,
     },
+    Forget(PathBuf),
+    AddWorkspace(String),
+    RemoveWorkspace(String),
     SwitchWorkspace(String),
     Browse(String),
 }
@@ -199,6 +202,7 @@ pub enum Submit {
     },
     Group(Vec<PathBuf>),
     Alias(PathBuf),
+    Workspace,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -366,10 +370,10 @@ pub const KEYMAP: &[Binding] = &[
     Binding { keys: &[code(KeyCode::Enter)], label: "Enter", cmd: Cmd::Enter, help: "fold group · focus the main view", hint: NONE, on: On::Lists(WORK) },
     Binding { keys: &[ch('-')], label: "-", cmd: Cmd::CollapseAll, help: "collapse all groups", hint: NONE, on: On::Lists(WORK) },
     Binding { keys: &[ch('=')], label: "=", cmd: Cmd::ExpandAll, help: "expand all groups", hint: NONE, on: On::Lists(WORK) },
-    Binding { keys: &[ch('n')], label: "n", cmd: Cmd::New, help: "new worktree", hint: WORK, on: On::Lists(WORK) },
+    Binding { keys: &[ch('n')], label: "n", cmd: Cmd::New, help: "new worktree · new workspace", hint: &[List::Workspaces, List::Work], on: On::Lists(&[List::Workspaces, List::Work]) },
     Binding { keys: &[ch('e')], label: "e", cmd: Cmd::Edit, help: "edit group · edit repo alias", hint: &[List::Repos, List::Work], on: On::Lists(&[List::Repos, List::Work]) },
     Binding { keys: &[ch('m')], label: "m", cmd: Cmd::Move, help: "move to workspace · set repo workspace", hint: &[List::Repos, List::Work], on: On::Lists(&[List::Repos, List::Work]) },
-    Binding { keys: &[ch('d')], label: "d", cmd: Cmd::Remove, help: "remove worktree", hint: WORK, on: On::Lists(WORK) },
+    Binding { keys: &[ch('d')], label: "d", cmd: Cmd::Remove, help: "remove", hint: ALL, on: On::Lists(ALL) },
     Binding { keys: &[ch('x')], label: "x", cmd: Cmd::Close, help: "close tab", hint: WORK, on: On::Lists(WORK) },
     Binding { keys: &[ch('p')], label: "p", cmd: Cmd::Pull, help: "pull (git pull --ff-only)", hint: WORK, on: On::Lists(WORK) },
     Binding { keys: &[ch('o')], label: "o", cmd: Cmd::Browse, help: "open in browser", hint: NONE, on: On::Lists(&[List::Repos, List::Work]) },

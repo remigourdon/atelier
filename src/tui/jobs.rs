@@ -231,6 +231,12 @@ fn execute(context: &Context, state: &mut State, zellij: &Zellij, job: Job) -> R
         Job::SetRepoWorkspace { repo, workspace } => {
             state.update_repo(&repo.to_string_lossy(), None, Some(&workspace))
         }
+        Job::Forget(repo) => {
+            zellij.close_repo_tabs(state, &repo)?;
+            state.remove_repo(&repo)
+        }
+        Job::AddWorkspace(name) => state.add_workspace(&name),
+        Job::RemoveWorkspace(name) => state.remove_workspace(&name),
         Job::SwitchWorkspace(name) => zellij.open_session(&name),
         Job::Browse(url) => browse(context, runner, &url),
     }

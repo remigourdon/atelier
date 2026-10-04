@@ -97,15 +97,15 @@ Lazygit defaults. The keymap is one table in code that also feeds `?` and the hi
 | `Space` | open/focus tab · check out review · switch workspace |
 | `Enter` | fold group header · focus main view on an item |
 | `-` `=` | collapse/expand all |
-| `n` | new worktree (menu with carnet when carnets are enabled) |
-| `e` · `m` · `d` · `x` | edit group or repo alias · move to workspace or set a repo's workspace · remove (confirm) · close tab |
+| `n` | new worktree (menu with carnet when carnets are enabled) · new workspace in Workspaces |
+| `e` · `m` · `d` · `x` | edit group or repo alias · move to workspace or set a repo's workspace · remove worktree or workspace, forget repo (confirm) · close tab |
 | `p` | `git pull --ff-only` on the worktree |
 | `o` · `y` `C-o` | open in browser · copy path/branch/URL via OSC 52 |
 | `/` | substring filter on the focused panel |
 | `R` · `?` · `+` `_` · `@` | refresh · actions menu · screen mode · toggle command log |
 | `Esc` · `q` `C-c` | back · quit |
 
-`Space`, `x`, `d` and `p` on a group header act on every item in the group. `?` lists the focused panel's actions, then the global ones. Workspaces are added and removed, and repos registered and forgotten, from the CLI only.
+`Space`, `x`, `d` and `p` on a group header act on every item in the group. `?` lists the focused panel's actions, then the global ones.
 
 ## Nix
 
