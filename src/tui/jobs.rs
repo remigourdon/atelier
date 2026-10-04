@@ -354,7 +354,7 @@ mod tests {
         assert_eq!(snapshot.workspaces, ["side", "default"]);
         let titles: Vec<_> = snapshot.work.iter().map(Work::title).collect();
         assert_eq!(titles, ["r:main", "r:ABC-1-x"]);
-        assert_eq!(snapshot.forges[Path::new("/r")], "https://forge/r");
+        assert_eq!(snapshot.forges[Path::new("/r")].url, "https://forge/r");
         assert_eq!(problems.len(), 1);
         assert_eq!(problems[0].command, "wt list in broken");
     }

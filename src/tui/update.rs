@@ -826,14 +826,16 @@ fn branch(model: &Model) -> Option<String> {
 fn url(model: &Model) -> Option<String> {
     let forges = &model.snapshot.forges;
     match model.active() {
-        List::Repos => forges.get(&model.repo()?.path).cloned(),
+        List::Repos => forges
+            .get(&model.repo()?.path)
+            .map(|forge| forge.url.clone()),
         List::Work => match model.line()? {
             Line::Item(index) => {
                 let work = &model.snapshot.work[index];
-                let base = forges.get(&work.repo)?;
+                let forge = forges.get(&work.repo)?;
                 Some(match &work.tree.branch {
-                    Some(branch) => format!("{base}/tree/{branch}"),
-                    None => base.clone(),
+                    Some(branch) => forge.branch_url(branch),
+                    None => forge.url.clone(),
                 })
             }
             Line::Group { .. } => None,
@@ -898,7 +900,7 @@ pub mod tests {
     use super::*;
     use crate::state::Repo;
     use crate::tui::app::{Snapshot, Work};
-    use crate::worktrunk::Worktree;
+    use crate::worktrunk::{Forge, Worktree};
 
     pub fn work(repo: &str, branch: &str, group: &str, workspace: &str) -> Work {
         let main = branch == "main";
@@ -940,7 +942,14 @@ pub mod tests {
                 work("web", "ABC-1-form", "ABC-1", "default"),
                 work("web", "main", "", "side"),
             ],
-            forges: [(PathBuf::from("/src/api"), "https://forge/api".into())].into(),
+            forges: [(
+                PathBuf::from("/src/api"),
+                Forge {
+                    url: "https://forge/api".into(),
+                    provider: "github".into(),
+                },
+            )]
+            .into(),
         }
     }
 

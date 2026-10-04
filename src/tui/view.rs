@@ -425,7 +425,7 @@ fn detail(model: &Model) -> Vec<(String, String)> {
                         .snapshot
                         .forges
                         .get(&repo.path)
-                        .cloned()
+                        .map(|forge| forge.url.clone())
                         .unwrap_or_default(),
                 ),
             ]

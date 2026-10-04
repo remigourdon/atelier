@@ -9,7 +9,7 @@ use regex::Regex;
 use crate::config::group_from_name;
 use crate::process::Runner;
 use crate::state::{self, Item, Repo, State};
-use crate::worktrunk::{self, Worktree};
+use crate::worktrunk::{self, Forge, Worktree};
 
 /// A listed worktree with its recorded item.
 pub struct Tracked {
@@ -22,7 +22,7 @@ pub struct Tracked {
 pub struct Synced {
     pub worktrees: Vec<Tracked>,
     /// Each repo's forge web page, by repo path.
-    pub forges: HashMap<PathBuf, String>,
+    pub forges: HashMap<PathBuf, Forge>,
     /// Repos whose listing failed; their items are kept as they were.
     pub failures: Vec<(Repo, Report)>,
 }
@@ -46,8 +46,8 @@ pub fn sync(state: &State, runner: &dyn Runner, ticket: &Regex, full: bool) -> R
                 continue;
             }
         };
-        if let Some(url) = listing.forge_url {
-            synced.forges.insert(repo.path.clone(), url);
+        if let Some(forge) = listing.forge {
+            synced.forges.insert(repo.path.clone(), forge);
         }
         for mut tree in listing.worktrees {
             tree.path = canonical(&tree.path);
@@ -115,7 +115,7 @@ mod tests {
         let fake = Fake::default().always("wt -C /r", Some(LISTING));
         let synced = sync(&state, &fake, &ticket(), false).unwrap();
         assert!(synced.failures.is_empty());
-        assert_eq!(synced.forges[Path::new("/r")], "https://forge/r");
+        assert_eq!(synced.forges[Path::new("/r")].url, "https://forge/r");
         let items: Vec<_> = synced
             .worktrees
             .iter()

@@ -8,7 +8,7 @@ use tui_input::Input;
 
 use crate::process::Logged;
 use crate::state::Repo;
-use crate::worktrunk::Worktree;
+use crate::worktrunk::{Forge, Worktree};
 
 /// The side panels, top to bottom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -58,7 +58,7 @@ pub struct Snapshot {
     pub repos: Vec<Repo>,
     pub work: Vec<Work>,
     /// Each repo's forge web page, by repo path.
-    pub forges: HashMap<PathBuf, String>,
+    pub forges: HashMap<PathBuf, Forge>,
 }
 
 /// A worktree with what atelier records about it.

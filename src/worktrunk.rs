@@ -122,9 +122,27 @@ impl HooksConfig {
 /// One repo's worktrees as `wt list --format json` reports them.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Listing {
-    /// The repo's web page on its forge, when it has one.
-    pub forge_url: Option<String>,
+    pub forge: Option<Forge>,
     pub worktrees: Vec<Worktree>,
+}
+
+/// Where a repo is hosted, as worktrunk detects it from its remote.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Forge {
+    /// The repo's web page.
+    pub url: String,
+    /// `github`, `gitlab`, …
+    pub provider: String,
+}
+
+impl Forge {
+    /// The web page of a branch.
+    pub fn branch_url(&self, branch: &str) -> String {
+        match self.provider.as_str() {
+            "gitlab" => format!("{}/-/tree/{branch}", self.url),
+            _ => format!("{}/tree/{branch}", self.url),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -186,7 +204,10 @@ impl Listing {
             })
             .collect();
         Ok(Self {
-            forge_url: raw.repo.forge.map(|forge| forge.url),
+            forge: raw.repo.forge.map(|forge| Forge {
+                url: forge.url,
+                provider: forge.provider,
+            }),
             worktrees,
         })
     }
@@ -214,6 +235,8 @@ mod raw {
     #[derive(Deserialize)]
     pub struct Forge {
         pub url: String,
+        #[serde(default)]
+        pub provider: String,
     }
 
     #[derive(Deserialize)]
@@ -291,9 +314,11 @@ mod tests {
     #[test]
     fn listing_keeps_worktrees_only() {
         let listing = Listing::parse(include_str!("../tests/fixtures/wt-list.json")).unwrap();
+        let forge = listing.forge.unwrap();
+        assert_eq!(forge.url, "https://github.com/remigourdon/atelier");
         assert_eq!(
-            listing.forge_url.as_deref(),
-            Some("https://github.com/remigourdon/atelier")
+            forge.branch_url("a/b"),
+            "https://github.com/remigourdon/atelier/tree/a/b"
         );
         assert_eq!(listing.worktrees.len(), 2);
         let main = &listing.worktrees[0];
@@ -321,10 +346,22 @@ mod tests {
     }
 
     #[test]
+    fn gitlab_branch_urls_use_its_tree_path() {
+        let forge = Forge {
+            url: "https://gitlab.com/g/r".into(),
+            provider: "gitlab".into(),
+        };
+        assert_eq!(
+            forge.branch_url("main"),
+            "https://gitlab.com/g/r/-/tree/main"
+        );
+    }
+
+    #[test]
     fn listing_tolerates_missing_sections() {
         let listing =
             Listing::parse(r#"{"items":[{"worktree":{"path":"/r","detached":true}}]}"#).unwrap();
-        assert_eq!(listing.forge_url, None);
+        assert_eq!(listing.forge, None);
         assert_eq!(listing.worktrees[0].branch, None);
         assert!(Listing::parse("nope").is_err());
     }
