@@ -3,10 +3,10 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line as Text, Span};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
-use super::app::{Focus, KEYMAP, Line, List, Model, Panel, Popup, Screen, popup_hints};
+use super::app::{Focus, KEYMAP, List, Model, Panel, Popup, Row, Screen, popup_hints};
 use super::widgets;
 use crate::config::Icons;
 
@@ -16,7 +16,7 @@ pub const NARROW: u16 = 100;
 pub const SHORT: u16 = 24;
 const LOG_HEIGHT: u16 = 8;
 
-pub struct Theme {
+pub struct Palette {
     pub accent: Color,
     pub text: Color,
     pub dim: Color,
@@ -75,7 +75,7 @@ fn icon(glyph: &'static str, style: Style) -> Option<Span<'static>> {
     (!glyph.is_empty()).then(|| Span::styled(format!("{glyph} "), style))
 }
 
-impl Theme {
+impl Palette {
     pub fn new(flavor: catppuccin::Flavor, icons: Icons) -> Self {
         let colors = flavor.colors;
         Self {
@@ -157,39 +157,39 @@ pub fn offset(selected: usize, height: u16) -> usize {
     selected.saturating_sub((height as usize).saturating_sub(1))
 }
 
-pub fn render(frame: &mut Frame, model: &Model, theme: &Theme) {
+pub fn render(frame: &mut Frame, model: &Model, palette: &Palette) {
     let areas = areas(model, frame.area());
     for &(panel, rect) in &areas.panels {
-        render_panel(frame, model, theme, panel, rect);
+        render_panel(frame, model, palette, panel, rect);
     }
     if let Some(rect) = areas.main {
-        render_main(frame, model, theme, rect);
+        render_main(frame, model, palette, rect);
     }
     if let Some(rect) = areas.log {
-        render_log(frame, model, theme, rect);
+        render_log(frame, model, palette, rect);
     }
-    render_hints(frame, model, theme, areas.hints);
+    render_hints(frame, model, palette, areas.hints);
     if let Some(modal) = &model.modal {
-        widgets::modal(frame, modal, theme);
+        widgets::modal(frame, modal, palette);
     }
 }
 
-fn block<'a>(title: Text<'a>, focused: bool, theme: &Theme) -> Block<'a> {
-    let color = if focused { theme.accent } else { theme.dim };
+fn block<'a>(title: Line<'a>, focused: bool, palette: &Palette) -> Block<'a> {
+    let color = if focused { palette.accent } else { palette.dim };
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(color))
         .title(title)
 }
 
-fn render_panel(frame: &mut Frame, model: &Model, theme: &Theme, panel: Panel, rect: Rect) {
+fn render_panel(frame: &mut Frame, model: &Model, palette: &Palette, panel: Panel, rect: Rect) {
     let focused = model.focus == Focus::Panel(panel);
     let list = model.list(panel);
     let tab = |label: &'static str, active: bool| {
         if active {
-            Span::styled(label, Style::new().fg(theme.accent).bold())
+            Span::styled(label, Style::new().fg(palette.accent).bold())
         } else {
-            Span::styled(label, Style::new().fg(theme.dim))
+            Span::styled(label, Style::new().fg(palette.dim))
         }
     };
     let mut title = vec![Span::raw(format!("[{}] ", panel.number()))];
@@ -204,7 +204,7 @@ fn render_panel(frame: &mut Frame, model: &Model, theme: &Theme, panel: Panel, r
             if let Some(workspace) = model.workspace() {
                 title.push(Span::styled(
                     format!(" · {workspace}"),
-                    Style::new().fg(theme.dim),
+                    Style::new().fg(palette.dim),
                 ));
             }
         }
@@ -213,21 +213,21 @@ fn render_panel(frame: &mut Frame, model: &Model, theme: &Theme, panel: Panel, r
     if !filter.is_empty() || model.filtering == Some(list) {
         title.push(Span::styled(
             format!(" /{filter}"),
-            Style::new().fg(theme.warn),
+            Style::new().fg(palette.warn),
         ));
     }
     if rect.height < 3 {
         let block = Block::new()
             .borders(Borders::TOP)
-            .border_style(Style::new().fg(theme.dim))
-            .title(Text::from(title));
+            .border_style(Style::new().fg(palette.dim))
+            .title(Line::from(title));
         frame.render_widget(block, rect);
         return;
     }
-    let block = block(Text::from(title), focused, theme);
+    let block = block(Line::from(title), focused, palette);
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
-    let rows = rows(model, theme, list);
+    let rows = rows(model, palette, list);
     if rows.is_empty() {
         let empty = if model.loaded {
             "nothing here"
@@ -235,21 +235,21 @@ fn render_panel(frame: &mut Frame, model: &Model, theme: &Theme, panel: Panel, r
             "loading…"
         };
         frame.render_widget(
-            Paragraph::new(Span::styled(empty, Style::new().fg(theme.dim))),
+            Paragraph::new(Span::styled(empty, Style::new().fg(palette.dim))),
             inner,
         );
         return;
     }
     let selected = model.index(list).min(rows.len() - 1);
     let start = offset(selected, inner.height);
-    let lines: Vec<Text> = rows
+    let lines: Vec<Line> = rows
         .into_iter()
         .enumerate()
         .skip(start)
         .take(inner.height as usize)
         .map(|(index, line)| {
             if index == selected {
-                let style = Style::new().bg(theme.selection);
+                let style = Style::new().bg(palette.selection);
                 let style = if focused {
                     style.add_modifier(Modifier::BOLD)
                 } else {
@@ -264,8 +264,8 @@ fn render_panel(frame: &mut Frame, model: &Model, theme: &Theme, panel: Panel, r
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn rows<'a>(model: &'a Model, theme: &Theme, list: List) -> Vec<Text<'a>> {
-    let dim = Style::new().fg(theme.dim);
+fn rows<'a>(model: &'a Model, palette: &Palette, list: List) -> Vec<Line<'a>> {
+    let dim = Style::new().fg(palette.dim);
     match list {
         List::Workspaces => model
             .workspaces()
@@ -277,32 +277,33 @@ fn rows<'a>(model: &'a Model, theme: &Theme, list: List) -> Vec<Text<'a>> {
                     .iter()
                     .filter(|work| work.workspace == *name && work.tab)
                     .count();
-                let mut spans: Vec<Span> = icon(theme.glyphs.workspace, dim).into_iter().collect();
+                let mut spans: Vec<Span> =
+                    icon(palette.glyphs.workspace, dim).into_iter().collect();
                 spans.push(Span::raw(name.as_str()));
                 if model.snapshot.here.as_ref() == Some(name) {
-                    spans.push(Span::styled(" (here)", Style::new().fg(theme.accent)));
+                    spans.push(Span::styled(" (here)", Style::new().fg(palette.accent)));
                 }
                 if open > 0 {
                     spans.push(Span::styled(format!(" {open} open"), dim));
                 }
-                Text::from(spans)
+                Line::from(spans)
             })
             .collect(),
         List::Repos => model
             .repos()
             .into_iter()
             .map(|repo| {
-                let mut spans: Vec<Span> = icon(theme.glyphs.repo, dim).into_iter().collect();
+                let mut spans: Vec<Span> = icon(palette.glyphs.repo, dim).into_iter().collect();
                 spans.push(Span::raw(repo.name()));
                 spans.push(Span::styled(format!(" → {}", repo.default_workspace), dim));
-                Text::from(spans)
+                Line::from(spans)
             })
             .collect(),
         List::Work => model
-            .lines()
+            .work_rows()
             .into_iter()
             .map(|line| match line {
-                Line::Group {
+                Row::Group {
                     name,
                     members,
                     folded,
@@ -312,35 +313,35 @@ fn rows<'a>(model: &'a Model, theme: &Theme, list: List) -> Vec<Text<'a>> {
                         .iter()
                         .filter(|&&index| model.snapshot.work[index].tab)
                         .count();
-                    Text::from(vec![
+                    Line::from(vec![
                         Span::styled(
                             format!(
                                 "{} {name}",
                                 if folded {
-                                    theme.glyphs.folded
+                                    palette.glyphs.folded
                                 } else {
-                                    theme.glyphs.unfolded
+                                    palette.glyphs.unfolded
                                 }
                             ),
-                            Style::new().fg(theme.info).bold(),
+                            Style::new().fg(palette.info).bold(),
                         ),
                         Span::styled(format!(" {} · {open} open", members.len()), dim),
                     ])
                 }
-                Line::Item(index) => {
+                Row::Item(index) => {
                     let work = &model.snapshot.work[index];
-                    let glyphs = &theme.glyphs;
+                    let glyphs = &palette.glyphs;
                     let indent = if work.group.is_empty() { "" } else { "  " };
                     let marker = if model.pulling.contains(work.path()) {
                         let frame = glyphs.spinner[model.frame % glyphs.spinner.len()];
-                        Span::styled(format!("{frame} "), Style::new().fg(theme.info))
+                        Span::styled(format!("{frame} "), Style::new().fg(palette.info))
                     } else if work.tab {
-                        Span::styled(format!("{} ", glyphs.open), Style::new().fg(theme.ok))
+                        Span::styled(format!("{} ", glyphs.open), Style::new().fg(palette.ok))
                     } else {
                         Span::styled(format!("{} ", glyphs.closed), dim)
                     };
                     let status = if work.tree.dirty {
-                        Style::new().fg(theme.warn)
+                        Style::new().fg(palette.warn)
                     } else {
                         dim
                     };
@@ -354,10 +355,10 @@ fn rows<'a>(model: &'a Model, theme: &Theme, list: List) -> Vec<Text<'a>> {
                     {
                         spans.push(Span::styled(
                             format!(" ↓{behind}"),
-                            Style::new().fg(theme.warn),
+                            Style::new().fg(palette.warn),
                         ));
                     }
-                    Text::from(spans)
+                    Line::from(spans)
                 }
             })
             .collect(),
@@ -430,8 +431,8 @@ fn detail(model: &Model) -> Vec<(String, String)> {
                 ),
             ]
         }
-        List::Work => match model.line() {
-            Some(Line::Group { name, members, .. }) => {
+        List::Work => match model.work_row() {
+            Some(Row::Group { name, members, .. }) => {
                 let mut pairs = vec![pair("Group", name)];
                 pairs.extend(members.iter().map(|&index| {
                     let work = &model.snapshot.work[index];
@@ -439,7 +440,7 @@ fn detail(model: &Model) -> Vec<(String, String)> {
                 }));
                 pairs
             }
-            Some(Line::Item(index)) => {
+            Some(Row::Item(index)) => {
                 let work = &model.snapshot.work[index];
                 let tree = &work.tree;
                 vec![
@@ -479,8 +480,8 @@ fn detail(model: &Model) -> Vec<(String, String)> {
 
 /// The selected worktree's recent commits, once loaded.
 fn commits(model: &Model) -> Option<&Vec<String>> {
-    match (model.active(), model.line()?) {
-        (List::Work, Line::Item(index)) => model.commits.get(model.snapshot.work[index].path()),
+    match (model.active(), model.work_row()?) {
+        (List::Work, Row::Item(index)) => model.commits.get(model.snapshot.work[index].path()),
         _ => None,
     }
 }
@@ -490,27 +491,27 @@ pub fn main_len(model: &Model) -> usize {
     detail(model).len() + commits(model).map_or(0, |commits| commits.len() + 2)
 }
 
-fn render_main(frame: &mut Frame, model: &Model, theme: &Theme, rect: Rect) {
+fn render_main(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect) {
     let focused = model.focus == Focus::Main;
-    let block = block(Text::from(" Main "), focused, theme);
+    let block = block(Line::from(" Main "), focused, palette);
     let pairs = detail(model);
     let width = pairs.iter().map(|(key, _)| key.len()).max().unwrap_or(0);
-    let mut lines: Vec<Text> = pairs
+    let mut lines: Vec<Line> = pairs
         .into_iter()
         .map(|(key, value)| {
-            Text::from(vec![
-                Span::styled(format!("{key:width$}  "), Style::new().fg(theme.accent)),
-                Span::styled(value, Style::new().fg(theme.text)),
+            Line::from(vec![
+                Span::styled(format!("{key:width$}  "), Style::new().fg(palette.accent)),
+                Span::styled(value, Style::new().fg(palette.text)),
             ])
         })
         .collect();
     if let Some(commits) = commits(model) {
-        lines.push(Text::raw(""));
-        lines.push(Text::styled(
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
             "Recent commits",
-            Style::new().fg(theme.accent).bold(),
+            Style::new().fg(palette.accent).bold(),
         ));
-        lines.extend(commits.iter().map(|commit| Text::raw(commit.as_str())));
+        lines.extend(commits.iter().map(|commit| Line::raw(commit.as_str())));
     }
     frame.render_widget(
         Paragraph::new(lines).block(block).scroll(model.scroll),
@@ -518,32 +519,32 @@ fn render_main(frame: &mut Frame, model: &Model, theme: &Theme, rect: Rect) {
     );
 }
 
-fn render_log(frame: &mut Frame, model: &Model, theme: &Theme, rect: Rect) {
-    let block = block(Text::from(" Command log "), false, theme);
+fn render_log(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect) {
+    let block = block(Line::from(" Command log "), false, palette);
     let height = block.inner(rect).height as usize;
-    let lines: Vec<Text> = model.log[model.log.len().saturating_sub(height)..]
+    let lines: Vec<Line> = model.log[model.log.len().saturating_sub(height)..]
         .iter()
         .map(|entry| match &entry.error {
-            None => Text::from(vec![
-                Span::styled("✓ ", Style::new().fg(theme.ok)),
-                Span::styled(entry.command.as_str(), Style::new().fg(theme.dim)),
+            None => Line::from(vec![
+                Span::styled("✓ ", Style::new().fg(palette.ok)),
+                Span::styled(entry.command.as_str(), Style::new().fg(palette.dim)),
             ]),
-            Some(error) => Text::from(vec![
-                Span::styled("✗ ", Style::new().fg(theme.error)),
+            Some(error) => Line::from(vec![
+                Span::styled("✗ ", Style::new().fg(palette.error)),
                 Span::raw(entry.command.as_str()),
-                Span::styled(format!(": {error}"), Style::new().fg(theme.error)),
+                Span::styled(format!(": {error}"), Style::new().fg(palette.error)),
             ]),
         })
         .collect();
     frame.render_widget(Paragraph::new(lines).block(block), rect);
 }
 
-fn render_hints(frame: &mut Frame, model: &Model, theme: &Theme, rect: Rect) {
+fn render_hints(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect) {
     let mut spans = Vec::new();
     if let Some(list) = model.filtering {
         spans.push(Span::styled(
             format!("filter {}: {}", name(list), popup_hints(Popup::Filter)),
-            Style::new().fg(theme.warn),
+            Style::new().fg(palette.warn),
         ));
     } else {
         let active = model.active();
@@ -552,9 +553,9 @@ fn render_hints(frame: &mut Frame, model: &Model, theme: &Theme, rect: Rect) {
             .filter(|binding| binding.hint.contains(&active))
         {
             if !spans.is_empty() {
-                spans.push(Span::styled(" · ", Style::new().fg(theme.dim)));
+                spans.push(Span::styled(" · ", Style::new().fg(palette.dim)));
             }
-            spans.push(Span::styled(binding.label, Style::new().fg(theme.accent)));
+            spans.push(Span::styled(binding.label, Style::new().fg(palette.accent)));
             spans.push(Span::raw(format!(" {}", short_help(binding.help))));
         }
     }
@@ -568,12 +569,12 @@ fn render_hints(frame: &mut Frame, model: &Model, theme: &Theme, rect: Rect) {
         }),
     ])
     .areas(rect);
-    frame.render_widget(Paragraph::new(Text::from(spans)), left);
+    frame.render_widget(Paragraph::new(Line::from(spans)), left);
     if !loading.is_empty() {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 format!("⟳ {}", loading.join(" ")),
-                Style::new().fg(theme.info),
+                Style::new().fg(palette.info),
             )),
             right,
         );

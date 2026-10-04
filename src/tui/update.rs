@@ -8,8 +8,8 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use super::app::{
-    Action, Binding, Cmd, Effect, FAST_REFRESH, FULL_REFRESH, Focus, Job, KEYMAP, Line, List,
-    LogEntry, MenuEntry, Modal, Model, On, Panel, Popup, PopupCmd, Removal, Screen, Submit, lookup,
+    Action, Binding, Cmd, Effect, FAST_REFRESH, FULL_REFRESH, Focus, Job, KEYMAP, List, LogEntry,
+    MenuEntry, Modal, Model, On, Panel, Popup, PopupCmd, Removal, Row, Screen, Submit, lookup,
     popup_lookup,
 };
 use super::view::{areas, main_len, offset};
@@ -157,7 +157,7 @@ impl Keep {
         Self {
             workspace: model.workspace().map(Into::into),
             repo: model.repo().map(|repo| repo.path.clone()),
-            line: model.line().map(|line| line_key(model, &line)),
+            line: model.work_row().map(|line| line_key(model, &line)),
         }
     }
 
@@ -174,7 +174,7 @@ impl Keep {
         model.selected.insert(List::Repos, repo.unwrap_or(0));
         let line = self.line.and_then(|key| {
             model
-                .lines()
+                .work_rows()
                 .iter()
                 .position(|line| line_key(model, line) == key)
         });
@@ -184,10 +184,10 @@ impl Keep {
     }
 }
 
-fn line_key(model: &Model, line: &Line) -> LineKey {
+fn line_key(model: &Model, line: &Row) -> LineKey {
     match line {
-        Line::Group { key, .. } => LineKey::Group(key.clone()),
-        Line::Item(index) => LineKey::Item(model.snapshot.work[*index].path().clone()),
+        Row::Group { key, .. } => LineKey::Group(key.clone()),
+        Row::Item(index) => LineKey::Item(model.snapshot.work[*index].path().clone()),
     }
 }
 
@@ -218,7 +218,7 @@ fn select_moved(model: &mut Model, list: List, index: usize) -> Vec<Effect> {
 
 /// Fetches the selected worktree's recent commits unless they are loaded.
 fn commits(model: &mut Model) -> Vec<Effect> {
-    if let Some(Line::Item(index)) = model.line() {
+    if let Some(Row::Item(index)) = model.work_row() {
         let path = model.snapshot.work[index].path().clone();
         if !model.commits.contains_key(&path) {
             return vec![run(model, Job::Commits(path))];
@@ -452,8 +452,8 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
             }
         }
         Cmd::Activate => return activate(model),
-        Cmd::Enter => match model.line() {
-            Some(Line::Group { key, .. }) if list == List::Work => {
+        Cmd::Enter => match model.work_row() {
+            Some(Row::Group { key, .. }) if list == List::Work => {
                 if !model.folded.remove(&key) {
                     model.folded.insert(key);
                 }
@@ -462,11 +462,11 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
         },
         Cmd::CollapseAll => {
             let keys: Vec<String> = model
-                .lines()
+                .work_rows()
                 .into_iter()
                 .filter_map(|line| match line {
-                    Line::Group { key, .. } => Some(key),
-                    Line::Item(_) => None,
+                    Row::Group { key, .. } => Some(key),
+                    Row::Item(_) => None,
                 })
                 .collect();
             model.folded.extend(keys);
@@ -624,9 +624,9 @@ fn new(model: &mut Model) -> Vec<Effect> {
             let Some(workspace) = model.workspace().map(str::to_owned) else {
                 return Vec::new();
             };
-            let group = match model.line() {
-                Some(Line::Group { name, .. }) => name,
-                Some(Line::Item(index)) => model.snapshot.work[index].group.clone(),
+            let group = match model.work_row() {
+                Some(Row::Group { name, .. }) => name,
+                Some(Row::Item(index)) => model.snapshot.work[index].group.clone(),
                 None => String::new(),
             };
             let ask = |repo: std::path::PathBuf, name: String| Action::Ask {
@@ -808,16 +808,16 @@ fn copy_path(model: &Model) -> Option<String> {
     match model.active() {
         List::Workspaces => model.workspace().map(Into::into),
         List::Repos => model.repo().map(|repo| repo.path.display().to_string()),
-        List::Work => match model.line()? {
-            Line::Item(index) => Some(model.snapshot.work[index].path().display().to_string()),
-            Line::Group { name, .. } => Some(name),
+        List::Work => match model.work_row()? {
+            Row::Item(index) => Some(model.snapshot.work[index].path().display().to_string()),
+            Row::Group { name, .. } => Some(name),
         },
     }
 }
 
 fn branch(model: &Model) -> Option<String> {
-    match (model.active(), model.line()?) {
-        (List::Work, Line::Item(index)) => model.snapshot.work[index].tree.branch.clone(),
+    match (model.active(), model.work_row()?) {
+        (List::Work, Row::Item(index)) => model.snapshot.work[index].tree.branch.clone(),
         _ => None,
     }
 }
@@ -829,8 +829,8 @@ fn url(model: &Model) -> Option<String> {
         List::Repos => forges
             .get(&model.repo()?.path)
             .map(|forge| forge.url.clone()),
-        List::Work => match model.line()? {
-            Line::Item(index) => {
+        List::Work => match model.work_row()? {
+            Row::Item(index) => {
                 let work = &model.snapshot.work[index];
                 let forge = forges.get(&work.repo)?;
                 Some(match &work.tree.branch {
@@ -838,7 +838,7 @@ fn url(model: &Model) -> Option<String> {
                     None => forge.url.clone(),
                 })
             }
-            Line::Group { .. } => None,
+            Row::Group { .. } => None,
         },
         List::Workspaces => None,
     }
@@ -995,11 +995,11 @@ pub mod tests {
 
     fn titles(model: &Model) -> Vec<String> {
         model
-            .lines()
+            .work_rows()
             .into_iter()
             .map(|line| match line {
-                Line::Group { name, .. } => format!("[{name}]"),
-                Line::Item(index) => model.snapshot.work[index].title(),
+                Row::Group { name, .. } => format!("[{name}]"),
+                Row::Item(index) => model.snapshot.work[index].title(),
             })
             .collect()
     }

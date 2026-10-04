@@ -18,18 +18,18 @@ use tokio::sync::mpsc;
 use crate::config::Config;
 use app::{Action, Effect, Job, Model};
 use jobs::Context;
-use view::Theme;
+use view::Palette;
 
 pub fn run(config: Config) -> Result<()> {
-    let theme = Theme::new(config.flavor(), config.icons);
+    let palette = Palette::new(config.flavor(), config.icons);
     let context = Arc::new(Context::new(config)?);
-    tokio::runtime::Runtime::new()?.block_on(event_loop(context, theme))
+    tokio::runtime::Runtime::new()?.block_on(event_loop(context, palette))
 }
 
-async fn event_loop(context: Arc<Context>, theme: Theme) -> Result<()> {
+async fn event_loop(context: Arc<Context>, palette: Palette) -> Result<()> {
     let mut terminal = ratatui::init();
     crossterm::execute!(std::io::stdout(), EnableMouseCapture)?;
-    let result = drive(&mut terminal, context, theme).await;
+    let result = drive(&mut terminal, context, palette).await;
     crossterm::execute!(std::io::stdout(), DisableMouseCapture)?;
     ratatui::restore();
     result
@@ -38,7 +38,7 @@ async fn event_loop(context: Arc<Context>, theme: Theme) -> Result<()> {
 async fn drive(
     terminal: &mut ratatui::DefaultTerminal,
     context: Arc<Context>,
-    theme: Theme,
+    palette: Palette,
 ) -> Result<()> {
     let size = terminal.size()?;
     let mut model = Model::new((size.width, size.height));
@@ -76,7 +76,7 @@ async fn drive(
             }
         }
         if dirty {
-            terminal.draw(|frame| view::render(frame, &model, &theme))?;
+            terminal.draw(|frame| view::render(frame, &model, &palette))?;
         }
         let action = tokio::select! {
             event = events.next() => match event {
@@ -142,9 +142,9 @@ mod tests {
 
     fn render_with(model: &Model, width: u16, height: u16, icons: Icons) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        let theme = Theme::new(catppuccin::PALETTE.mocha, icons);
+        let palette = Palette::new(catppuccin::PALETTE.mocha, icons);
         terminal
-            .draw(|frame| view::render(frame, model, &theme))
+            .draw(|frame| view::render(frame, model, &palette))
             .unwrap();
         terminal.backend().to_string()
     }

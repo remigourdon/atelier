@@ -92,7 +92,7 @@ impl Work {
 
 /// A row of the Work panel.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Line {
+pub enum Row {
     /// A group header; `members` index `Snapshot::work`.
     Group {
         key: String,
@@ -603,7 +603,7 @@ impl Model {
     }
 
     /// Panel 2's rows: named groups, foldable, then ungrouped worktrees.
-    pub fn lines(&self) -> Vec<Line> {
+    pub fn work_rows(&self) -> Vec<Row> {
         let Some(workspace) = self.workspace() else {
             return Vec::new();
         };
@@ -643,18 +643,18 @@ impl Model {
                 .map_or(members.len(), |offset| index + offset);
             let slice = &members[index..end];
             if group.is_empty() {
-                lines.extend(slice.iter().map(|&member| Line::Item(member)));
+                lines.extend(slice.iter().map(|&member| Row::Item(member)));
             } else {
                 let key = format!("{workspace}\0{group}");
                 let folded = !filtering && self.folded.contains(&key);
-                lines.push(Line::Group {
+                lines.push(Row::Group {
                     key,
                     name: group.clone(),
                     members: slice.to_vec(),
                     folded,
                 });
                 if !folded {
-                    lines.extend(slice.iter().map(|&member| Line::Item(member)));
+                    lines.extend(slice.iter().map(|&member| Row::Item(member)));
                 }
             }
             index = end;
@@ -662,15 +662,15 @@ impl Model {
         lines
     }
 
-    pub fn line(&self) -> Option<Line> {
-        self.lines().into_iter().nth(self.index(List::Work))
+    pub fn work_row(&self) -> Option<Row> {
+        self.work_rows().into_iter().nth(self.index(List::Work))
     }
 
     /// The selected worktree, or every worktree of the selected group.
     pub fn targets(&self) -> Vec<&Work> {
-        match self.line() {
-            Some(Line::Item(index)) => vec![&self.snapshot.work[index]],
-            Some(Line::Group { members, .. }) => members
+        match self.work_row() {
+            Some(Row::Item(index)) => vec![&self.snapshot.work[index]],
+            Some(Row::Group { members, .. }) => members
                 .iter()
                 .map(|&index| &self.snapshot.work[index])
                 .collect(),
@@ -682,7 +682,7 @@ impl Model {
         match list {
             List::Workspaces => self.workspaces().len(),
             List::Repos => self.repos().len(),
-            List::Work => self.lines().len(),
+            List::Work => self.work_rows().len(),
         }
     }
 }
