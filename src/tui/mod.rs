@@ -42,6 +42,7 @@ async fn drive(
 ) -> Result<()> {
     let size = terminal.size()?;
     let mut model = Model::new((size.width, size.height));
+    model.tracker = context.config.tracker.clone();
     let (sender, mut results) = mpsc::unbounded_channel::<Action>();
     let mut events = EventStream::new();
     let mut ticks = tokio::time::interval(Duration::from_secs(1));
@@ -204,6 +205,15 @@ mod tests {
         let mut model = loaded(120, 30);
         model.snapshot.work[0].tree.branch = Some("change-2".into());
         update(&mut model, Action::Key(key('3')));
+        insta::assert_snapshot!(render(&model, 120, 30));
+    }
+
+    #[test]
+    fn issues_panel() {
+        let mut model = update::tests::with_issues(loaded(120, 30));
+        update(&mut model, Action::Key(key('4')));
+        update(&mut model, Action::Key(key(']')));
+        update(&mut model, Action::Key(key('j')));
         insta::assert_snapshot!(render(&model, 120, 30));
     }
 

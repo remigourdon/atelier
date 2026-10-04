@@ -34,6 +34,7 @@ pub struct Glyphs {
     pub repo: &'static str,
     pub worktree: &'static str,
     pub review: &'static str,
+    pub issue: &'static str,
     pub open: &'static str,
     pub closed: &'static str,
     pub folded: &'static str,
@@ -50,6 +51,7 @@ impl Glyphs {
                 repo: "",
                 worktree: "",
                 review: "",
+                issue: "",
                 open: "●",
                 closed: "○",
                 folded: "▸",
@@ -57,12 +59,13 @@ impl Glyphs {
                 spinner,
             },
             // Nerd Fonts: fa-desktop, oct-repo, dev-git_branch, oct-git_pull_request,
-            // fa-circle, fa-circle_o, fa-folder, fa-folder_open.
+            // oct-issue_opened, fa-circle, fa-circle_o, fa-folder, fa-folder_open.
             Icons::Nerd => Self {
                 workspace: "\u{f108}",
                 repo: "\u{f401}",
                 worktree: "\u{e725}",
                 review: "\u{f407}",
+                issue: "\u{f41b}",
                 open: "\u{f111}",
                 closed: "\u{f10c}",
                 folded: "\u{f07b}",
@@ -132,7 +135,7 @@ pub fn areas(model: &Model, area: Rect) -> Areas {
         let constraints = shown.iter().map(|&panel| match panel {
             _ if short && panel != model.panel => Constraint::Length(1),
             _ if short => Constraint::Fill(1),
-            Panel::Workspaces | Panel::Reviews => Constraint::Fill(1),
+            Panel::Workspaces | Panel::Reviews | Panel::Issues => Constraint::Fill(1),
             Panel::Work => Constraint::Fill(2),
         });
         let rects = Layout::vertical(constraints).split(side);
@@ -188,19 +191,34 @@ fn block<'a>(title: Line<'a>, focused: bool, palette: &Palette) -> Block<'a> {
 fn render_panel(frame: &mut Frame, model: &Model, palette: &Palette, panel: Panel, rect: Rect) {
     let focused = model.focus == Focus::Panel(panel);
     let list = model.list(panel);
-    let tab = |label: &'static str, active: bool| {
+    let tab = |label: &str, active: bool| {
         if active {
-            Span::styled(label, Style::new().fg(palette.accent).bold())
+            Span::styled(label.to_owned(), Style::new().fg(palette.accent).bold())
         } else {
-            Span::styled(label, Style::new().fg(palette.dim))
+            Span::styled(label.to_owned(), Style::new().fg(palette.dim))
         }
     };
     let mut title = vec![Span::raw(format!("[{}] ", panel.number()))];
-    for (index, &other) in panel.tabs().iter().enumerate() {
-        if index > 0 {
-            title.push(Span::raw(" │ "));
+    let tabs = model.tabs(panel);
+    let width: usize = (tabs
+        .iter()
+        .map(|&other| model.title(other).chars().count() + 3))
+    .sum();
+    if width + 4 > rect.width as usize {
+        // Too many to fit: only the active one, and where it is.
+        let at = tabs.iter().position(|&other| other == list).unwrap_or(0);
+        title.push(tab(model.title(list), true));
+        title.push(Span::styled(
+            format!(" {}/{}", at + 1, tabs.len()),
+            Style::new().fg(palette.dim),
+        ));
+    } else {
+        for (index, other) in tabs.into_iter().enumerate() {
+            if index > 0 {
+                title.push(Span::raw(" │ "));
+            }
+            title.push(tab(model.title(other), other == list));
         }
-        title.push(tab(other.title(), other == list));
     }
     if panel == Panel::Work
         && let Some(workspace) = model.workspace()
@@ -230,12 +248,19 @@ fn render_panel(frame: &mut Frame, model: &Model, palette: &Palette, panel: Pane
     frame.render_widget(block, rect);
     let rows = rows(model, palette, list);
     if rows.is_empty() {
-        let loading = match list.role() {
-            Some(_) => (model.loading.keys()).any(|source| matches!(source, Source::Reviews(_))),
-            None => !model.loaded,
+        let loading = match list {
+            List::ToReview | List::Mine => {
+                (model.loading.keys()).any(|source| matches!(source, Source::Reviews(_)))
+            }
+            List::Section(_) => {
+                (model.loading.keys()).any(|source| matches!(source, Source::Issues(_)))
+            }
+            _ => !model.loaded,
         };
         let empty = if loading {
             "loading…"
+        } else if matches!(list, List::Section(_)) && model.tracker.scopes().is_empty() {
+            "no [tracker] configured"
         } else {
             "nothing here"
         };
@@ -399,6 +424,35 @@ fn rows<'a>(model: &'a Model, palette: &Palette, list: List) -> Vec<Line<'a>> {
                 Line::from(spans)
             })
             .collect(),
+        List::Section(_) => model
+            .issues(list)
+            .into_iter()
+            .map(|issue| {
+                let glyphs = &palette.glyphs;
+                let work = model.issue_work(issue);
+                let marker = if work.iter().any(|work| work.tab) {
+                    Span::styled(format!("{} ", glyphs.open), Style::new().fg(palette.ok))
+                } else if !work.is_empty() {
+                    Span::styled(format!("{} ", glyphs.closed), dim)
+                } else {
+                    Span::raw("  ")
+                };
+                let mut spans = vec![marker];
+                spans.extend(icon(glyphs.issue, dim));
+                spans.push(Span::styled(format!("{} ", issue.key), dim));
+                spans.push(Span::raw(issue.title.as_str()));
+                if issue.blocked {
+                    spans.push(Span::styled(" blocked", Style::new().fg(palette.error)));
+                }
+                for label in &issue.labels {
+                    spans.push(Span::styled(
+                        format!(" {label}"),
+                        Style::new().fg(palette.info),
+                    ));
+                }
+                Line::from(spans)
+            })
+            .collect(),
     }
 }
 
@@ -545,6 +599,35 @@ fn detail(model: &Model) -> Vec<(String, String)> {
                 ),
             ]
         }
+        List::Section(_) => {
+            let Some(issue) = model.issue() else {
+                return Vec::new();
+            };
+            let mut pairs = vec![
+                pair("Issue", issue.key.clone()),
+                pair("Title", issue.title.clone()),
+                pair("State", issue.state.label().into()),
+                pair("Status", issue.status.clone()),
+                pair("Blocked", if issue.blocked { "yes" } else { "no" }.into()),
+                pair("Labels", issue.labels.join(", ")),
+                pair("Assignees", issue.assignees.join(", ")),
+                pair("Updated", issue.updated_at.clone()),
+                pair("URL", issue.url.clone()),
+                pair("Project", issue.project.clone()),
+            ];
+            let work = model.issue_work(issue);
+            if work.is_empty() {
+                pairs.push(pair("Worktree", "none: Space or n creates one".into()));
+            }
+            pairs.extend(work.into_iter().map(|work| {
+                let tab = if work.tab { "open" } else { "closed" };
+                pair(
+                    "Worktree",
+                    format!("{} · {} · tab {tab}", work.title(), work.workspace),
+                )
+            }));
+            pairs
+        }
     }
 }
 
@@ -615,17 +698,14 @@ fn render_hints(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect)
         spans.push(Span::styled(
             format!(
                 "filter {}: {}",
-                list.title().to_lowercase(),
+                model.title(list).to_lowercase(),
                 popup_hints(Popup::Filter)
             ),
             Style::new().fg(palette.warn),
         ));
     } else {
         let active = model.active();
-        for binding in KEYMAP
-            .iter()
-            .filter(|binding| binding.hint.contains(&active))
-        {
+        for binding in KEYMAP.iter().filter(|binding| active.among(binding.hint)) {
             if !spans.is_empty() {
                 spans.push(Span::styled(" · ", Style::new().fg(palette.dim)));
             }

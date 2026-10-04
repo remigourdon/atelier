@@ -15,4 +15,5 @@ Atelier organises git worktrees into zellij sessions, on top of worktrunk (`wt`)
 - **Issue** — a tracker item (GitHub or Jira) normalised to `state`, `labels` and `blocked`.
 - **State** — an issue's normalised progress: `todo`, `in_progress` or `done`.
 - **Section** — an ordered rule that places issues in an Issues sub-tab; first match wins.
+- **Linked work** — the worktrees whose group is an issue's key (`ABC-123`, or `repo#12` on GitHub).
 - **Command log** — the TUI's record of every external command atelier ran and its result.

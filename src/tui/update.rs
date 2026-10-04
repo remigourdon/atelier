@@ -10,13 +10,15 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use super::app::{
-    Action, Binding, Cmd, Effect, FAST_REFRESH, FULL_REFRESH, Focus, Job, KEYMAP, List, MenuEntry,
-    Modal, Model, On, Panel, Popup, PopupCmd, Removal, ReviewsDue, Row, Screen, Source, Submit,
+    Action, Binding, Cmd, Due, Effect, FAST_REFRESH, FULL_REFRESH, Focus, Job, KEYMAP, List,
+    MenuEntry, Modal, Model, On, Panel, Popup, PopupCmd, Removal, Row, Screen, Source, Submit,
     Work, lookup, popup_lookup,
 };
 use super::view::{areas, main_len, offset};
+use crate::issues::Issue;
 use crate::process::Logged;
 use crate::reviews::{self, Provider};
+use crate::state::Repo;
 
 pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
     match action {
@@ -66,6 +68,7 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
                     model.commits.clear();
                     let mut effects = commits(model);
                     effects.extend(fetch_reviews(model));
+                    effects.extend(fetch_issues(model));
                     effects
                 }
                 Err(error) => {
@@ -106,6 +109,28 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
             }
             Vec::new()
         }
+        Action::Issues {
+            source,
+            issues,
+            log,
+        } => {
+            done(model, Source::Issues(source));
+            model.push_log(log);
+            match issues {
+                Ok(issues) => {
+                    let keep = Keep::of(model);
+                    model.issues.retain(|issue| issue.source != source);
+                    model.issues.extend(issues);
+                    model.issues.sort_by_key(|issue| issue.source);
+                    keep.restore(model);
+                }
+                Err(error) => model.push_log([Logged {
+                    command: format!("{} issues", source.cli()),
+                    error: Some(error),
+                }]),
+            }
+            Vec::new()
+        }
         Action::Finished { job, log, error } => {
             done(model, job.source());
             if let Job::Pull(paths) = &job {
@@ -138,8 +163,10 @@ fn run(model: &mut Model, job: Job) -> Effect {
         model.since_refresh = 0;
         if full {
             model.since_full = 0;
-            if model.reviews_due == ReviewsDue::No {
-                model.reviews_due = ReviewsDue::Cached;
+            for due in [&mut model.reviews_due, &mut model.issues_due] {
+                if *due == Due::No {
+                    *due = Due::Cached;
+                }
             }
         }
     }
@@ -149,11 +176,11 @@ fn run(model: &mut Model, job: Job) -> Effect {
 /// Lists each provider's reviews on the hosts of the registered repos, once a listing that
 /// asked for them has found those hosts.
 fn fetch_reviews(model: &mut Model) -> Vec<Effect> {
-    let due = std::mem::replace(&mut model.reviews_due, ReviewsDue::No);
-    if due == ReviewsDue::No {
+    let due = std::mem::replace(&mut model.reviews_due, Due::No);
+    if due == Due::No {
         return Vec::new();
     }
-    let force = due == ReviewsDue::Fresh;
+    let force = due == Due::Fresh;
     let mut effects = Vec::new();
     let mut busy = false;
     for provider in Provider::ALL {
@@ -181,6 +208,36 @@ fn fetch_reviews(model: &mut Model) -> Vec<Effect> {
     // A provider still listing gets its turn at the next listing, so `R` is not lost.
     if busy {
         model.reviews_due = due;
+    }
+    effects
+}
+
+/// Lists each tracker's issues in its configured scopes, once a listing asked for them.
+fn fetch_issues(model: &mut Model) -> Vec<Effect> {
+    let due = std::mem::replace(&mut model.issues_due, Due::No);
+    if due == Due::No {
+        return Vec::new();
+    }
+    let mut effects = Vec::new();
+    let mut busy = false;
+    for (source, scopes) in model.tracker.scopes() {
+        if model.loading.contains_key(&Source::Issues(source)) {
+            busy = true;
+        } else {
+            let force = due == Due::Fresh;
+            effects.push(run(
+                model,
+                Job::Issues {
+                    source,
+                    scopes,
+                    force,
+                },
+            ));
+        }
+    }
+    // As for reviews, a tracker still listing gets its turn at the next listing.
+    if busy {
+        model.issues_due = due;
     }
     effects
 }
@@ -216,8 +273,8 @@ struct Keep {
     workspace: Option<String>,
     repo: Option<std::path::PathBuf>,
     line: Option<LineKey>,
-    /// Each review list's selected review, by URL.
-    reviews: Vec<(List, String)>,
+    /// Each review list's and section's selected review or issue, by URL.
+    remote: Vec<(List, String)>,
 }
 
 #[derive(PartialEq)]
@@ -232,11 +289,16 @@ impl Keep {
             workspace: model.workspace().map(Into::into),
             repo: model.repo().map(|repo| repo.path.clone()),
             line: model.work_row().map(|line| line_key(model, &line)),
-            reviews: [List::ToReview, List::Mine]
-                .into_iter()
+            remote: (model.lists().into_iter())
                 .filter_map(|list| {
-                    let review = model.reviews(list).get(model.index(list)).copied()?;
-                    Some((list, review.url.clone()))
+                    let url = match list {
+                        List::ToReview | List::Mine => {
+                            &model.reviews(list).get(model.index(list))?.url
+                        }
+                        List::Section(_) => &model.issues(list).get(model.index(list))?.url,
+                        _ => return None,
+                    };
+                    Some((list, url.clone()))
                 })
                 .collect(),
         }
@@ -261,8 +323,12 @@ impl Keep {
         });
         let line = line.unwrap_or(model.index(List::Work));
         model.selected.insert(List::Work, line);
-        for (list, url) in self.reviews {
-            if let Some(index) = model.reviews(list).iter().position(|r| r.url == url) {
+        for (list, url) in self.remote {
+            let index = match list {
+                List::Section(_) => model.issues(list).iter().position(|i| i.url == url),
+                _ => model.reviews(list).iter().position(|r| r.url == url),
+            };
+            if let Some(index) = index {
                 model.selected.insert(list, index);
             }
         }
@@ -278,7 +344,7 @@ fn line_key(model: &Model, line: &Row) -> LineKey {
 }
 
 fn clamp_all(model: &mut Model) {
-    for list in List::ALL {
+    for list in model.lists() {
         select(model, list, model.index(list));
     }
 }
@@ -423,7 +489,12 @@ fn modal_key(model: &mut Model, modal: Modal, key: KeyEvent) -> Vec<Effect> {
 
 fn submit(model: &mut Model, then: Submit, value: &str) -> Vec<Effect> {
     let job = match then {
-        _ if value.is_empty() && matches!(then, Submit::Branch { .. } | Submit::Workspace) => {
+        _ if value.is_empty()
+            && matches!(
+                then,
+                Submit::Branch { .. } | Submit::Start { .. } | Submit::Workspace
+            ) =>
+        {
             return Vec::new();
         }
         Submit::Branch {
@@ -435,6 +506,16 @@ fn submit(model: &mut Model, then: Submit, value: &str) -> Vec<Effect> {
             branch: value.into(),
             workspace,
             group,
+        },
+        Submit::Start {
+            repo,
+            workspace,
+            issue,
+        } => Job::Start {
+            repo,
+            branch: value.into(),
+            workspace,
+            issue,
         },
         Submit::Group(paths) => Job::Regroup {
             paths,
@@ -530,7 +611,7 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
         Cmd::ScrollLeft => scroll(model, 0, -4),
         Cmd::ScrollRight => scroll(model, 0, 4),
         Cmd::NextTab | Cmd::PrevTab => {
-            let tabs = model.panel.tabs();
+            let tabs = model.tabs(model.panel);
             let at = tabs.iter().position(|&tab| tab == list).unwrap_or(0);
             let next = if cmd == Cmd::NextTab {
                 (at + 1) % tabs.len()
@@ -619,11 +700,13 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
         Cmd::Filter if !in_main => model.filtering = Some(list),
         Cmd::Filter => {}
         Cmd::Refresh => {
-            model.reviews_due = ReviewsDue::Fresh;
+            model.reviews_due = Due::Fresh;
+            model.issues_due = Due::Fresh;
             return vec![run(model, Job::Refresh { full: true })];
         }
         Cmd::Menu => {
-            let here = |binding: &&Binding| matches!(binding.on, On::Lists(lists) if lists.contains(&list));
+            let here =
+                |binding: &&Binding| matches!(binding.on, On::Lists(lists) if list.among(lists));
             let global = |binding: &&Binding| binding.on == On::Global;
             let entries = (KEYMAP.iter().filter(here))
                 .chain(KEYMAP.iter().filter(global))
@@ -724,7 +807,56 @@ fn activate(model: &mut Model) -> Vec<Effect> {
             };
             vec![run(model, job)]
         }
+        List::Section(_) => {
+            let Some(issue) = model.issue().cloned() else {
+                return Vec::new();
+            };
+            let paths = paths(&model.issue_work(&issue));
+            if paths.is_empty() {
+                start(model, issue)
+            } else {
+                vec![run(model, Job::Open(paths))]
+            }
+        }
     }
+}
+
+/// Asks for a branch for an issue's worktree: in its registered repo on GitHub, else in a repo
+/// picked from a menu. It goes to the workspace of the issue's linked work, if any.
+fn start(model: &mut Model, issue: Issue) -> Vec<Effect> {
+    let linked = (model.issue_work(&issue).first()).map(|work| work.workspace.clone());
+    let ask = |repo: &Repo| Action::Ask {
+        title: format!("New worktree of {} for {}: branch", repo.name(), issue.key),
+        initial: issue.branch(),
+        then: Submit::Start {
+            repo: repo.path.clone(),
+            workspace: linked.clone().unwrap_or(repo.default_workspace.clone()),
+            issue: Box::new(issue.clone()),
+        },
+    };
+    if let Some(repo) = model.project_repo(&issue.project_url) {
+        let action = ask(repo);
+        return update(model, action);
+    }
+    let entries: Vec<MenuEntry> = (model.snapshot.repos.iter().enumerate())
+        .map(|(index, repo)| MenuEntry {
+            key: (index + 1).to_string(),
+            label: repo.name(),
+            action: ask(repo),
+        })
+        .collect();
+    if entries.is_empty() {
+        return note(
+            model,
+            "no repos yet: register one with `atelier add <path>`",
+        );
+    }
+    model.modal = Some(Modal::Menu {
+        title: format!("New worktree for {} in", issue.key),
+        entries,
+        selected: 0,
+    });
+    Vec::new()
 }
 
 fn new(model: &mut Model) -> Vec<Effect> {
@@ -739,6 +871,10 @@ fn new(model: &mut Model) -> Vec<Effect> {
         ),
         List::Repos => note(model, "register repos with `atelier add <path>`"),
         List::ToReview | List::Mine => Vec::new(),
+        List::Section(_) => match model.issue().cloned() {
+            Some(issue) => start(model, issue),
+            None => Vec::new(),
+        },
         List::Work => {
             let Some(workspace) = model.workspace().map(str::to_owned) else {
                 return Vec::new();
@@ -790,7 +926,7 @@ fn new(model: &mut Model) -> Vec<Effect> {
 
 fn edit(model: &mut Model) -> Vec<Effect> {
     let action = match model.active() {
-        List::Workspaces | List::ToReview | List::Mine => return Vec::new(),
+        List::Workspaces | List::ToReview | List::Mine | List::Section(_) => return Vec::new(),
         List::Repos => {
             let Some(repo) = model.repo() else {
                 return Vec::new();
@@ -847,7 +983,7 @@ fn workspace_menu(
 
 fn move_to(model: &mut Model) -> Vec<Effect> {
     match model.active() {
-        List::Workspaces | List::ToReview | List::Mine => Vec::new(),
+        List::Workspaces | List::ToReview | List::Mine | List::Section(_) => Vec::new(),
         List::Repos => {
             let Some(repo) = model.repo().cloned() else {
                 return Vec::new();
@@ -889,7 +1025,7 @@ fn confirm(model: &mut Model, title: String, lines: Vec<String>, job: Job) -> Ve
 
 fn remove(model: &mut Model) -> Vec<Effect> {
     match model.active() {
-        List::ToReview | List::Mine => Vec::new(),
+        List::ToReview | List::Mine | List::Section(_) => Vec::new(),
         List::Workspaces => {
             let Some(name) = model.workspace().map(str::to_owned) else {
                 return Vec::new();
@@ -952,7 +1088,7 @@ fn copy_path(model: &Model) -> Option<String> {
             Row::Item(index) => Some(model.snapshot.work[index].path().display().to_string()),
             Row::Group { name, .. } => Some(name),
         },
-        List::ToReview | List::Mine => None,
+        List::ToReview | List::Mine | List::Section(_) => None,
     }
 }
 
@@ -963,7 +1099,7 @@ fn branch(model: &Model) -> Option<String> {
             Row::Group { .. } => None,
         },
         List::ToReview | List::Mine => model.review().map(|review| review.branch.clone()),
-        List::Workspaces | List::Repos => None,
+        List::Workspaces | List::Repos | List::Section(_) => None,
     }
 }
 
@@ -986,6 +1122,9 @@ fn url(model: &Model) -> Option<String> {
             Row::Group { .. } => None,
         },
         List::ToReview | List::Mine => model.review().map(|review| review.url.clone()),
+        List::Section(_) => (model.issue())
+            .map(|issue| issue.url.clone())
+            .filter(|url| !url.is_empty()),
         List::Workspaces => None,
     }
 }
@@ -1673,7 +1812,7 @@ pub mod tests {
             loaded(&mut model).is_empty(),
             "the full refresh is still listing reviews"
         );
-        assert_eq!(model.reviews_due, ReviewsDue::Fresh, "R waits for it");
+        assert_eq!(model.reviews_due, Due::Fresh, "R waits for it");
         model.loading.clear();
         let [Job::Reviews { force: true, .. }] = loaded(&mut model)[..] else {
             panic!("then R lists them past the cache");
@@ -1793,6 +1932,237 @@ pub mod tests {
         let other = model.reviews(List::ToReview)[1].clone();
         assert_eq!(model.review_project(&other), "org/other");
         assert!(model.review_work(&other).is_none());
+    }
+
+    /// The triage label scheme, with an issue in each section, one hidden, and a Jira issue
+    /// whose key groups the ABC-1 worktrees.
+    pub fn with_issues(mut model: Model) -> Model {
+        use crate::issues::tests::{SCHEME, issue};
+        model.tracker = crate::config::Config::parse(SCHEME).unwrap().tracker;
+        let mut jira = issue("ABC-1", &["ready-for-agent"], false);
+        jira.source = crate::issues::Source::Jira;
+        jira.project_url = String::new();
+        update(
+            &mut model,
+            Action::Issues {
+                source: crate::issues::Source::GitHub,
+                issues: Ok(vec![
+                    issue("api#1", &["ready-for-agent"], false),
+                    issue("api#2", &["needs-triage"], false),
+                    issue("api#3", &["ready-for-agent"], true),
+                    issue("api#4", &[], false),
+                    issue("api#5", &["wontfix"], false),
+                ]),
+                log: Vec::new(),
+            },
+        );
+        update(
+            &mut model,
+            Action::Issues {
+                source: crate::issues::Source::Jira,
+                issues: Ok(vec![jira]),
+                log: Vec::new(),
+            },
+        );
+        model
+    }
+
+    fn issue_keys(model: &Model, section: usize) -> Vec<String> {
+        (model.issues(List::Section(section)).iter())
+            .map(|issue| issue.key.clone())
+            .collect()
+    }
+
+    #[test]
+    fn issues_fill_the_sections_in_rule_order() {
+        let mut model = with_issues(model());
+        assert_eq!(issue_keys(&model, 0), ["api#3"], "blocked comes first");
+        assert_eq!(
+            issue_keys(&model, 1),
+            ["api#1", "ABC-1"],
+            "GitHub, then Jira"
+        );
+        assert_eq!(issue_keys(&model, 2), ["api#2"]);
+        assert_eq!(issue_keys(&model, 3), ["api#4"], "wontfix is hidden");
+        press(&mut model, "4");
+        assert_eq!(model.active(), List::Section(0));
+        press(&mut model, "]j");
+        assert_eq!(model.active(), List::Section(1));
+        assert_eq!(model.issue().unwrap().key, "ABC-1");
+        press(&mut model, "[[");
+        assert_eq!(model.active(), List::Section(3), "wraps around");
+        press(&mut model, "]]/abc");
+        assert_eq!(issue_keys(&model, 1), ["ABC-1"]);
+    }
+
+    #[test]
+    fn issues_replace_their_source_and_keep_the_selection() {
+        let mut model = with_issues(model());
+        press(&mut model, "4]j");
+        update(
+            &mut model,
+            Action::Issues {
+                source: crate::issues::Source::GitHub,
+                issues: Ok(vec![
+                    crate::issues::tests::issue("api#9", &["ready-for-agent"], false),
+                    crate::issues::tests::issue("api#1", &["ready-for-agent"], false),
+                ]),
+                log: Vec::new(),
+            },
+        );
+        assert_eq!(issue_keys(&model, 1), ["api#9", "api#1", "ABC-1"]);
+        assert_eq!(model.issue().unwrap().key, "ABC-1", "still selected");
+        assert!(issue_keys(&model, 0).is_empty());
+        update(
+            &mut model,
+            Action::Issues {
+                source: crate::issues::Source::Jira,
+                issues: Err("offline".into()),
+                log: Vec::new(),
+            },
+        );
+        assert_eq!(issue_keys(&model, 1).len(), 3);
+        assert_eq!(model.log.last().unwrap().command, "acli issues");
+    }
+
+    #[test]
+    fn listings_that_ask_for_issues_fetch_them_per_tracker() {
+        let mut model = Model::new((120, 40));
+        model.tracker = crate::config::Config::parse(
+            "[tracker.github]\nrepos = [\"o/a\", \"o/b\"]\n[tracker.jira]\njql = \"x\"\n",
+        )
+        .unwrap()
+        .tracker;
+        let loaded = |model: &mut Model| -> Vec<Job> {
+            jobs(update(
+                model,
+                Action::Loaded {
+                    snapshot: Ok(snapshot()),
+                    log: Vec::new(),
+                },
+            ))
+            .into_iter()
+            .filter(|job| matches!(job, Job::Issues { .. }))
+            .collect()
+        };
+        assert_eq!(
+            loaded(&mut model),
+            [
+                Job::Issues {
+                    source: crate::issues::Source::GitHub,
+                    scopes: vec!["o/a".into(), "o/b".into()],
+                    force: false,
+                },
+                Job::Issues {
+                    source: crate::issues::Source::Jira,
+                    scopes: vec!["x".into()],
+                    force: false,
+                },
+            ],
+            "startup lists them"
+        );
+        assert!(loaded(&mut model).is_empty(), "a fast refresh does not");
+        press(&mut model, "R");
+        assert!(
+            loaded(&mut model).is_empty(),
+            "both trackers are still listing"
+        );
+        assert_eq!(model.issues_due, Due::Fresh, "R waits for them");
+        model.loading.clear();
+        let forced = loaded(&mut model);
+        assert!(
+            forced.len() == 2
+                && forced
+                    .iter()
+                    .all(|job| matches!(job, Job::Issues { force: true, .. })),
+            "then R lists them past the cache"
+        );
+    }
+
+    #[test]
+    fn space_on_an_issue_starts_a_worktree_or_opens_its_linked_work() {
+        let mut model = with_issues(model());
+        press(&mut model, "4]");
+        assert!(press(&mut model, " ").is_empty());
+        let Some(Modal::Prompt { input, title, .. }) = &model.modal else {
+            panic!("asks for the branch");
+        };
+        assert_eq!(input.value(), "1-issue-api-1");
+        assert!(title.contains("api for api#1"), "{title}");
+        let [
+            Job::Start {
+                repo,
+                branch,
+                workspace,
+                issue,
+            },
+        ] = &jobs(press(&mut model, "\n"))[..]
+        else {
+            panic!();
+        };
+        assert_eq!(
+            (
+                repo,
+                branch.as_str(),
+                workspace.as_str(),
+                issue.key.as_str()
+            ),
+            (
+                &PathBuf::from("/src/api"),
+                "1-issue-api-1",
+                "default",
+                "api#1"
+            )
+        );
+        press(&mut model, "j");
+        assert_eq!(
+            jobs(press(&mut model, " ")),
+            [Job::Open(vec![
+                "/src/api.ABC-1-login".into(),
+                "/src/web.ABC-1-form".into()
+            ])],
+            "the Jira issue's key groups its linked work"
+        );
+        press(&mut model, "n");
+        assert_eq!(
+            menu_keys(&model),
+            ["1", "2"],
+            "an issue without a registered repo picks one"
+        );
+        press(&mut model, "2");
+        let Some(Modal::Prompt { then, .. }) = &model.modal else {
+            panic!();
+        };
+        let Submit::Start {
+            repo, workspace, ..
+        } = then
+        else {
+            panic!();
+        };
+        assert_eq!(
+            (repo, workspace.as_str()),
+            (&PathBuf::from("/src/web"), "default"),
+            "in the linked work's workspace"
+        );
+        assert!(jobs(press(&mut model, "\x1b")).is_empty());
+    }
+
+    #[test]
+    fn issues_browse_and_ignore_local_actions() {
+        let mut model = with_issues(model());
+        press(&mut model, "4]");
+        assert_eq!(
+            jobs(press(&mut model, "o")),
+            [Job::Browse("https://forge/api/issues/api#1".into())]
+        );
+        for keys in ["d", "e", "m", "x", "p"] {
+            assert!(jobs(press(&mut model, keys)).is_empty(), "{keys}");
+            assert!(model.modal.is_none(), "{keys}");
+        }
+        press(&mut model, "?");
+        let keys = menu_keys(&model);
+        assert!(keys.contains(&"Space".into()) && keys.contains(&"o".into()));
+        assert!(!keys.contains(&"p".into()));
     }
 
     #[test]

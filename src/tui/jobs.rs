@@ -3,11 +3,12 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use color_eyre::eyre::{Result, eyre};
+use color_eyre::eyre::{Report, Result, eyre};
 use regex::Regex;
 
 use super::app::{Action, Job, Removal, Snapshot, Work};
 use crate::config::{Config, group_from_name};
+use crate::issues::{self, Issue};
 use crate::process::{Logged, Recorder, Runner, System};
 use crate::reviews::{self, Provider, Review, Role};
 use crate::state::{self, State};
@@ -91,6 +92,25 @@ pub fn run(context: &Context, job: Job) -> Action {
                 log,
             }
         }
+        Job::Issues {
+            source,
+            scopes,
+            force,
+        } => {
+            let site = context.config.tracker.jira_site();
+            let (issues, log) = match context.state() {
+                Ok(state) => {
+                    let (issues, log) = issues(&state, &recorder, source, &scopes, site, force);
+                    (Ok(issues), log)
+                }
+                Err(err) => (Err(err.to_string()), Vec::new()),
+            };
+            Action::Issues {
+                source,
+                issues,
+                log,
+            }
+        }
         job => {
             let error = context
                 .state()
@@ -113,8 +133,24 @@ pub fn attach(context: &Context, session: &str) -> Vec<Logged> {
     recorder.take()
 }
 
-/// A provider's reviews in both roles on every host, with what failed for the command log:
-/// each failed command, and a fetch's own error when no command failed, as when parsing.
+/// What a fetch adds to the command log: each command that failed, and the fetch's own error
+/// only when no command failed, as when parsing.
+fn failures(recorder: &Recorder, error: Option<Report>, what: String) -> Vec<Logged> {
+    let mut failed: Vec<Logged> = (recorder.take().into_iter())
+        .filter(|entry| entry.error.is_some())
+        .collect();
+    if let Some(error) = error
+        && failed.is_empty()
+    {
+        failed.push(Logged {
+            command: what,
+            error: Some(format!("{error:#}")),
+        });
+    }
+    failed
+}
+
+/// A provider's reviews in both roles on every host, with what failed for the command log.
 fn reviews(
     state: &State,
     recorder: &Recorder,
@@ -129,21 +165,38 @@ fn reviews(
         for role in Role::ALL {
             let (found, error) = reviews::fetch(state, api.as_ref(), role, force);
             reviews.extend(found);
-            let failed: Vec<Logged> = (recorder.take().into_iter())
-                .filter(|entry| entry.error.is_some())
-                .collect();
-            if let Some(error) = error
-                && failed.is_empty()
-            {
-                log.push(Logged {
-                    command: format!("{} reviews", provider.cli()),
-                    error: Some(format!("{error:#}")),
-                });
-            }
-            log.extend(failed);
+            log.extend(failures(
+                recorder,
+                error,
+                format!("{} reviews", provider.cli()),
+            ));
         }
     }
     (reviews, log)
+}
+
+/// A tracker's issues in every scope, with what failed for the command log.
+fn issues(
+    state: &State,
+    recorder: &Recorder,
+    source: issues::Source,
+    scopes: &[String],
+    site: Option<String>,
+    force: bool,
+) -> (Vec<Issue>, Vec<Logged>) {
+    let mut issues = Vec::new();
+    let mut log = Vec::new();
+    for scope in scopes {
+        let api = source.issues(recorder, scope.clone(), site.clone());
+        let (found, error) = issues::fetch(state, api.as_ref(), force);
+        issues.extend(found);
+        log.extend(failures(
+            recorder,
+            error,
+            format!("{} issues", source.cli()),
+        ));
+    }
+    (issues, log)
 }
 
 fn commits(runner: &dyn Runner, path: &Path) -> Result<Vec<String>> {
@@ -216,7 +269,7 @@ fn execute(context: &Context, state: &mut State, zellij: &Zellij, job: Job) -> R
         }
     };
     match job {
-        Job::Refresh { .. } | Job::Commits(_) | Job::Reviews { .. } => {
+        Job::Refresh { .. } | Job::Commits(_) | Job::Reviews { .. } | Job::Issues { .. } => {
             unreachable!("run handles these")
         }
         Job::Open(paths) => failures(
@@ -247,7 +300,13 @@ fn execute(context: &Context, state: &mut State, zellij: &Zellij, job: Job) -> R
             branch,
             workspace,
             group,
-        } => create(state, zellij, &repo, &branch, &workspace, &group),
+        } => create(state, zellij, &repo, &branch, &workspace, &group).map(drop),
+        Job::Start {
+            repo,
+            branch,
+            workspace,
+            issue,
+        } => start(state, zellij, &repo, &branch, &workspace, &issue),
         Job::Checkout {
             repo,
             workspace,
@@ -309,7 +368,8 @@ fn execute(context: &Context, state: &mut State, zellij: &Zellij, job: Job) -> R
     }
 }
 
-/// Creates a worktree through worktrunk, whose hooks record it and open its tab.
+/// Creates a worktree through worktrunk, whose hooks record it and open its tab. Returns its
+/// path.
 fn create(
     state: &State,
     zellij: &Zellij,
@@ -317,7 +377,7 @@ fn create(
     branch: &str,
     workspace: &str,
     group: &str,
-) -> Result<()> {
+) -> Result<Option<PathBuf>> {
     let repo_arg = repo.to_string_lossy();
     // Succeeds either way, so a new branch does not show as a failure in the log.
     let exists = !zellij
@@ -330,10 +390,29 @@ fn create(
         &["--create", branch]
     };
     let path = switch(state, zellij, repo, target, branch, workspace, group)?;
-    if let Some(path) = path
-        && state.tab(&path)?.is_none()
+    if let Some(path) = &path
+        && state.tab(path)?.is_none()
     {
-        zellij.open_tab(state, &path)?;
+        zellij.open_tab(state, path)?;
+    }
+    Ok(path)
+}
+
+/// Creates a worktree for an issue and puts it in the issue's group, which links it to the
+/// issue: the hooks take a group only from a ticket key, which a GitHub issue has none of.
+fn start(
+    state: &State,
+    zellij: &Zellij,
+    repo: &Path,
+    branch: &str,
+    workspace: &str,
+    issue: &Issue,
+) -> Result<()> {
+    let path = create(state, zellij, repo, branch, workspace, &issue.key)?
+        .ok_or_else(|| eyre!("wt switch left no worktree on {branch}"))?;
+    if state.require_item(&path)?.group != issue.key {
+        state.set_group(&path, &issue.key)?;
+        zellij.sync_names(state, repo)?;
     }
     Ok(())
 }
@@ -629,6 +708,102 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .contains("parsing gh reviews")
+        );
+    }
+
+    #[test]
+    fn issues_cover_every_scope_through_the_cache() {
+        let state =
+            State::from_connection(Connection::open_in_memory().unwrap(), "default").unwrap();
+        let fake = Fake::default()
+            .always("gh api graphql --paginate --slurp -f query=", None)
+            .once(
+                "gh api graphql --paginate --slurp -f query=",
+                Some(issues::tests::GH),
+            );
+        let recorder = Recorder::new(&fake);
+        let scopes = ["o/a".to_owned(), "o/b".to_owned()];
+        let (found, log) = issues(
+            &state,
+            &recorder,
+            issues::Source::GitHub,
+            &scopes,
+            None,
+            false,
+        );
+        assert_eq!(found.len(), 3, "o/a's issues");
+        assert_eq!(log.len(), 1, "o/b's failed command");
+        assert!(log[0].command.ends_with("-f owner=o -f name=b"));
+        issues(
+            &state,
+            &recorder,
+            issues::Source::GitHub,
+            &scopes,
+            None,
+            false,
+        );
+        assert_eq!(
+            fake.calls().len(),
+            3,
+            "only the failed scope is asked again"
+        );
+        let fake = Fake::default().always("acli", Some("[{}]"));
+        let recorder = Recorder::new(&fake);
+        let (_, log) = issues(
+            &state,
+            &recorder,
+            issues::Source::Jira,
+            &["x".into()],
+            None,
+            false,
+        );
+        assert_eq!(
+            log.len(),
+            1,
+            "a parse error is logged though its command succeeded"
+        );
+        assert_eq!(log[0].command, "acli issues");
+    }
+
+    #[test]
+    fn start_puts_the_new_worktree_in_the_issues_group() {
+        let state =
+            State::from_connection(Connection::open_in_memory().unwrap(), "default").unwrap();
+        state.add_repo("/r", None, "default").unwrap();
+        // As the hooks record it: a GitHub issue's branch names no ticket, so no group.
+        state
+            .add_item("/r.5-fix", "worktree", Some(Path::new("/r")), "", "default")
+            .unwrap();
+        state
+            .set_tab(&state::Tab {
+                path: "/r.5-fix".into(),
+                session: "side".into(),
+                tab_id: 4,
+                pane_id: "7".into(),
+            })
+            .unwrap();
+        let listing = r#"{"items":[{"branch":"5-fix","worktree":{"path":"/r.5-fix"}}]}"#;
+        let fake = Fake::default()
+            .always("wt -C /r --config-set", Some(listing))
+            .always(
+                "zellij --session side action list-tabs",
+                Some(r#"[{"tab_id":4,"position":1,"name":"r:5-fix"}]"#),
+            );
+        let issue = issues::tests::issue("r#5", &[], false);
+        start(
+            &state,
+            &zellij(&fake),
+            Path::new("/r"),
+            "5-fix",
+            "default",
+            &issue,
+        )
+        .unwrap();
+        assert_eq!(state.require_item("/r.5-fix").unwrap().group, "r#5");
+        assert!(
+            fake.calls().iter().any(|call| call.contains("rename-tab")),
+            "the tab is renamed for its group: {:?}",
+            fake.calls()
         );
     }
 
