@@ -158,8 +158,8 @@ impl Forge for Gh<'_> {
     }
 }
 
-/// GitLab through `glab api`, whose `/merge_requests` spans every project. The endpoints and
-/// fields are the ones the Python prototype ran against a live GitLab.
+/// GitLab through `glab api`, whose `/merge_requests` spans every project. Its fields are the ones
+/// the Python prototype read from a live GitLab.
 pub struct Glab<'a> {
     pub runner: &'a dyn Runner,
     pub host: String,
@@ -184,19 +184,12 @@ impl Forge for Glab<'_> {
     }
 
     fn reviews(&self, role: Role) -> Result<Vec<Review>> {
-        // The API takes no `@me`, so ask who I am first.
-        #[derive(Deserialize)]
-        struct User {
-            username: String,
-        }
-        let user: User = serde_json::from_str(&self.api("/user")?).wrap_err("parsing glab user")?;
-        let who = match role {
-            Role::ToReview => "reviewer_username",
-            Role::Mine => "author_username",
+        let scope = match role {
+            Role::ToReview => "reviews_for_me",
+            Role::Mine => "created_by_me",
         };
         let json = self.api(&format!(
-            "/merge_requests?state=opened&scope=all&{who}={}&per_page=100",
-            user.username
+            "/merge_requests?state=opened&scope={scope}&per_page=100"
         ))?;
         parse_glab(&json, role)
     }
@@ -446,16 +439,8 @@ mod tests {
     }
 
     #[test]
-    fn glab_asks_who_i_am_then_lists_merge_requests() {
-        let fake = Fake::default()
-            .always(
-                "glab api --paginate --hostname h /user",
-                Some(r#"{"username":"me"}"#),
-            )
-            .always(
-                "glab api --paginate --hostname h /merge_requests",
-                Some(GLAB),
-            );
+    fn glab_lists_merge_requests_by_scope() {
+        let fake = Fake::default().always("glab api --paginate --hostname h", Some(GLAB));
         let glab = Glab {
             runner: &fake,
             host: "h".into(),
@@ -465,10 +450,8 @@ mod tests {
         assert_eq!(
             fake.calls(),
             [
-                "glab api --paginate --hostname h /user",
-                "glab api --paginate --hostname h /merge_requests?state=opened&scope=all&reviewer_username=me&per_page=100",
-                "glab api --paginate --hostname h /user",
-                "glab api --paginate --hostname h /merge_requests?state=opened&scope=all&author_username=me&per_page=100",
+                "glab api --paginate --hostname h /merge_requests?state=opened&scope=reviews_for_me&per_page=100",
+                "glab api --paginate --hostname h /merge_requests?state=opened&scope=created_by_me&per_page=100",
             ]
         );
     }
