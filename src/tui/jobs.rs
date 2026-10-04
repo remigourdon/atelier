@@ -11,7 +11,7 @@ use crate::config::Config;
 use crate::process::{Logged, Recorder, Runner, System};
 use crate::state::{self, State};
 use crate::zellij::{self, Layouts, Zellij};
-use crate::{sync, worktrunk};
+use crate::{hooks, sync, worktrunk};
 
 /// What every job needs, shared across them.
 pub struct Context {
@@ -251,8 +251,8 @@ fn create(
     let exists = !runner
         .output("git", &["-C", &repo_arg, "branch", "--list", branch])?
         .is_empty();
-    let workspace_env = format!("ATELIER_WORKSPACE={workspace}");
-    let group_env = format!("ATELIER_GROUP_HINT={group}");
+    let workspace_env = format!("{}={workspace}", hooks::WORKSPACE_VAR);
+    let group_env = format!("{}={group}", hooks::GROUP_HINT_VAR);
     let mut args = vec![
         workspace_env.as_str(),
         &group_env,

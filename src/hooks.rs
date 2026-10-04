@@ -50,6 +50,10 @@ pub struct Payload {
     pub repo_path: Option<PathBuf>,
 }
 
+/// The variables that carry [`Hints`] through worktrunk to the hook.
+pub const GROUP_HINT_VAR: &str = "ATELIER_GROUP_HINT";
+pub const WORKSPACE_VAR: &str = "ATELIER_WORKSPACE";
+
 /// What the caller knows about a new worktree, passed through worktrunk in the environment.
 #[derive(Debug, Default)]
 pub struct Hints {
@@ -62,8 +66,8 @@ pub struct Hints {
 impl Hints {
     pub fn from_env() -> Self {
         Self {
-            group: std::env::var("ATELIER_GROUP_HINT").unwrap_or_default(),
-            workspace: std::env::var("ATELIER_WORKSPACE")
+            group: std::env::var(GROUP_HINT_VAR).unwrap_or_default(),
+            workspace: std::env::var(WORKSPACE_VAR)
                 .ok()
                 .filter(|name| !name.is_empty()),
         }

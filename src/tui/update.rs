@@ -1,5 +1,7 @@
 //! `update(model, action) -> effects`: every state change, with no I/O.
 
+use std::path::PathBuf;
+
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -9,7 +11,7 @@ use tui_input::backend::crossterm::EventHandler;
 
 use super::app::{
     Action, Binding, Cmd, Effect, FAST_REFRESH, FULL_REFRESH, Focus, Job, KEYMAP, List, MenuEntry,
-    Modal, Model, On, Panel, Popup, PopupCmd, Removal, Row, Screen, Source, Submit, lookup,
+    Modal, Model, On, Panel, Popup, PopupCmd, Removal, Row, Screen, Source, Submit, Work, lookup,
     popup_lookup,
 };
 use super::view::{areas, main_len, offset};
@@ -373,7 +375,7 @@ fn note(model: &mut Model, message: &str) -> Vec<Effect> {
 
 /// A page of the active list.
 fn page(model: &Model) -> usize {
-    let areas = areas(model, Rect::new(0, 0, model.size.0, model.size.1));
+    let areas = areas(model, screen(model));
     areas
         .panels
         .iter()
@@ -382,7 +384,7 @@ fn page(model: &Model) -> usize {
 }
 
 fn main_height(model: &Model) -> u16 {
-    let areas = areas(model, Rect::new(0, 0, model.size.0, model.size.1));
+    let areas = areas(model, screen(model));
     areas
         .main
         .map_or(1, |rect| rect.height.saturating_sub(2).max(1))
@@ -479,20 +481,17 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
         Cmd::Move => return move_to(model),
         Cmd::Remove => return remove(model),
         Cmd::Close => {
-            let paths: Vec<_> = work_targets(model)
+            let open: Vec<_> = work_targets(model)
                 .into_iter()
                 .filter(|work| work.tab)
-                .map(|work| work.path().clone())
                 .collect();
+            let paths = paths(&open);
             if !paths.is_empty() {
                 return vec![run(model, Job::Close(paths))];
             }
         }
         Cmd::Pull => {
-            let paths: Vec<_> = work_targets(model)
-                .into_iter()
-                .map(|work| work.path().clone())
-                .collect();
+            let paths = paths(&work_targets(model));
             if !paths.is_empty() {
                 return vec![run(model, Job::Pull(paths))];
             }
@@ -573,15 +572,23 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
             }
         }
         Cmd::Quit => {
-            model.quit = true;
             return vec![Effect::Quit];
         }
     }
     Vec::new()
 }
 
+fn paths(works: &[&Work]) -> Vec<PathBuf> {
+    works.iter().map(|work| work.path().clone()).collect()
+}
+
+/// The whole terminal, for laying out outside a draw.
+fn screen(model: &Model) -> Rect {
+    Rect::new(0, 0, model.size.0, model.size.1)
+}
+
 /// The worktrees the Work panel's selection covers, or none from another panel.
-fn work_targets(model: &Model) -> Vec<&super::app::Work> {
+fn work_targets(model: &Model) -> Vec<&Work> {
     if model.active() == List::Work {
         model.targets()
     } else {
@@ -603,11 +610,7 @@ fn activate(model: &mut Model) -> Vec<Effect> {
         }
         List::Repos => Vec::new(),
         List::Work => {
-            let paths: Vec<_> = model
-                .targets()
-                .into_iter()
-                .map(|work| work.path().clone())
-                .collect();
+            let paths = paths(&model.targets());
             if paths.is_empty() {
                 Vec::new()
             } else {
@@ -691,7 +694,7 @@ fn edit(model: &mut Model) -> Vec<Effect> {
             Action::Ask {
                 title: format!("Group of {} worktree(s)", targets.len()),
                 initial: first.group.clone(),
-                then: Submit::Group(targets.iter().map(|work| work.path().clone()).collect()),
+                then: Submit::Group(paths(&targets)),
             }
         }
     };
@@ -753,7 +756,7 @@ fn move_to(model: &mut Model) -> Vec<Effect> {
                 return Vec::new();
             };
             let current = first.workspace.clone();
-            let paths: Vec<_> = targets.iter().map(|work| work.path().clone()).collect();
+            let paths = paths(&targets);
             workspace_menu(
                 model,
                 format!("Move {} worktree(s) to", paths.len()),
@@ -849,7 +852,7 @@ fn mouse_event(model: &mut Model, mouse: MouseEvent) -> Vec<Effect> {
     if model.modal.is_some() {
         return Vec::new();
     }
-    let areas = areas(model, Rect::new(0, 0, model.size.0, model.size.1));
+    let areas = areas(model, screen(model));
     let at = Position::new(mouse.column, mouse.row);
     let in_main = areas.main.is_some_and(|rect| rect.contains(at));
     let panel = areas
@@ -1404,7 +1407,6 @@ pub mod tests {
         press(&mut model, "@");
         assert!(!model.show_log);
         assert_eq!(press(&mut model, "q"), [Effect::Quit]);
-        assert!(model.quit);
     }
 
     fn menu_keys(model: &Model) -> Vec<String> {

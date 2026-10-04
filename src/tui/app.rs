@@ -503,7 +503,6 @@ pub struct Model {
     pub idle: u32,
     pub since_refresh: u32,
     pub since_full: u32,
-    pub quit: bool,
 }
 
 impl Model {
@@ -532,7 +531,6 @@ impl Model {
             idle: 0,
             since_refresh: 0,
             since_full: 0,
-            quit: false,
         }
     }
 
