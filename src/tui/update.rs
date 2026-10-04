@@ -17,8 +17,9 @@ use super::app::{
 use super::view::{areas, main_len, offset};
 use crate::issues::Issue;
 use crate::process::Logged;
-use crate::reviews::{self, Provider};
+use crate::reviews::Provider;
 use crate::state::Repo;
+use crate::worktrunk;
 
 pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
     match action {
@@ -180,35 +181,26 @@ fn fetch_reviews(model: &mut Model) -> Vec<Effect> {
     if due == Due::No {
         return Vec::new();
     }
-    let force = due == Due::Fresh;
-    let mut effects = Vec::new();
-    let mut busy = false;
+    let mut jobs = Vec::new();
     for provider in Provider::ALL {
         let mut hosts: Vec<String> = (model.snapshot.forges.values())
             .filter(|forge| Provider::from_name(&forge.provider) == Some(provider))
-            .filter_map(|forge| reviews::host(&forge.url).map(Into::into))
+            .filter_map(|forge| worktrunk::host(&forge.url).map(Into::into))
             .collect();
         hosts.sort();
         hosts.dedup();
         if hosts.is_empty() {
             model.reviews.retain(|review| review.provider != provider);
-        } else if model.loading.contains_key(&Source::Reviews(provider)) {
-            busy = true;
         } else {
-            effects.push(run(
-                model,
-                Job::Reviews {
-                    provider,
-                    hosts,
-                    force,
-                },
-            ));
+            jobs.push(Job::Reviews {
+                provider,
+                hosts,
+                force: due == Due::Fresh,
+            });
         }
     }
-    // A provider still listing gets its turn at the next listing, so `R` is not lost.
-    if busy {
-        model.reviews_due = due;
-    }
+    let (effects, due) = run_due(model, due, jobs);
+    model.reviews_due = due;
     effects
 }
 
@@ -218,28 +210,31 @@ fn fetch_issues(model: &mut Model) -> Vec<Effect> {
     if due == Due::No {
         return Vec::new();
     }
+    let jobs = (model.tracker.scopes().into_iter())
+        .map(|(source, scopes)| Job::Issues {
+            source,
+            scopes,
+            force: due == Due::Fresh,
+        })
+        .collect();
+    let (effects, due) = run_due(model, due, jobs);
+    model.issues_due = due;
+    effects
+}
+
+/// Starts the due listings whose source is idle, and returns what is still due: a source still
+/// listing gets its turn at the next listing, so `R` is not lost.
+fn run_due(model: &mut Model, due: Due, jobs: Vec<Job>) -> (Vec<Effect>, Due) {
     let mut effects = Vec::new();
     let mut busy = false;
-    for (source, scopes) in model.tracker.scopes() {
-        if model.loading.contains_key(&Source::Issues(source)) {
+    for job in jobs {
+        if model.loading.contains_key(&job.source()) {
             busy = true;
         } else {
-            let force = due == Due::Fresh;
-            effects.push(run(
-                model,
-                Job::Issues {
-                    source,
-                    scopes,
-                    force,
-                },
-            ));
+            effects.push(run(model, job));
         }
     }
-    // As for reviews, a tracker still listing gets its turn at the next listing.
-    if busy {
-        model.issues_due = due;
-    }
-    effects
+    (effects, if busy { due } else { Due::No })
 }
 
 fn done(model: &mut Model, source: Source) {
@@ -273,8 +268,8 @@ struct Keep {
     workspace: Option<String>,
     repo: Option<std::path::PathBuf>,
     line: Option<LineKey>,
-    /// Each review list's and section's selected review or issue, by URL.
-    remote: Vec<(List, String)>,
+    /// Each review list's and section's selection, by [`listed_ids`].
+    listed: Vec<(List, String)>,
 }
 
 #[derive(PartialEq)]
@@ -289,16 +284,10 @@ impl Keep {
             workspace: model.workspace().map(Into::into),
             repo: model.repo().map(|repo| repo.path.clone()),
             line: model.work_row().map(|line| line_key(model, &line)),
-            remote: (model.lists().into_iter())
+            listed: (model.lists().into_iter())
                 .filter_map(|list| {
-                    let url = match list {
-                        List::ToReview | List::Mine => {
-                            &model.reviews(list).get(model.index(list))?.url
-                        }
-                        List::Section(_) => &model.issues(list).get(model.index(list))?.url,
-                        _ => return None,
-                    };
-                    Some((list, url.clone()))
+                    let id = listed_ids(model, list).into_iter().nth(model.index(list))?;
+                    Some((list, id))
                 })
                 .collect(),
         }
@@ -323,16 +312,29 @@ impl Keep {
         });
         let line = line.unwrap_or(model.index(List::Work));
         model.selected.insert(List::Work, line);
-        for (list, url) in self.remote {
-            let index = match list {
-                List::Section(_) => model.issues(list).iter().position(|i| i.url == url),
-                _ => model.reviews(list).iter().position(|r| r.url == url),
-            };
-            if let Some(index) = index {
+        for (list, id) in self.listed {
+            if let Some(index) = listed_ids(model, list)
+                .iter()
+                .position(|other| *other == id)
+            {
                 model.selected.insert(list, index);
             }
         }
         clamp_all(model);
+    }
+}
+
+/// What identifies a list's review or issue rows across refreshes: a review's URL, an issue's
+/// key, which unlike its URL is never empty.
+fn listed_ids(model: &Model, list: List) -> Vec<String> {
+    match list {
+        List::ToReview | List::Mine => (model.reviews(list).iter())
+            .map(|review| review.url.clone())
+            .collect(),
+        List::Section(_) => (model.issues(list).iter())
+            .map(|issue| issue.key.clone())
+            .collect(),
+        List::Workspaces | List::Repos | List::Work => Vec::new(),
     }
 }
 
@@ -705,8 +707,7 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
             return vec![run(model, Job::Refresh { full: true })];
         }
         Cmd::Menu => {
-            let here =
-                |binding: &&Binding| matches!(binding.on, On::Lists(lists) if list.among(lists));
+            let here = |binding: &&Binding| matches!(binding.on, On::Lists(lists) if lists.contains(&list.kind()));
             let global = |binding: &&Binding| binding.on == On::Global;
             let entries = (KEYMAP.iter().filter(here))
                 .chain(KEYMAP.iter().filter(global))
@@ -793,7 +794,7 @@ fn activate(model: &mut Model) -> Vec<Effect> {
             let Some(review) = model.review() else {
                 return Vec::new();
             };
-            let Some(repo) = model.review_repo(review) else {
+            let Some(repo) = model.project_repo(&review.project_url) else {
                 let message = format!(
                     "{} is not registered: add a clone with `atelier add <path>`",
                     review.project
@@ -813,7 +814,7 @@ fn activate(model: &mut Model) -> Vec<Effect> {
             };
             let paths = paths(&model.issue_work(&issue));
             if paths.is_empty() {
-                start(model, issue)
+                ask_start(model, issue)
             } else {
                 vec![run(model, Job::Open(paths))]
             }
@@ -821,28 +822,33 @@ fn activate(model: &mut Model) -> Vec<Effect> {
     }
 }
 
-/// Asks for a branch for an issue's worktree: in its registered repo on GitHub, else in a repo
-/// picked from a menu. It goes to the workspace of the issue's linked work, if any.
-fn start(model: &mut Model, issue: Issue) -> Vec<Effect> {
-    let linked = (model.issue_work(&issue).first()).map(|work| work.workspace.clone());
-    let ask = |repo: &Repo| Action::Ask {
-        title: format!("New worktree of {} for {}: branch", repo.name(), issue.key),
-        initial: issue.branch(),
-        then: Submit::Start {
-            repo: repo.path.clone(),
-            workspace: linked.clone().unwrap_or(repo.default_workspace.clone()),
-            issue: Box::new(issue.clone()),
-        },
-    };
-    if let Some(repo) = model.project_repo(&issue.project_url) {
-        let action = ask(repo);
-        return update(model, action);
-    }
-    let entries: Vec<MenuEntry> = (model.snapshot.repos.iter().enumerate())
+/// Asks which repo an issue's worktree goes in, then for its branch. The menu suggests the
+/// repos of its linked work, then its own repo on GitHub, but never picks one: a tracker-only
+/// repo holds issues whose work happens elsewhere. It goes to the workspace of the linked work,
+/// if any.
+fn ask_start(model: &mut Model, issue: Issue) -> Vec<Effect> {
+    let linked = model.issue_work(&issue);
+    let workspace = linked.first().map(|work| work.workspace.clone());
+    let own = (issue.project_url.as_deref()).and_then(|url| model.project_repo(url));
+    let mut repos: Vec<&Repo> = model.snapshot.repos.iter().collect();
+    repos.sort_by_key(|repo| {
+        let suggested = linked.iter().any(|work| work.repo == repo.path);
+        let own = own.is_some_and(|own| own.path == repo.path);
+        (!suggested, !own)
+    });
+    let entries: Vec<MenuEntry> = (repos.into_iter().enumerate())
         .map(|(index, repo)| MenuEntry {
             key: (index + 1).to_string(),
             label: repo.name(),
-            action: ask(repo),
+            action: Action::Ask {
+                title: format!("New worktree of {} for {}: branch", repo.name(), issue.key),
+                initial: issue.branch(),
+                then: Submit::Start {
+                    repo: repo.path.clone(),
+                    workspace: (workspace.clone()).unwrap_or(repo.default_workspace.clone()),
+                    issue: Box::new(issue.clone()),
+                },
+            },
         })
         .collect();
     if entries.is_empty() {
@@ -872,7 +878,7 @@ fn new(model: &mut Model) -> Vec<Effect> {
         List::Repos => note(model, "register repos with `atelier add <path>`"),
         List::ToReview | List::Mine => Vec::new(),
         List::Section(_) => match model.issue().cloned() {
-            Some(issue) => start(model, issue),
+            Some(issue) => ask_start(model, issue),
             None => Vec::new(),
         },
         List::Work => {
@@ -1934,14 +1940,14 @@ pub mod tests {
         assert!(model.review_work(&other).is_none());
     }
 
-    /// The triage label scheme, with an issue in each section, one hidden, and a Jira issue
-    /// whose key groups the ABC-1 worktrees.
+    /// The triage label scheme, with an issue in each section and in Other, one hidden, and a
+    /// Jira issue whose key groups the ABC-1 worktrees.
     pub fn with_issues(mut model: Model) -> Model {
         use crate::issues::tests::{SCHEME, issue};
         model.tracker = crate::config::Config::parse(SCHEME).unwrap().tracker;
         let mut jira = issue("ABC-1", &["ready-for-agent"], false);
         jira.source = crate::issues::Source::Jira;
-        jira.project_url = String::new();
+        jira.project_url = None;
         update(
             &mut model,
             Action::Issues {
@@ -1952,6 +1958,7 @@ pub mod tests {
                     issue("api#3", &["ready-for-agent"], true),
                     issue("api#4", &[], false),
                     issue("api#5", &["wontfix"], false),
+                    issue("api#6", &["enhancement"], false),
                 ]),
                 log: Vec::new(),
             },
@@ -1983,16 +1990,44 @@ pub mod tests {
             "GitHub, then Jira"
         );
         assert_eq!(issue_keys(&model, 2), ["api#2"]);
-        assert_eq!(issue_keys(&model, 3), ["api#4"], "wontfix is hidden");
+        assert_eq!(issue_keys(&model, 3), ["api#6"]);
+        assert_eq!(issue_keys(&model, 4), ["api#4"], "Other; wontfix is hidden");
+        assert_eq!(model.title(List::Section(4)), "Other");
         press(&mut model, "4");
         assert_eq!(model.active(), List::Section(0));
         press(&mut model, "]j");
         assert_eq!(model.active(), List::Section(1));
         assert_eq!(model.issue().unwrap().key, "ABC-1");
         press(&mut model, "[[");
-        assert_eq!(model.active(), List::Section(3), "wraps around");
+        assert_eq!(model.active(), List::Section(4), "wraps around to Other");
         press(&mut model, "]]/abc");
         assert_eq!(issue_keys(&model, 1), ["ABC-1"]);
+    }
+
+    #[test]
+    fn other_shows_only_while_it_lists_issues() {
+        let mut model = with_issues(model());
+        assert_eq!(model.tabs(Panel::Issues).len(), 5);
+        press(&mut model, "4[");
+        assert_eq!(model.active(), List::Section(4));
+        update(
+            &mut model,
+            Action::Issues {
+                source: crate::issues::Source::GitHub,
+                issues: Ok(vec![crate::issues::tests::issue(
+                    "api#1",
+                    &["ready-for-agent"],
+                    false,
+                )]),
+                log: Vec::new(),
+            },
+        );
+        assert_eq!(model.tabs(Panel::Issues).len(), 4);
+        assert_eq!(
+            model.active(),
+            List::Section(0),
+            "back to the first section"
+        );
     }
 
     #[test]
@@ -2079,11 +2114,26 @@ pub mod tests {
         );
     }
 
+    fn menu_labels(model: &Model) -> Vec<String> {
+        match &model.modal {
+            Some(Modal::Menu { entries, .. }) => {
+                entries.iter().map(|entry| entry.label.clone()).collect()
+            }
+            _ => panic!("no menu"),
+        }
+    }
+
     #[test]
-    fn space_on_an_issue_starts_a_worktree_or_opens_its_linked_work() {
+    fn space_on_an_issue_asks_for_a_repo_then_a_branch_or_opens_its_linked_work() {
         let mut model = with_issues(model());
         press(&mut model, "4]");
         assert!(press(&mut model, " ").is_empty());
+        assert_eq!(
+            menu_labels(&model),
+            ["api", "web"],
+            "its own repo first, never picked"
+        );
+        press(&mut model, "\n");
         let Some(Modal::Prompt { input, title, .. }) = &model.modal else {
             panic!("asks for the branch");
         };
@@ -2124,11 +2174,6 @@ pub mod tests {
             "the Jira issue's key groups its linked work"
         );
         press(&mut model, "n");
-        assert_eq!(
-            menu_keys(&model),
-            ["1", "2"],
-            "an issue without a registered repo picks one"
-        );
         press(&mut model, "2");
         let Some(Modal::Prompt { then, .. }) = &model.modal else {
             panic!();
@@ -2142,9 +2187,27 @@ pub mod tests {
         assert_eq!(
             (repo, workspace.as_str()),
             (&PathBuf::from("/src/web"), "default"),
-            "in the linked work's workspace"
+            "in the linked work's workspace, not web's own"
         );
         assert!(jobs(press(&mut model, "\x1b")).is_empty());
+    }
+
+    #[test]
+    fn the_repo_menu_suggests_the_linked_works_repo_before_the_issues_own() {
+        let mut model = with_issues(model());
+        // A tracker-only api: the work on api#1 happens in web.
+        model.snapshot.work[3].group = "api#1".into();
+        press(&mut model, "4]n");
+        assert_eq!(menu_labels(&model), ["web", "api"]);
+        press(&mut model, "\n");
+        let Some(Modal::Prompt {
+            then: Submit::Start { workspace, .. },
+            ..
+        }) = &model.modal
+        else {
+            panic!();
+        };
+        assert_eq!(workspace, "side", "the linked work's workspace");
     }
 
     #[test]

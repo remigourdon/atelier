@@ -6,10 +6,6 @@ use serde::{Deserialize, Serialize};
 use crate::process::Runner;
 use crate::state::State;
 
-/// How long a fetched list of reviews is served from the cache. A minute shy of the five-minute
-/// full refresh, whose own fetch is stamped only once it returns.
-pub const CACHE_SECS: u64 = 240;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Provider {
     GitHub,
@@ -106,21 +102,6 @@ pub trait Reviews {
 
     /// My open reviews in `role`, across every project on the host.
     fn reviews(&self, role: Role) -> Result<Vec<Review>>;
-}
-
-/// The host of a web URL: `https://github.com/o/r` → `github.com`.
-pub fn host(url: &str) -> Option<&str> {
-    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
-    rest.split('/').next().filter(|host| !host.is_empty())
-}
-
-/// Whether two project web pages are the same, ignoring case and a trailing `/` or `.git`.
-pub fn same_project(a: &str, b: &str) -> bool {
-    let normal = |url: &str| {
-        let url = url.trim_end_matches('/');
-        url.strip_suffix(".git").unwrap_or(url).to_lowercase()
-    };
-    normal(a) == normal(b)
 }
 
 /// GitHub through `gh api graphql`, whose search spans every repo and reports the head branch.
@@ -247,7 +228,7 @@ pub fn parse_glab(json: &str, role: Role) -> Result<Vec<Review>> {
                 .to_owned();
             let project = match mr.references.full.rsplit_once('!') {
                 Some((project, _)) => project.to_owned(),
-                None => host(&project_url)
+                None => crate::worktrunk::host(&project_url)
                     .and_then(|host| project_url.split_once(host))
                     .map_or(String::new(), |(_, path)| path.trim_matches('/').to_owned()),
             };
@@ -274,8 +255,7 @@ pub fn parse_glab(json: &str, role: Role) -> Result<Vec<Review>> {
         .collect())
 }
 
-/// My reviews in `role` from the cache while fresh (unless `force`), else from the provider.
-/// A failed fetch falls back to the cache at any age and also returns the error.
+/// My reviews in `role` through the cache, as [`State::fetch_cached`] serves them.
 pub fn fetch(
     state: &State,
     api: &dyn Reviews,
@@ -284,24 +264,9 @@ pub fn fetch(
 ) -> (Vec<Review>, Option<Report>) {
     let source = api.provider().cli();
     let key = format!("{} {}", api.host(), role.key());
-    let cached = |max_age| -> Option<Vec<Review>> {
-        let json = state.cached(source, &key, max_age).ok()??;
-        serde_json::from_str(&json).ok()
-    };
-    if !force && let Some(reviews) = cached(Some(CACHE_SECS)) {
-        return (reviews, None);
-    }
-    let fetched = api.reviews(role).and_then(|reviews| {
-        state.store_cache(source, &key, &serde_json::to_string(&reviews)?)?;
-        Ok(reviews)
-    });
-    match fetched {
-        Ok(reviews) => (reviews, None),
-        Err(err) => (
-            cached(None).unwrap_or_default(),
-            Some(err.wrap_err(format!("{source} reviews on {}", api.host()))),
-        ),
-    }
+    let (reviews, error) = state.fetch_cached(source, &key, force, || api.reviews(role));
+    let error = error.map(|err| err.wrap_err(format!("{source} reviews on {}", api.host())));
+    (reviews, error)
 }
 
 /// The subset of each provider's JSON that atelier reads.
@@ -472,21 +437,6 @@ mod tests {
                 "glab api --paginate --hostname h /merge_requests?state=opened&scope=created_by_me&per_page=100",
             ]
         );
-    }
-
-    #[test]
-    fn hosts_and_projects_compare_loosely() {
-        assert_eq!(host("https://github.com/o/r"), Some("github.com"));
-        assert_eq!(host("gitlab.example.com/g/r"), Some("gitlab.example.com"));
-        assert_eq!(host(""), None);
-        assert!(same_project(
-            "https://GitHub.com/O/R/",
-            "https://github.com/o/r.git"
-        ));
-        assert!(!same_project(
-            "https://github.com/o/r",
-            "https://github.com/o/r2"
-        ));
     }
 
     /// Reviews that count their calls and fail when told to.

@@ -1,0 +1,122 @@
+[
+  {
+    "data": {
+      "repository": {
+        "nameWithOwner": "remigourdon/atelier",
+        "url": "https://github.com/remigourdon/atelier",
+        "issues": {
+          "nodes": [
+            {
+              "number": 4,
+              "state": "CLOSED",
+              "title": "Phase 3: Reviews panel",
+              "url": "https://github.com/remigourdon/atelier/issues/4",
+              "updatedAt": "2026-10-04T18:05:07Z",
+              "stateReason": "COMPLETED",
+              "assignees": {
+                "totalCount": 0,
+                "nodes": []
+              },
+              "labels": {
+                "totalCount": 0,
+                "nodes": []
+              },
+              "issueDependenciesSummary": {
+                "blockedBy": 0
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": [
+                  {
+                    "state": "MERGED"
+                  }
+                ]
+              }
+            },
+            {
+              "number": 3,
+              "state": "CLOSED",
+              "title": "Phase 2: TUI frame, Workspaces and Work",
+              "url": "https://github.com/remigourdon/atelier/issues/3",
+              "updatedAt": "2026-10-04T16:55:45Z",
+              "stateReason": "NOT_PLANNED",
+              "assignees": {
+                "totalCount": 0,
+                "nodes": []
+              },
+              "labels": {
+                "totalCount": 0,
+                "nodes": []
+              },
+              "issueDependenciesSummary": {
+                "blockedBy": 0
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": [
+                  {
+                    "state": "MERGED"
+                  }
+                ]
+              }
+            },
+            {
+              "number": 2,
+              "state": "CLOSED",
+              "title": "Phase 1: core, CLI and hooks",
+              "url": "https://github.com/remigourdon/atelier/issues/2",
+              "updatedAt": "2026-10-04T15:50:10Z",
+              "stateReason": "COMPLETED",
+              "assignees": {
+                "totalCount": 0,
+                "nodes": []
+              },
+              "labels": {
+                "totalCount": 0,
+                "nodes": []
+              },
+              "issueDependenciesSummary": {
+                "blockedBy": 0
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": [
+                  {
+                    "state": "MERGED"
+                  }
+                ]
+              }
+            },
+            {
+              "number": 1,
+              "state": "CLOSED",
+              "title": "Phase 0: scaffold",
+              "url": "https://github.com/remigourdon/atelier/issues/1",
+              "updatedAt": "2026-10-04T15:13:05Z",
+              "stateReason": "COMPLETED",
+              "assignees": {
+                "totalCount": 0,
+                "nodes": []
+              },
+              "labels": {
+                "totalCount": 0,
+                "nodes": []
+              },
+              "issueDependenciesSummary": {
+                "blockedBy": 0
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": [
+                  {
+                    "state": "MERGED"
+                  }
+                ]
+              }
+            }
+          ],
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0wNFQxNToxMzowNVrPAAAAAVPBmAk="
+          }
+        }
+      }
+    }
+  }
+]

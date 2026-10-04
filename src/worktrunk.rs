@@ -135,6 +135,21 @@ pub struct Forge {
     pub provider: String,
 }
 
+/// The host of a web URL: `https://github.com/o/r` → `github.com`.
+pub fn host(url: &str) -> Option<&str> {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    rest.split('/').next().filter(|host| !host.is_empty())
+}
+
+/// Whether two project web pages are the same, ignoring case and a trailing `/` or `.git`.
+pub fn same_project(a: &str, b: &str) -> bool {
+    let normal = |url: &str| {
+        let url = url.trim_end_matches('/');
+        url.strip_suffix(".git").unwrap_or(url).to_lowercase()
+    };
+    normal(a) == normal(b)
+}
+
 impl Forge {
     /// The web page of a branch.
     pub fn branch_url(&self, branch: &str) -> String {
@@ -310,6 +325,21 @@ fn entry(item: &Item) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hosts_and_projects_compare_loosely() {
+        assert_eq!(host("https://github.com/o/r"), Some("github.com"));
+        assert_eq!(host("gitlab.example.com/g/r"), Some("gitlab.example.com"));
+        assert_eq!(host(""), None);
+        assert!(same_project(
+            "https://GitHub.com/O/R/",
+            "https://github.com/o/r.git"
+        ));
+        assert!(!same_project(
+            "https://github.com/o/r",
+            "https://github.com/o/r2"
+        ));
+    }
 
     #[test]
     fn listing_keeps_worktrees_only() {

@@ -5,12 +5,26 @@
     "self": "https://example.atlassian.net/rest/api/3/issue/10231",
     "fields": {
       "summary": "Cache tariff lookups",
-      "labels": ["backend", "perf"],
+      "labels": [
+        "backend",
+        "perf"
+      ],
       "updated": "2026-10-02T09:14:03.000+0200",
-      "assignee": { "displayName": "Alice Martin" },
+      "assignee": {
+        "displayName": "Alice Martin"
+      },
       "status": {
         "name": "In Review",
-        "statusCategory": { "key": "indeterminate", "name": "In Progress" }
+        "statusCategory": {
+          "key": "indeterminate",
+          "name": "In Progress"
+        }
+      },
+      "issuetype": {
+        "name": "Story"
+      },
+      "priority": {
+        "name": "High"
       }
     }
   },
@@ -25,7 +39,16 @@
       "assignee": null,
       "status": {
         "name": "Blocked",
-        "statusCategory": { "key": "new", "name": "To Do" }
+        "statusCategory": {
+          "key": "new",
+          "name": "To Do"
+        }
+      },
+      "issuetype": {
+        "name": "Bug"
+      },
+      "priority": {
+        "name": "Highest"
       }
     }
   },
@@ -35,11 +58,22 @@
     "self": "https://example.atlassian.net/rest/api/3/issue/10198",
     "fields": {
       "summary": "Drop the legacy tariff table",
-      "labels": ["cleanup"],
+      "labels": [
+        "cleanup"
+      ],
       "updated": "2026-09-28T11:02:55.000+0200",
       "status": {
         "name": "Done",
-        "statusCategory": { "key": "done", "name": "Done" }
+        "statusCategory": {
+          "key": "done",
+          "name": "Done"
+        }
+      },
+      "issuetype": {
+        "name": "Task"
+      },
+      "priority": {
+        "name": "Medium"
       }
     }
   }

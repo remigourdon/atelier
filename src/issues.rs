@@ -3,14 +3,18 @@
 //! later.
 
 use std::sync::LazyLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use color_eyre::eyre::{Report, Result, WrapErr};
+use color_eyre::eyre::{Report, Result, WrapErr, eyre};
 use serde::{Deserialize, Serialize};
 
 use crate::process::Runner;
 
-/// How long a fetched list of issues is served from the cache, as for reviews.
-pub const CACHE_SECS: u64 = crate::reviews::CACHE_SECS;
+/// How far back closed GitHub issues are listed, by when they were last updated.
+pub const CLOSED_DAYS: u64 = 14;
+
+/// The title of the section that takes issues no configured section matches.
+pub const OTHER: &str = "Other";
 
 /// Where issues come from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -28,23 +32,24 @@ impl Source {
         }
     }
 
-    /// Its issues in `scope`, a GitHub repo or a JQL search, through its CLI. `site` is Jira's
-    /// web address for issue links.
+    /// Its issues in `scope`, a GitHub repo or a JQL search, through its CLI.
     pub fn issues<'a>(
         self,
         runner: &'a dyn Runner,
         scope: String,
-        site: Option<String>,
+        tracker: &Tracker,
     ) -> Box<dyn Issues + 'a> {
         match self {
             Source::GitHub => Box::new(Gh {
                 runner,
+                qualified: tracker.qualified(&scope),
                 repo: scope,
+                since: days_ago(CLOSED_DAYS),
             }),
             Source::Jira => Box::new(Acli {
                 runner,
                 jql: scope,
-                site,
+                site: tracker.jira_site(),
             }),
         }
     }
@@ -74,21 +79,27 @@ impl State {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Issue {
     pub source: Source,
-    /// `ABC-123`, or `repo#12` on GitHub. It is also the group of the issue's linked work.
+    /// `ABC-123`, or `repo#12` on GitHub (`owner/repo#12` when two configured repos share a
+    /// name). It is also the group of the issue's linked work.
     pub key: String,
     pub title: String,
     pub url: String,
     /// `owner/repo`, or a Jira project key.
     pub project: String,
-    /// The repo's web page on GitHub, to find its registered repo; empty for Jira.
-    pub project_url: String,
+    /// The repo's web page on GitHub, to find its registered repo.
+    pub project_url: Option<String>,
     pub state: State,
     /// The tracker's own status name.
     pub status: String,
     pub labels: Vec<String>,
     pub blocked: bool,
     pub assignees: Vec<String>,
+    /// Jira's issue type and priority.
+    pub kind: Option<String>,
+    pub priority: Option<String>,
     pub updated_at: String,
+    /// Whether it has more labels or assignees than were listed.
+    pub truncated: bool,
 }
 
 impl Issue {
@@ -142,6 +153,10 @@ impl Rule {
             && (self.state.is_empty() || self.state.contains(&issue.state))
             && self.blocked.is_none_or(|blocked| blocked == issue.blocked)
     }
+
+    fn is_empty(&self) -> bool {
+        *self == Rule::default()
+    }
 }
 
 /// An Issues sub-tab: the issues its rule matches that no earlier section took.
@@ -172,15 +187,15 @@ static BY_STATE: LazyLock<Vec<Section>> = LazyLock::new(|| {
 pub struct Tracker {
     pub github: Option<GitHubTracker>,
     pub jira: Option<JiraTracker>,
-    /// Issues it matches are never listed.
-    pub hide: Option<Rule>,
+    /// Issues it matches are never listed; with no conditions it hides nothing.
+    pub hide: Rule,
     sections: Vec<Section>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct GitHubTracker {
-    /// `owner/name`, each listed for its open issues.
+    /// `owner/name`, each listed for its open and recently closed issues.
     pub repos: Vec<String>,
 }
 
@@ -193,7 +208,7 @@ pub struct JiraTracker {
 }
 
 impl Tracker {
-    /// The configured sections, else one per state.
+    /// The configured sections, else one per state. [`OTHER`] follows them.
     pub fn sections(&self) -> &[Section] {
         if self.sections.is_empty() {
             &BY_STATE
@@ -202,14 +217,24 @@ impl Tracker {
         }
     }
 
-    /// The section an issue is listed in: the first whose rule matches, unless it is hidden.
+    /// A section's title, [`OTHER`] past the configured ones.
+    pub fn title(&self, index: usize) -> &str {
+        self.sections()
+            .get(index)
+            .map_or(OTHER, |section| &section.title)
+    }
+
+    /// The section an issue is listed in: the first whose rule matches, else [`OTHER`] (one
+    /// past the last), and none when it is hidden.
     pub fn section(&self, issue: &Issue) -> Option<usize> {
-        if self.hide.as_ref().is_some_and(|hide| hide.matches(issue)) {
+        if !self.hide.is_empty() && self.hide.matches(issue) {
             return None;
         }
-        self.sections()
+        let sections = self.sections();
+        let index = sections
             .iter()
-            .position(|section| section.rule.matches(issue))
+            .position(|section| section.rule.matches(issue));
+        Some(index.unwrap_or(sections.len()))
     }
 
     /// What each source lists: GitHub repos, or one JQL search.
@@ -224,6 +249,15 @@ impl Tracker {
         scopes
     }
 
+    /// Whether a GitHub repo's issue keys need its owner: another configured repo has its name.
+    fn qualified(&self, repo: &str) -> bool {
+        let name = |repo: &str| repo.rsplit('/').next().unwrap_or_default().to_lowercase();
+        let repos = self.github.iter().flat_map(|github| &github.repos);
+        repos
+            .filter(|other| !other.eq_ignore_ascii_case(repo))
+            .any(|other| name(other) == name(repo))
+    }
+
     /// Jira's web address for issue links, when it is known.
     pub fn jira_site(&self) -> Option<String> {
         let configured = self.jira.as_ref().and_then(|jira| jira.url.clone());
@@ -234,21 +268,78 @@ impl Tracker {
     }
 }
 
-/// GitHub through `gh api graphql`, one repo's open issues, most recently updated first.
+/// Midnight UTC `days` ago, as GitHub's `DateTime`.
+fn days_ago(days: u64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    date(now / 86_400 - days)
+}
+
+/// A day since the Unix epoch as `YYYY-MM-DDT00:00:00Z`, by Howard Hinnant's `civil_from_days`.
+fn date(day: u64) -> String {
+    let z = day + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + u64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}T00:00:00Z")
+}
+
+/// GitHub through `gh api graphql`: one repo's open issues, then those closed and updated since
+/// `since`, each most recently updated first.
 pub struct Gh<'a> {
     pub runner: &'a dyn Runner,
     /// `owner/name`.
     pub repo: String,
+    /// Whether its keys carry the owner.
+    pub qualified: bool,
+    pub since: String,
 }
 
-/// `--paginate` pages through it by `$endCursor` and `pageInfo`. `blockedBy` counts open
-/// blockers only.
-const GH_QUERY: &str = "query($owner: String!, $name: String!, $endCursor: String) { \
-    repository(owner: $owner, name: $name) { nameWithOwner url \
-    issues(states: OPEN, first: 100, after: $endCursor, orderBy: {field: UPDATED_AT, direction: DESC}) { \
-    nodes { number title url updatedAt assignees(first: 100) { nodes { login } } \
-    labels(first: 100) { nodes { name } } issueDependenciesSummary { blockedBy } } \
-    pageInfo { hasNextPage endCursor } } } }";
+/// `--paginate` pages through the issues by `$endCursor` and `pageInfo`; `{filter}` picks open
+/// or recently closed ones. `blockedBy` counts open blockers only. Labels and assignees stop at
+/// 100, which `totalCount` reveals.
+fn gh_query(variables: &str, filter: &str) -> String {
+    format!(
+        "query($owner: String!, $name: String!, {variables}$endCursor: String) {{ \
+         repository(owner: $owner, name: $name) {{ nameWithOwner url \
+         issues(first: 100, after: $endCursor, {filter}, \
+         orderBy: {{field: UPDATED_AT, direction: DESC}}) {{ \
+         nodes {{ number state title url updatedAt stateReason \
+         assignees(first: 100) {{ totalCount nodes {{ login }} }} \
+         labels(first: 100) {{ totalCount nodes {{ name }} }} \
+         issueDependenciesSummary {{ blockedBy }} \
+         closedByPullRequestsReferences(first: 100) {{ nodes {{ state }} }} }} \
+         pageInfo {{ hasNextPage endCursor }} }} }} }}"
+    )
+}
+
+impl Gh<'_> {
+    fn list(&self, query: &str, extra: &[String]) -> Result<Vec<Issue>> {
+        let (owner, name) =
+            (self.repo.split_once('/')).ok_or_else(|| eyre!("{} is not owner/name", self.repo))?;
+        let mut args = vec![
+            "api".to_owned(),
+            "graphql".into(),
+            "--paginate".into(),
+            "--slurp".into(),
+            "-f".into(),
+            format!("query={query}"),
+            "-f".into(),
+            format!("owner={owner}"),
+            "-f".into(),
+            format!("name={name}"),
+        ];
+        args.extend(extra.iter().cloned());
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        parse_gh(&self.runner.output("gh", &args)?, self.qualified)
+    }
+}
 
 impl Issues for Gh<'_> {
     fn source(&self) -> Source {
@@ -260,30 +351,18 @@ impl Issues for Gh<'_> {
     }
 
     fn issues(&self) -> Result<Vec<Issue>> {
-        let (owner, name) = self
-            .repo
-            .split_once('/')
-            .ok_or_else(|| color_eyre::eyre::eyre!("{} is not owner/name", self.repo))?;
-        let json = self.runner.output(
-            "gh",
-            &[
-                "api",
-                "graphql",
-                "--paginate",
-                "--slurp",
-                "-f",
-                &format!("query={GH_QUERY}"),
-                "-f",
-                &format!("owner={owner}"),
-                "-f",
-                &format!("name={name}"),
-            ],
-        )?;
-        parse_gh(&json)
+        let mut issues = self.list(&gh_query("", "states: OPEN"), &[])?;
+        let closed = gh_query(
+            "$since: DateTime!, ",
+            "states: CLOSED, filterBy: {since: $since}",
+        );
+        issues.extend(self.list(&closed, &["-f".into(), format!("since={}", self.since)])?);
+        Ok(issues)
     }
 }
 
-/// Jira through `acli jira workitem search`, every result of a JQL search in its order.
+/// Jira through `acli jira workitem search`, every result of a JQL search in its order, as the
+/// Python prototype ran it against a live Jira.
 pub struct Acli<'a> {
     pub runner: &'a dyn Runner,
     pub jql: String,
@@ -310,7 +389,7 @@ impl Issues for Acli<'_> {
                 "--jql",
                 &self.jql,
                 "--fields",
-                "key,summary,status,labels,assignee,updated",
+                "key,summary,status,labels,assignee,updated,issuetype,priority",
                 "--json",
                 "--paginate",
             ],
@@ -319,29 +398,54 @@ impl Issues for Acli<'_> {
     }
 }
 
-/// Parses the pages of `gh api graphql`'s repository issues. Every open issue is `todo`.
-pub fn parse_gh(json: &str) -> Result<Vec<Issue>> {
+/// Parses the pages of `gh api graphql`'s repository issues. A closed issue is `done`, with why
+/// as its status; an open one is `in_progress` while a pull request that closes it is open,
+/// else `todo`. With `qualified`, keys carry the repo's owner.
+pub fn parse_gh(json: &str, qualified: bool) -> Result<Vec<Issue>> {
     let pages: Vec<raw::GhResponse> = serde_json::from_str(json).wrap_err("parsing gh issues")?;
     Ok(pages
         .into_iter()
         .flat_map(|page| {
             let repo = page.data.repository;
-            let name = (repo.name_with_owner.rsplit('/').next())
-                .unwrap_or_default()
-                .to_owned();
-            repo.issues.nodes.into_iter().map(move |node| Issue {
-                source: Source::GitHub,
-                key: format!("{name}#{}", node.number),
-                title: node.title,
-                url: node.url,
-                project: repo.name_with_owner.clone(),
-                project_url: repo.url.clone(),
-                state: State::Todo,
-                status: "open".into(),
-                labels: node.labels.nodes.into_iter().map(|l| l.name).collect(),
-                blocked: node.issue_dependencies_summary.blocked_by > 0,
-                assignees: node.assignees.nodes.into_iter().map(|a| a.login).collect(),
-                updated_at: node.updated_at,
+            let prefix = match repo.name_with_owner.rsplit_once('/') {
+                Some((_, name)) if !qualified => name.to_owned(),
+                _ => repo.name_with_owner.clone(),
+            };
+            repo.issues.nodes.into_iter().map(move |node| {
+                let pull_open = (node.closed_by_pull_requests_references.nodes.iter())
+                    .any(|pull| pull.state == "OPEN");
+                let (state, status) = match node.state.as_str() {
+                    "CLOSED" => (
+                        State::Done,
+                        match node.state_reason.as_deref() {
+                            Some("NOT_PLANNED") => "not planned".into(),
+                            Some(reason) => reason.to_lowercase(),
+                            None => "closed".into(),
+                        },
+                    ),
+                    _ if pull_open => (State::InProgress, "open, pull request open".into()),
+                    _ => (State::Todo, "open".into()),
+                };
+                let labels = node.labels;
+                let assignees = node.assignees;
+                Issue {
+                    source: Source::GitHub,
+                    key: format!("{prefix}#{}", node.number),
+                    title: node.title,
+                    url: node.url,
+                    project: repo.name_with_owner.clone(),
+                    project_url: Some(repo.url.clone()),
+                    state,
+                    status,
+                    truncated: labels.total_count > labels.nodes.len()
+                        || assignees.total_count > assignees.nodes.len(),
+                    labels: labels.nodes.into_iter().map(|label| label.name).collect(),
+                    blocked: node.issue_dependencies_summary.blocked_by > 0,
+                    assignees: assignees.nodes.into_iter().map(|user| user.login).collect(),
+                    kind: None,
+                    priority: None,
+                    updated_at: node.updated_at,
+                }
             })
         })
         .collect())
@@ -372,24 +476,25 @@ pub fn parse_acli(json: &str, site: Option<&str>) -> Result<Vec<Issue>> {
                     .map_or(issue.key.clone(), |(project, _)| project.to_owned()),
                 key: issue.key,
                 title: fields.summary,
-                project_url: String::new(),
+                project_url: None,
                 state,
                 blocked: fields.status.name.eq_ignore_ascii_case("blocked"),
                 status: fields.status.name,
                 labels: fields.labels,
-                assignees: fields
-                    .assignee
-                    .map(|a| a.display_name)
-                    .into_iter()
+                assignees: (fields.assignee.into_iter())
+                    .map(|user| user.display_name)
                     .collect(),
+                kind: fields.issuetype.map(|named| named.name),
+                priority: fields.priority.map(|named| named.name),
                 updated_at: fields.updated,
+                truncated: false,
             }
         })
         .collect())
 }
 
-/// The issues in `api`'s scope from the cache while fresh (unless `force`), else from the
-/// tracker. A failed fetch falls back to the cache at any age and also returns the error.
+/// The issues in `api`'s scope through the cache, as [`crate::state::State::fetch_cached`]
+/// serves them.
 pub fn fetch(
     state: &crate::state::State,
     api: &dyn Issues,
@@ -397,24 +502,9 @@ pub fn fetch(
 ) -> (Vec<Issue>, Option<Report>) {
     let source = api.source().cli();
     let key = format!("issues {}", api.scope());
-    let cached = |max_age| -> Option<Vec<Issue>> {
-        let json = state.cached(source, &key, max_age).ok()??;
-        serde_json::from_str(&json).ok()
-    };
-    if !force && let Some(issues) = cached(Some(CACHE_SECS)) {
-        return (issues, None);
-    }
-    let fetched = api.issues().and_then(|issues| {
-        state.store_cache(source, &key, &serde_json::to_string(&issues)?)?;
-        Ok(issues)
-    });
-    match fetched {
-        Ok(issues) => (issues, None),
-        Err(err) => (
-            cached(None).unwrap_or_default(),
-            Some(err.wrap_err(format!("{source} issues in {}", api.scope()))),
-        ),
-    }
+    let (issues, error) = state.fetch_cached(source, &key, force, || api.issues());
+    let error = error.map(|err| err.wrap_err(format!("{source} issues in {}", api.scope())));
+    (issues, error)
 }
 
 /// The subset of each tracker's JSON that atelier reads.
@@ -440,32 +530,30 @@ mod raw {
     }
 
     #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
     pub struct GhConnection<T> {
+        #[serde(default)]
+        pub total_count: usize,
         #[serde(default = "Vec::new")]
         pub nodes: Vec<T>,
-    }
-
-    impl<T> Default for GhConnection<T> {
-        fn default() -> Self {
-            Self { nodes: Vec::new() }
-        }
     }
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct GhIssue {
         pub number: u64,
+        pub state: String,
         #[serde(default)]
         pub title: String,
         pub url: String,
         #[serde(default)]
         pub updated_at: String,
-        #[serde(default)]
+        pub state_reason: Option<String>,
         pub assignees: GhConnection<GhUser>,
-        #[serde(default)]
         pub labels: GhConnection<GhLabel>,
         #[serde(default)]
         pub issue_dependencies_summary: GhDependencies,
+        pub closed_by_pull_requests_references: GhConnection<GhPull>,
     }
 
     #[derive(Deserialize)]
@@ -476,6 +564,12 @@ mod raw {
     #[derive(Deserialize)]
     pub struct GhLabel {
         pub name: String,
+    }
+
+    #[derive(Deserialize)]
+    pub struct GhPull {
+        /// `OPEN`, `CLOSED` or `MERGED`.
+        pub state: String,
     }
 
     #[derive(Deserialize, Default)]
@@ -493,9 +587,8 @@ mod raw {
         pub fields: JiraFields,
     }
 
-    #[derive(Deserialize)]
+    #[derive(Deserialize, Default)]
     #[serde(default)]
-    #[derive(Default)]
     pub struct JiraFields {
         pub summary: String,
         pub labels: Vec<String>,
@@ -503,12 +596,19 @@ mod raw {
         /// `null` when unassigned.
         pub assignee: Option<JiraUser>,
         pub status: JiraStatus,
+        pub issuetype: Option<JiraNamed>,
+        pub priority: Option<JiraNamed>,
     }
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct JiraUser {
         pub display_name: String,
+    }
+
+    #[derive(Deserialize)]
+    pub struct JiraNamed {
+        pub name: String,
     }
 
     #[derive(Deserialize, Default)]
@@ -530,31 +630,58 @@ mod raw {
 pub mod tests {
     use std::cell::Cell;
 
-    use color_eyre::eyre::eyre;
     use rusqlite::Connection;
 
     use super::*;
     use crate::process::fake::Fake;
 
+    /// Recorded from `gh` on this repo, two to a page, then given labels, an assignee, a
+    /// blocker, an open pull request and too many labels, which its issues have none of.
     pub const GH: &str = include_str!("../tests/fixtures/gh-issues.json");
+    /// Recorded likewise; one completed close is turned into not planned.
+    pub const GH_CLOSED: &str = include_str!("../tests/fixtures/gh-closed-issues.json");
+    /// Shaped as the Python prototype read `acli jira workitem search --json` from a live Jira.
     const ACLI: &str = include_str!("../tests/fixtures/acli-issues.json");
 
     #[test]
-    fn gh_issues_parse_every_page_with_labels_and_blockers() {
-        let issues = parse_gh(GH).unwrap();
+    fn gh_open_issues_parse_every_page_with_labels_blockers_and_pull_requests() {
+        let issues = parse_gh(GH, false).unwrap();
         let keys: Vec<&str> = issues.iter().map(|issue| issue.key.as_str()).collect();
         assert_eq!(keys, ["atelier#5", "atelier#6", "atelier#7"], "two pages");
         let first = &issues[0];
         assert_eq!(first.title, "Phase 4: Issues panel");
         assert_eq!(first.project, "remigourdon/atelier");
-        assert_eq!(first.project_url, "https://github.com/remigourdon/atelier");
+        assert_eq!(
+            first.project_url.as_deref(),
+            Some("https://github.com/remigourdon/atelier")
+        );
         assert_eq!(first.url, "https://github.com/remigourdon/atelier/issues/5");
         assert_eq!(first.labels, ["enhancement", "ready-for-agent"]);
         assert_eq!(first.assignees, ["remigourdon"]);
-        assert!(issues.iter().all(|issue| issue.state == State::Todo));
+        let states: Vec<State> = issues.iter().map(|issue| issue.state).collect();
+        assert_eq!(
+            states,
+            [State::InProgress, State::Todo, State::Todo],
+            "an open pull request closes #5"
+        );
         let blocked: Vec<bool> = issues.iter().map(|issue| issue.blocked).collect();
         assert_eq!(blocked, [false, true, false]);
-        assert!(parse_gh("{\"errors\":[]}").is_err());
+        let truncated: Vec<bool> = issues.iter().map(|issue| issue.truncated).collect();
+        assert_eq!(truncated, [false, true, false], "#6 has 101 labels");
+        assert_eq!(parse_gh(GH, true).unwrap()[0].key, "remigourdon/atelier#5");
+        assert!(parse_gh("{\"errors\":[]}", false).is_err());
+    }
+
+    #[test]
+    fn gh_closed_issues_are_done_with_their_reason() {
+        let issues = parse_gh(GH_CLOSED, false).unwrap();
+        assert!(issues.iter().all(|issue| issue.state == State::Done));
+        let statuses: Vec<&str> = issues.iter().map(|issue| issue.status.as_str()).collect();
+        assert_eq!(
+            statuses,
+            ["completed", "not planned", "completed", "completed"],
+            "a merged pull request does not make it in progress"
+        );
     }
 
     #[test]
@@ -565,9 +692,14 @@ pub mod tests {
         let first = &issues[0];
         assert_eq!(first.key, "ORD-3479");
         assert_eq!(first.project, "ORD");
+        assert_eq!(first.project_url, None);
         assert_eq!(first.status, "In Review");
         assert_eq!(first.labels, ["backend", "perf"]);
         assert_eq!(first.assignees, ["Alice Martin"]);
+        assert_eq!(
+            (first.kind.as_deref(), first.priority.as_deref()),
+            (Some("Story"), Some("High"))
+        );
         assert_eq!(first.url, "https://example.atlassian.net/browse/ORD-3479");
         assert!(issues[1].blocked, "in status Blocked");
         assert!(issues[1].assignees.is_empty() && issues[2].assignees.is_empty());
@@ -576,32 +708,54 @@ pub mod tests {
     }
 
     #[test]
-    fn gh_lists_a_repos_issues_and_acli_runs_the_search() {
-        let fake = Fake::default().always("gh", Some(GH));
-        let gh = Source::GitHub.issues(&fake, "remigourdon/atelier".into(), None);
-        assert_eq!(gh.issues().unwrap().len(), 3);
-        let call = &fake.calls()[0];
-        assert!(call.starts_with("gh api graphql --paginate --slurp -f query="));
-        assert!(call.ends_with("-f owner=remigourdon -f name=atelier"));
-        assert!(
-            Source::GitHub
-                .issues(&fake, "atelier".into(), None)
-                .issues()
-                .is_err()
-        );
+    fn gh_lists_open_then_recently_closed_issues() {
+        let fake = Fake::default()
+            .once("gh", Some(GH))
+            .once("gh", Some(GH_CLOSED));
+        let gh = Gh {
+            runner: &fake,
+            repo: "remigourdon/atelier".into(),
+            qualified: false,
+            since: "2026-09-20T00:00:00Z".into(),
+        };
+        assert_eq!(gh.issues().unwrap().len(), 7);
+        let calls = fake.calls();
+        assert!(calls[0].starts_with("gh api graphql --paginate --slurp -f query="));
+        assert!(calls[0].contains("states: OPEN") && !calls[0].contains("$since"));
+        assert!(calls[0].ends_with("-f owner=remigourdon -f name=atelier"));
+        assert!(calls[1].contains("states: CLOSED, filterBy: {since: $since}"));
+        assert!(calls[1].ends_with("-f name=atelier -f since=2026-09-20T00:00:00Z"));
+        let bad = Gh {
+            repo: "atelier".into(),
+            ..gh
+        };
+        assert!(bad.issues().is_err());
+    }
+
+    #[test]
+    fn acli_runs_the_search_with_every_field_it_reads() {
         let fake = Fake::default().always("acli", Some(ACLI));
-        let jira = Source::Jira.issues(&fake, "project = ORD".into(), None);
+        let jira = Source::Jira.issues(&fake, "project = ORD".into(), &Tracker::default());
         assert_eq!(jira.issues().unwrap().len(), 3);
         assert_eq!(
             fake.calls(),
             ["acli jira workitem search --jql project = ORD \
-              --fields key,summary,status,labels,assignee,updated --json --paginate"]
+                 --fields key,summary,status,labels,assignee,updated,issuetype,priority \
+                 --json --paginate"]
         );
     }
 
     #[test]
+    fn dates_count_from_the_epoch() {
+        assert_eq!(date(0), "1970-01-01T00:00:00Z");
+        assert_eq!(date(20_365), "2025-10-04T00:00:00Z");
+        assert_eq!(date(11_016), "2000-02-29T00:00:00Z");
+        assert!(days_ago(CLOSED_DAYS) < days_ago(0));
+    }
+
+    #[test]
     fn branches_start_with_the_key_or_number() {
-        let issues = parse_gh(GH).unwrap();
+        let issues = parse_gh(GH, true).unwrap();
         assert_eq!(issues[0].branch(), "5-phase-4-issues-panel");
         let jira = parse_acli(ACLI, None).unwrap();
         assert_eq!(jira[0].branch(), "ORD-3479-cache-tariff-lookups");
@@ -632,8 +786,10 @@ pub mod tests {
         state = ["todo"]
 
         [[tracker.sections]]
-        title = "Backlog"
+        title = "Enhancements"
+        labels = ["enhancement"]
         not_labels = ["question"]
+        state = ["todo", "in_progress"]
     "#;
 
     pub fn issue(key: &str, labels: &[&str], blocked: bool) -> Issue {
@@ -643,13 +799,16 @@ pub mod tests {
             title: format!("Issue {key}"),
             url: format!("https://forge/api/issues/{key}"),
             project: "org/api".into(),
-            project_url: "https://forge/api".into(),
+            project_url: Some("https://forge/api".into()),
             state: State::Todo,
             status: "open".into(),
             labels: labels.iter().map(|&label| label.into()).collect(),
             blocked,
             assignees: Vec::new(),
+            kind: None,
+            priority: None,
             updated_at: String::new(),
+            truncated: false,
         }
     }
 
@@ -663,7 +822,10 @@ pub mod tests {
         let titles: Vec<&str> = (tracker.sections().iter())
             .map(|section| section.title.as_str())
             .collect();
-        assert_eq!(titles, ["Blocked", "Ready for agent", "Triage", "Backlog"]);
+        assert_eq!(
+            titles,
+            ["Blocked", "Ready for agent", "Triage", "Enhancements"]
+        );
         let section = |labels: &[&str], blocked| tracker.section(&issue("a#1", labels, blocked));
         assert_eq!(
             section(&["ready-for-agent"], true),
@@ -680,8 +842,14 @@ pub mod tests {
             Some(2),
             "any of the labels"
         );
-        assert_eq!(section(&[], false), Some(3), "the catch-all");
-        assert_eq!(section(&["question"], false), None, "matches no section");
+        assert_eq!(section(&["enhancement"], false), Some(3));
+        assert_eq!(
+            section(&["enhancement", "question"], false),
+            Some(4),
+            "none of"
+        );
+        assert_eq!(section(&[], false), Some(4), "the rest go to Other");
+        assert_eq!(tracker.title(4), OTHER);
         assert_eq!(
             section(&["ready-for-agent", "wontfix"], false),
             None,
@@ -689,12 +857,12 @@ pub mod tests {
         );
         let mut done = issue("a#2", &["needs-triage"], false);
         done.state = State::Done;
-        assert_eq!(tracker.section(&done), Some(3), "triage wants todo");
+        assert_eq!(tracker.section(&done), Some(4), "triage wants todo");
     }
 
     #[test]
-    fn without_sections_there_is_one_per_state() {
-        let tracker = tracker("");
+    fn without_sections_there_is_one_per_state_and_an_empty_hide_hides_nothing() {
+        let tracker = tracker("[tracker]\nhide = {}\n");
         let titles: Vec<&str> = (tracker.sections().iter())
             .map(|section| section.title.as_str())
             .collect();
@@ -711,15 +879,23 @@ pub mod tests {
     #[test]
     fn scopes_list_github_repos_and_the_jira_search() {
         let tracker = tracker(
-            "[tracker.github]\nrepos = [\"o/a\", \"o/b\"]\n\
+            "[tracker.github]\nrepos = [\"o/a\", \"o/b\", \"p/a\"]\n\
              [tracker.jira]\njql = \"assignee = currentUser()\"\nurl = \"https://j\"\n",
         );
         assert_eq!(
             tracker.scopes(),
             [
-                (Source::GitHub, vec!["o/a".to_owned(), "o/b".to_owned()]),
+                (
+                    Source::GitHub,
+                    vec!["o/a".into(), "o/b".into(), "p/a".into()]
+                ),
                 (Source::Jira, vec!["assignee = currentUser()".to_owned()]),
             ]
+        );
+        assert!(tracker.qualified("o/a") && tracker.qualified("p/a"));
+        assert!(
+            !tracker.qualified("o/b"),
+            "only repos sharing a name carry the owner"
         );
         assert_eq!(tracker.jira_site().as_deref(), Some("https://j"));
     }
@@ -744,7 +920,7 @@ pub mod tests {
             if self.fail {
                 return Err(eyre!("offline"));
             }
-            parse_gh(GH)
+            parse_gh(GH, false)
         }
     }
 

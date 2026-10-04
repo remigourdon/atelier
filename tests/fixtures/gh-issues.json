@@ -8,10 +8,13 @@
           "nodes": [
             {
               "number": 5,
+              "state": "OPEN",
               "title": "Phase 4: Issues panel",
               "url": "https://github.com/remigourdon/atelier/issues/5",
               "updatedAt": "2026-10-04T17:55:32Z",
+              "stateReason": null,
               "assignees": {
+                "totalCount": 1,
                 "nodes": [
                   {
                     "login": "remigourdon"
@@ -19,6 +22,7 @@
                 ]
               },
               "labels": {
+                "totalCount": 2,
                 "nodes": [
                   {
                     "name": "enhancement"
@@ -30,17 +34,28 @@
               },
               "issueDependenciesSummary": {
                 "blockedBy": 0
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": [
+                  {
+                    "state": "OPEN"
+                  }
+                ]
               }
             },
             {
               "number": 6,
+              "state": "OPEN",
               "title": "Phase 5: Carnets",
               "url": "https://github.com/remigourdon/atelier/issues/6",
               "updatedAt": "2026-10-04T15:07:16Z",
+              "stateReason": null,
               "assignees": {
+                "totalCount": 0,
                 "nodes": []
               },
               "labels": {
+                "totalCount": 101,
                 "nodes": [
                   {
                     "name": "enhancement"
@@ -49,6 +64,9 @@
               },
               "issueDependenciesSummary": {
                 "blockedBy": 1
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": []
               }
             }
           ],
@@ -69,17 +87,24 @@
           "nodes": [
             {
               "number": 7,
+              "state": "OPEN",
               "title": "Phase 6: Home Manager module",
               "url": "https://github.com/remigourdon/atelier/issues/7",
               "updatedAt": "2026-10-04T15:07:15Z",
+              "stateReason": null,
               "assignees": {
+                "totalCount": 0,
                 "nodes": []
               },
               "labels": {
+                "totalCount": 0,
                 "nodes": []
               },
               "issueDependenciesSummary": {
                 "blockedBy": 0
+              },
+              "closedByPullRequestsReferences": {
+                "nodes": []
               }
             }
           ],

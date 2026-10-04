@@ -2,8 +2,14 @@
 
 use std::path::{Path, PathBuf};
 
-use color_eyre::eyre::{Result, bail, eyre};
+use color_eyre::eyre::{Report, Result, bail, eyre};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, Transaction, params};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
+/// How long a remote listing is served from the cache. A minute shy of the five-minute full
+/// refresh, whose own fetch is stamped only once it returns.
+pub const CACHE_SECS: u64 = 240;
 
 /// Ordered and append-only: each runs once, tracked by `PRAGMA user_version`.
 /// Migration 1 is the baseline schema, a no-op on databases that already have it.
@@ -447,6 +453,32 @@ impl State {
             params![source, key, json],
         )?;
         Ok(())
+    }
+
+    /// A remote listing from the cache while fresh (unless `force`), else from `fetch`, then
+    /// cached. A failed fetch falls back to the cache at any age and also returns the error.
+    pub fn fetch_cached<T: Serialize + DeserializeOwned>(
+        &self,
+        source: &str,
+        key: &str,
+        force: bool,
+        fetch: impl FnOnce() -> Result<Vec<T>>,
+    ) -> (Vec<T>, Option<Report>) {
+        let cached = |max_age| -> Option<Vec<T>> {
+            let json = self.cached(source, key, max_age).ok()??;
+            serde_json::from_str(&json).ok()
+        };
+        if !force && let Some(found) = cached(Some(CACHE_SECS)) {
+            return (found, None);
+        }
+        let fetched = fetch().and_then(|found| {
+            self.store_cache(source, key, &serde_json::to_string(&found)?)?;
+            Ok(found)
+        });
+        match fetched {
+            Ok(found) => (found, None),
+            Err(err) => (cached(None).unwrap_or_default(), Some(err)),
+        }
     }
 }
 

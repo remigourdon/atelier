@@ -8,7 +8,7 @@ use regex::Regex;
 
 use super::app::{Action, Job, Removal, Snapshot, Work};
 use crate::config::{Config, group_from_name};
-use crate::issues::{self, Issue};
+use crate::issues::{self, Issue, Tracker};
 use crate::process::{Logged, Recorder, Runner, System};
 use crate::reviews::{self, Provider, Review, Role};
 use crate::state::{self, State};
@@ -97,10 +97,10 @@ pub fn run(context: &Context, job: Job) -> Action {
             scopes,
             force,
         } => {
-            let site = context.config.tracker.jira_site();
+            let tracker = &context.config.tracker;
             let (issues, log) = match context.state() {
                 Ok(state) => {
-                    let (issues, log) = issues(&state, &recorder, source, &scopes, site, force);
+                    let (issues, log) = issues(&state, &recorder, tracker, source, &scopes, force);
                     (Ok(issues), log)
                 }
                 Err(err) => (Err(err.to_string()), Vec::new()),
@@ -135,7 +135,7 @@ pub fn attach(context: &Context, session: &str) -> Vec<Logged> {
 
 /// What a fetch adds to the command log: each command that failed, and the fetch's own error
 /// only when no command failed, as when parsing.
-fn failures(recorder: &Recorder, error: Option<Report>, what: String) -> Vec<Logged> {
+fn fetch_failures(recorder: &Recorder, error: Option<Report>, what: String) -> Vec<Logged> {
     let mut failed: Vec<Logged> = (recorder.take().into_iter())
         .filter(|entry| entry.error.is_some())
         .collect();
@@ -165,7 +165,7 @@ fn reviews(
         for role in Role::ALL {
             let (found, error) = reviews::fetch(state, api.as_ref(), role, force);
             reviews.extend(found);
-            log.extend(failures(
+            log.extend(fetch_failures(
                 recorder,
                 error,
                 format!("{} reviews", provider.cli()),
@@ -175,26 +175,40 @@ fn reviews(
     (reviews, log)
 }
 
-/// A tracker's issues in every scope, with what failed for the command log.
+/// A tracker's issues in every scope, with what failed for the command log, and each issue
+/// listed with only some of its labels or assignees.
 fn issues(
     state: &State,
     recorder: &Recorder,
+    tracker: &Tracker,
     source: issues::Source,
     scopes: &[String],
-    site: Option<String>,
     force: bool,
 ) -> (Vec<Issue>, Vec<Logged>) {
     let mut issues = Vec::new();
     let mut log = Vec::new();
     for scope in scopes {
-        let api = source.issues(recorder, scope.clone(), site.clone());
+        let api = source.issues(recorder, scope.clone(), tracker);
         let (found, error) = issues::fetch(state, api.as_ref(), force);
-        issues.extend(found);
-        log.extend(failures(
+        log.extend(fetch_failures(
             recorder,
             error,
             format!("{} issues", source.cli()),
         ));
+        log.extend(
+            found
+                .iter()
+                .filter(|issue| issue.truncated)
+                .map(|issue| Logged {
+                    command: format!(
+                        "{} issues: {} lists only its first 100 labels or assignees",
+                        source.cli(),
+                        issue.key
+                    ),
+                    error: None,
+                }),
+        );
+        issues.extend(found);
     }
     (issues, log)
 }
@@ -716,47 +730,32 @@ mod tests {
         let state =
             State::from_connection(Connection::open_in_memory().unwrap(), "default").unwrap();
         let fake = Fake::default()
-            .always("gh api graphql --paginate --slurp -f query=", None)
-            .once(
-                "gh api graphql --paginate --slurp -f query=",
-                Some(issues::tests::GH),
-            );
+            .once("gh", Some(issues::tests::GH))
+            .once("gh", Some("[]"))
+            .always("gh", None);
         let recorder = Recorder::new(&fake);
+        let tracker = Tracker::default();
         let scopes = ["o/a".to_owned(), "o/b".to_owned()];
-        let (found, log) = issues(
-            &state,
-            &recorder,
-            issues::Source::GitHub,
-            &scopes,
-            None,
-            false,
+        let github = issues::Source::GitHub;
+        let (found, log) = issues(&state, &recorder, &tracker, github, &scopes, false);
+        assert_eq!(found.len(), 3, "o/a's open issues, and no closed ones");
+        let commands: Vec<&str> = log.iter().map(|entry| entry.command.as_str()).collect();
+        assert_eq!(log.len(), 2, "{commands:?}");
+        assert!(
+            log[0].command.contains("only its first 100 labels") && log[0].error.is_none(),
+            "a truncated issue is noted"
         );
-        assert_eq!(found.len(), 3, "o/a's issues");
-        assert_eq!(log.len(), 1, "o/b's failed command");
-        assert!(log[0].command.ends_with("-f owner=o -f name=b"));
-        issues(
-            &state,
-            &recorder,
-            issues::Source::GitHub,
-            &scopes,
-            None,
-            false,
-        );
+        assert!(log[1].command.ends_with("-f owner=o -f name=b") && log[1].error.is_some());
+        issues(&state, &recorder, &tracker, github, &scopes, false);
         assert_eq!(
             fake.calls().len(),
-            3,
+            4,
             "only the failed scope is asked again"
         );
         let fake = Fake::default().always("acli", Some("[{}]"));
         let recorder = Recorder::new(&fake);
-        let (_, log) = issues(
-            &state,
-            &recorder,
-            issues::Source::Jira,
-            &["x".into()],
-            None,
-            false,
-        );
+        let jira = issues::Source::Jira;
+        let (_, log) = issues(&state, &recorder, &tracker, jira, &["x".into()], false);
         assert_eq!(
             log.len(),
             1,

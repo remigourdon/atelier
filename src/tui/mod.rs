@@ -217,6 +217,27 @@ mod tests {
         insta::assert_snapshot!(render(&model, 120, 30));
     }
 
+    /// The recorded GitHub issues of this repo through the triage label scheme.
+    #[test]
+    fn issues_panel_from_github() {
+        use crate::issues::{parse_gh, tests};
+        let mut model = loaded(120, 30);
+        model.tracker = crate::config::Config::parse(tests::SCHEME).unwrap().tracker;
+        let mut issues = parse_gh(tests::GH, false).unwrap();
+        issues.extend(parse_gh(tests::GH_CLOSED, false).unwrap());
+        update(
+            &mut model,
+            Action::Issues {
+                source: crate::issues::Source::GitHub,
+                issues: Ok(issues),
+                log: Vec::new(),
+            },
+        );
+        update(&mut model, Action::Key(key('4')));
+        update(&mut model, Action::Key(key('[')));
+        insta::assert_snapshot!(render(&model, 120, 30));
+    }
+
     #[test]
     fn actions_menu() {
         let mut model = loaded(100, 30);

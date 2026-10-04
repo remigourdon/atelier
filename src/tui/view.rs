@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use super::app::{Focus, KEYMAP, List, Model, Panel, Popup, Row, Screen, Source, popup_hints};
 use super::widgets;
 use crate::config::Icons;
+use crate::issues::State;
 
 /// Below this width the main view is hidden until `+`.
 pub const NARROW: u16 = 100;
@@ -440,6 +441,15 @@ fn rows<'a>(model: &'a Model, palette: &Palette, list: List) -> Vec<Line<'a>> {
                 let mut spans = vec![marker];
                 spans.extend(icon(glyphs.issue, dim));
                 spans.push(Span::styled(format!("{} ", issue.key), dim));
+                let state = match issue.state {
+                    State::Todo => None,
+                    State::InProgress => Some(palette.info),
+                    State::Done => Some(palette.ok),
+                };
+                if let Some(color) = state {
+                    let label = format!("{} ", issue.state.label().to_lowercase());
+                    spans.push(Span::styled(label, Style::new().fg(color)));
+                }
                 spans.push(Span::raw(issue.title.as_str()));
                 if issue.blocked {
                     spans.push(Span::styled(" blocked", Style::new().fg(palette.error)));
@@ -570,7 +580,7 @@ fn detail(model: &Model) -> Vec<(String, String)> {
             let Some(review) = model.review() else {
                 return Vec::new();
             };
-            let repo = match model.review_repo(review) {
+            let repo = match model.project_repo(&review.project_url) {
                 Some(repo) => repo.name(),
                 None => format!("{} (not registered)", review.project),
             };
@@ -615,6 +625,9 @@ fn detail(model: &Model) -> Vec<(String, String)> {
                 pair("URL", issue.url.clone()),
                 pair("Project", issue.project.clone()),
             ];
+            for (key, value) in [("Type", &issue.kind), ("Priority", &issue.priority)] {
+                pairs.extend(value.clone().map(|value| pair(key, value)));
+            }
             let work = model.issue_work(issue);
             if work.is_empty() {
                 pairs.push(pair("Worktree", "none: Space or n creates one".into()));
@@ -705,7 +718,10 @@ fn render_hints(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect)
         ));
     } else {
         let active = model.active();
-        for binding in KEYMAP.iter().filter(|binding| active.among(binding.hint)) {
+        for binding in KEYMAP
+            .iter()
+            .filter(|binding| binding.hint.contains(&active.kind()))
+        {
             if !spans.is_empty() {
                 spans.push(Span::styled(" · ", Style::new().fg(palette.dim)));
             }
