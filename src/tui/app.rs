@@ -6,10 +6,11 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use tui_input::Input;
 
+use crate::issues::{self, Issue, TrackerConfig};
 use crate::process::Logged;
-use crate::reviews::{self, Provider, Review, Role};
+use crate::reviews::{Provider, Review, Role};
 use crate::state::Repo;
-use crate::worktrunk::{Forge, Worktree};
+use crate::worktrunk::{self, Forge, Worktree};
 
 /// The side panels, top to bottom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -17,21 +18,28 @@ pub enum Panel {
     Workspaces,
     Work,
     Reviews,
+    Issues,
 }
 
 impl Panel {
-    pub const ALL: [Panel; 3] = [Panel::Workspaces, Panel::Work, Panel::Reviews];
+    pub const ALL: [Panel; 4] = [
+        Panel::Workspaces,
+        Panel::Work,
+        Panel::Reviews,
+        Panel::Issues,
+    ];
 
     pub fn number(self) -> usize {
         Panel::ALL.iter().position(|&p| p == self).unwrap() + 1
     }
 
-    /// Its sub-tabs, which `[` and `]` cycle through.
-    pub fn tabs(self) -> &'static [List] {
+    /// Its sub-tabs, which `[` and `]` cycle through, given how many issue sections there are.
+    pub fn tabs(self, sections: usize) -> Vec<List> {
         match self {
-            Panel::Workspaces => &[List::Workspaces, List::Repos],
-            Panel::Work => &[List::Work],
-            Panel::Reviews => &[List::ToReview, List::Mine],
+            Panel::Workspaces => vec![List::Workspaces, List::Repos],
+            Panel::Work => vec![List::Work],
+            Panel::Reviews => vec![List::ToReview, List::Mine],
+            Panel::Issues => (0..sections).map(List::Section).collect(),
         }
     }
 }
@@ -44,24 +52,29 @@ pub enum List {
     Work,
     ToReview,
     Mine,
+    /// An Issues sub-tab, by its index in the tracker's sections.
+    Section(usize),
+}
+
+/// What a list holds, as the keymap names lists: both review lists hold reviews, and every
+/// section holds issues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Workspaces,
+    Repos,
+    Work,
+    Reviews,
+    Issues,
 }
 
 impl List {
-    pub const ALL: [List; 5] = [
-        List::Workspaces,
-        List::Repos,
-        List::Work,
-        List::ToReview,
-        List::Mine,
-    ];
-
-    pub fn title(self) -> &'static str {
+    pub fn kind(self) -> Kind {
         match self {
-            List::Workspaces => "Workspaces",
-            List::Repos => "Repos",
-            List::Work => "Work",
-            List::ToReview => "To review",
-            List::Mine => "Mine",
+            List::Workspaces => Kind::Workspaces,
+            List::Repos => Kind::Repos,
+            List::Work => Kind::Work,
+            List::ToReview | List::Mine => Kind::Reviews,
+            List::Section(_) => Kind::Issues,
         }
     }
 
@@ -205,23 +218,37 @@ pub enum Job {
         workspace: String,
         review: Box<Review>,
     },
+    /// Lists a tracker's issues in each scope, from the cache unless `force`.
+    Issues {
+        tracker: issues::Tracker,
+        scopes: Vec<String>,
+        force: bool,
+    },
+    /// Creates a worktree on `branch` for an issue, in the issue's group.
+    Start {
+        repo: PathBuf,
+        branch: String,
+        workspace: String,
+        issue: Box<Issue>,
+    },
 }
 
-/// Whether the next worktree listing also lists reviews, and whether from the cache.
+/// Whether the next worktree listing also lists reviews or issues, and whether from the cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReviewsDue {
+pub enum Due {
     No,
     Cached,
     /// Past the cache, as `R` asks.
     Fresh,
 }
 
-/// What the hint bar shows as loading: worktree, commit and review listings, or actions.
+/// What the hint bar shows as loading: worktree, commit, review and issue listings, or actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Source {
     Wt,
     Git,
     Reviews(Provider),
+    Issues(issues::Tracker),
     Run,
 }
 
@@ -231,6 +258,7 @@ impl Source {
             Source::Wt => "wt",
             Source::Git => "git",
             Source::Reviews(provider) => provider.cli(),
+            Source::Issues(tracker) => tracker.cli(),
             Source::Run => "run",
         }
     }
@@ -243,6 +271,7 @@ impl Job {
             Job::Refresh { .. } => Source::Wt,
             Job::Commits(_) => Source::Git,
             Job::Reviews { provider, .. } => Source::Reviews(*provider),
+            Job::Issues { tracker, .. } => Source::Issues(*tracker),
             _ => Source::Run,
         }
     }
@@ -266,6 +295,12 @@ pub enum Submit {
         repo: PathBuf,
         workspace: String,
         group: String,
+    },
+    /// A branch for an issue's worktree.
+    Start {
+        repo: PathBuf,
+        workspace: String,
+        issue: Box<Issue>,
     },
     Group(Vec<PathBuf>),
     Alias(PathBuf),
@@ -322,6 +357,12 @@ pub enum Action {
     Reviews {
         provider: Provider,
         reviews: Result<Vec<Review>, String>,
+        log: Vec<Logged>,
+    },
+    /// A tracker's issues, replacing the ones listed before.
+    Issues {
+        tracker: issues::Tracker,
+        issues: Result<Vec<Issue>, String>,
         log: Vec<Logged>,
     },
     Finished {
@@ -384,8 +425,8 @@ pub struct Binding {
     pub label: &'static str,
     pub cmd: Cmd,
     pub help: &'static str,
-    /// The lists whose hint bar shows it.
-    pub hint: &'static [List],
+    /// The kinds of list whose hint bar shows it.
+    pub hint: &'static [Kind],
     /// Where `?` lists it.
     pub on: On,
 }
@@ -395,8 +436,8 @@ pub struct Binding {
 pub enum On {
     /// Movement and scrolling: never listed.
     Nav,
-    /// An action on these lists' selection, listed first.
-    Lists(&'static [List]),
+    /// An action on the selection of these kinds of list, listed first.
+    Lists(&'static [Kind]),
     /// Anywhere, listed after the panel's actions.
     Global,
 }
@@ -413,11 +454,18 @@ const fn code(code: KeyCode) -> Key {
     (code, false)
 }
 
-const WORK: &[List] = &[List::Work];
-const REVIEWS: &[List] = &[List::ToReview, List::Mine];
-const LOCAL: &[List] = &[List::Workspaces, List::Repos, List::Work];
-const ALL: &[List] = &List::ALL;
-const NONE: &[List] = &[];
+const WORK: &[Kind] = &[Kind::Work];
+const LOCAL: &[Kind] = &[Kind::Workspaces, Kind::Repos, Kind::Work];
+const TABBED: &[Kind] = &[Kind::Workspaces, Kind::Repos, Kind::Reviews, Kind::Issues];
+const REMOTE: &[Kind] = &[Kind::Reviews, Kind::Issues];
+const ALL: &[Kind] = &[
+    Kind::Workspaces,
+    Kind::Repos,
+    Kind::Work,
+    Kind::Reviews,
+    Kind::Issues,
+];
+const NONE: &[Kind] = &[];
 
 /// The keymap: it drives key handling, the `?` menu and the hint bar.
 #[rustfmt::skip]
@@ -433,6 +481,7 @@ pub const KEYMAP: &[Binding] = &[
     Binding { keys: &[ch('1')], label: "1", cmd: Cmd::Jump(1), help: "Workspaces │ Repos", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('2')], label: "2", cmd: Cmd::Jump(2), help: "Work", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('3')], label: "3", cmd: Cmd::Jump(3), help: "To review │ Mine", hint: NONE, on: On::Nav },
+    Binding { keys: &[ch('4')], label: "4", cmd: Cmd::Jump(4), help: "Issues", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('0')], label: "0", cmd: Cmd::FocusMain, help: "focus the main view", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('J')], label: "J", cmd: Cmd::ScrollDown, help: "scroll the main view down", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('K')], label: "K", cmd: Cmd::ScrollUp, help: "scroll the main view up", hint: NONE, on: On::Nav },
@@ -440,19 +489,19 @@ pub const KEYMAP: &[Binding] = &[
     Binding { keys: &[ctrl('u'), code(KeyCode::PageUp)], label: "C-u/PgUp", cmd: Cmd::ScrollPageUp, help: "scroll the main view a page up", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('H')], label: "H", cmd: Cmd::ScrollLeft, help: "scroll the main view left", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('L')], label: "L", cmd: Cmd::ScrollRight, help: "scroll the main view right", hint: NONE, on: On::Nav },
-    Binding { keys: &[ch('[')], label: "[", cmd: Cmd::PrevTab, help: "previous sub-tab", hint: NONE, on: On::Lists(&[List::Workspaces, List::Repos, List::ToReview, List::Mine]) },
-    Binding { keys: &[ch(']')], label: "]", cmd: Cmd::NextTab, help: "next sub-tab", hint: NONE, on: On::Lists(&[List::Workspaces, List::Repos, List::ToReview, List::Mine]) },
-    Binding { keys: &[ch(' ')], label: "Space", cmd: Cmd::Activate, help: "open tab · check out review · switch workspace", hint: &[List::Workspaces, List::Work, List::ToReview, List::Mine], on: On::Lists(&[List::Workspaces, List::Work, List::ToReview, List::Mine]) },
+    Binding { keys: &[ch('[')], label: "[", cmd: Cmd::PrevTab, help: "previous sub-tab", hint: NONE, on: On::Lists(TABBED) },
+    Binding { keys: &[ch(']')], label: "]", cmd: Cmd::NextTab, help: "next sub-tab", hint: NONE, on: On::Lists(TABBED) },
+    Binding { keys: &[ch(' ')], label: "Space", cmd: Cmd::Activate, help: "open tab · check out review · start issue · switch workspace", hint: &[Kind::Workspaces, Kind::Work, Kind::Reviews, Kind::Issues], on: On::Lists(&[Kind::Workspaces, Kind::Work, Kind::Reviews, Kind::Issues]) },
     Binding { keys: &[code(KeyCode::Enter)], label: "Enter", cmd: Cmd::Enter, help: "fold group · focus the main view", hint: NONE, on: On::Lists(WORK) },
     Binding { keys: &[ch('-')], label: "-", cmd: Cmd::CollapseAll, help: "collapse all groups", hint: NONE, on: On::Lists(WORK) },
     Binding { keys: &[ch('=')], label: "=", cmd: Cmd::ExpandAll, help: "expand all groups", hint: NONE, on: On::Lists(WORK) },
-    Binding { keys: &[ch('n')], label: "n", cmd: Cmd::New, help: "new worktree · new workspace", hint: &[List::Workspaces, List::Work], on: On::Lists(&[List::Workspaces, List::Work]) },
-    Binding { keys: &[ch('e')], label: "e", cmd: Cmd::Edit, help: "edit group · edit repo alias", hint: &[List::Repos, List::Work], on: On::Lists(&[List::Repos, List::Work]) },
-    Binding { keys: &[ch('m')], label: "m", cmd: Cmd::Move, help: "move to workspace · set repo workspace", hint: &[List::Repos, List::Work], on: On::Lists(&[List::Repos, List::Work]) },
+    Binding { keys: &[ch('n')], label: "n", cmd: Cmd::New, help: "new worktree · new workspace", hint: &[Kind::Workspaces, Kind::Work, Kind::Issues], on: On::Lists(&[Kind::Workspaces, Kind::Work, Kind::Issues]) },
+    Binding { keys: &[ch('e')], label: "e", cmd: Cmd::Edit, help: "edit group · edit repo alias", hint: &[Kind::Repos, Kind::Work], on: On::Lists(&[Kind::Repos, Kind::Work]) },
+    Binding { keys: &[ch('m')], label: "m", cmd: Cmd::Move, help: "move to workspace · set repo workspace", hint: &[Kind::Repos, Kind::Work], on: On::Lists(&[Kind::Repos, Kind::Work]) },
     Binding { keys: &[ch('d')], label: "d", cmd: Cmd::Remove, help: "remove", hint: LOCAL, on: On::Lists(LOCAL) },
     Binding { keys: &[ch('x')], label: "x", cmd: Cmd::Close, help: "close tab", hint: WORK, on: On::Lists(WORK) },
     Binding { keys: &[ch('p')], label: "p", cmd: Cmd::Pull, help: "pull (git pull --ff-only)", hint: WORK, on: On::Lists(WORK) },
-    Binding { keys: &[ch('o')], label: "o", cmd: Cmd::Browse, help: "browse (open in the browser)", hint: REVIEWS, on: On::Lists(&[List::Repos, List::Work, List::ToReview, List::Mine]) },
+    Binding { keys: &[ch('o')], label: "o", cmd: Cmd::Browse, help: "browse (open in the browser)", hint: REMOTE, on: On::Lists(&[Kind::Repos, Kind::Work, Kind::Reviews, Kind::Issues]) },
     Binding { keys: &[ch('y')], label: "y", cmd: Cmd::CopyMenu, help: "copy path, branch or URL", hint: NONE, on: On::Lists(ALL) },
     Binding { keys: &[ctrl('o')], label: "C-o", cmd: Cmd::CopyPath, help: "copy path", hint: NONE, on: On::Lists(ALL) },
     Binding { keys: &[ch('/')], label: "/", cmd: Cmd::Filter, help: "filter", hint: NONE, on: On::Global },
@@ -573,7 +622,12 @@ pub struct Model {
     pub commits: HashMap<PathBuf, Vec<String>>,
     /// Both providers' reviews in both roles, most recently updated first.
     pub reviews: Vec<Review>,
-    pub reviews_due: ReviewsDue,
+    pub reviews_due: Due,
+    /// Where issues come from and their sections.
+    pub tracker_config: TrackerConfig,
+    /// Every tracker's issues, each source in its own order.
+    pub issues: Vec<Issue>,
+    pub issues_due: Due,
     /// Worktrees with a pull in flight, which show a spinner.
     pub pulling: HashSet<PathBuf>,
     /// The spinner's frame, advanced each tick.
@@ -607,8 +661,11 @@ impl Model {
             loading: BTreeMap::new(),
             commits: HashMap::new(),
             reviews: Vec::new(),
-            // At startup, so the panel fills.
-            reviews_due: ReviewsDue::Cached,
+            // At startup, so the panels fill.
+            reviews_due: Due::Cached,
+            tracker_config: TrackerConfig::default(),
+            issues: Vec::new(),
+            issues_due: Due::Cached,
             pulling: HashSet::new(),
             frame: 0,
             modal: None,
@@ -625,8 +682,45 @@ impl Model {
         !self.pulling.is_empty()
     }
 
+    /// A panel's sub-tabs. Issues have one per section, then Other while it lists any.
+    pub fn tabs(&self, panel: Panel) -> Vec<List> {
+        let mut sections = self.tracker_config.sections().len();
+        let other = Some(sections);
+        if self
+            .issues
+            .iter()
+            .any(|issue| self.tracker_config.section(issue) == other)
+        {
+            sections += 1;
+        }
+        panel.tabs(sections)
+    }
+
+    /// Every list, sub-tabs included.
+    pub fn lists(&self) -> Vec<List> {
+        Panel::ALL
+            .into_iter()
+            .flat_map(|panel| self.tabs(panel))
+            .collect()
+    }
+
+    /// A panel's chosen sub-tab, else its first, as when Other empties.
     pub fn list(&self, panel: Panel) -> List {
-        self.sub.get(&panel).copied().unwrap_or(panel.tabs()[0])
+        let tabs = self.tabs(panel);
+        (self.sub.get(&panel).copied())
+            .filter(|list| tabs.contains(list))
+            .unwrap_or(tabs[0])
+    }
+
+    pub fn title(&self, list: List) -> &str {
+        match list {
+            List::Workspaces => "Workspaces",
+            List::Repos => "Repos",
+            List::Work => "Work",
+            List::ToReview => "To review",
+            List::Mine => "Mine",
+            List::Section(index) => self.tracker_config.title(index),
+        }
     }
 
     /// The list keys act on: the focused panel's, or the last one's from the main view.
@@ -698,26 +792,62 @@ impl Model {
         self.reviews(list).get(self.index(list)).copied()
     }
 
-    /// The registered repo a review belongs to, by its forge web page.
-    pub fn review_repo(&self, review: &Review) -> Option<&Repo> {
+    /// The registered repo whose forge web page is `project_url`.
+    pub fn project_repo(&self, project_url: &str) -> Option<&Repo> {
         let path = self.snapshot.forges.iter().find_map(|(path, forge)| {
-            reviews::same_project(&forge.url, &review.project_url).then_some(path)
+            worktrunk::same_project(&forge.url, project_url).then_some(path)
         })?;
         self.snapshot.repos.iter().find(|repo| repo.path == *path)
     }
 
     /// The registered repo's name for a review's project, else the project's path.
     pub fn review_project(&self, review: &Review) -> String {
-        self.review_repo(review)
+        self.project_repo(&review.project_url)
             .map_or_else(|| review.project.clone(), Repo::name)
     }
 
     /// The worktree that has a review's branch checked out.
     pub fn review_work(&self, review: &Review) -> Option<&Work> {
-        let repo = self.review_repo(review)?;
+        let repo = self.project_repo(&review.project_url)?;
         self.snapshot.work.iter().find(|work| {
             work.repo == repo.path && work.tree.branch.as_deref() == Some(review.branch.as_str())
         })
+    }
+
+    /// A section's issues, narrowed by its filter.
+    pub fn issues(&self, list: List) -> Vec<&Issue> {
+        let List::Section(index) = list else {
+            return Vec::new();
+        };
+        self.issues
+            .iter()
+            .filter(|issue| {
+                self.tracker_config.section(issue) == Some(index)
+                    && self.matches(
+                        list,
+                        &[
+                            &issue.key,
+                            &issue.title,
+                            &issue.project,
+                            &issue.labels.join(" "),
+                            &issue.assignees.join(" "),
+                        ],
+                    )
+            })
+            .collect()
+    }
+
+    /// The selected issue, when a section is active.
+    pub fn issue(&self) -> Option<&Issue> {
+        let list = self.active();
+        self.issues(list).get(self.index(list)).copied()
+    }
+
+    /// An issue's linked work: the worktrees in its group, which is its key.
+    pub fn issue_work(&self, issue: &Issue) -> Vec<&Work> {
+        (self.snapshot.work.iter())
+            .filter(|work| work.group == issue.key)
+            .collect()
     }
 
     /// The workspace whose work panel 2 shows: the one selected in panel 1.
@@ -816,6 +946,7 @@ impl Model {
             List::Repos => self.repos().len(),
             List::Work => self.work_rows().len(),
             List::ToReview | List::Mine => self.reviews(list).len(),
+            List::Section(_) => self.issues(list).len(),
         }
     }
 }

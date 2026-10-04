@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod hooks;
+mod issues;
 mod process;
 mod reviews;
 mod shell;

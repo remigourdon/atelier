@@ -22,6 +22,7 @@ src/  cli  config  state  sync  hooks  shell  process  zellij  worktrunk  review
 - **worktrunk**: `wt list` always runs with `--config-set list.json-schema=2`, so the user's config cannot change the schema. A new worktree is `wt switch [--create] <branch> --no-cd`, with `ATELIER_WORKSPACE` and `ATELIER_GROUP_HINT` telling atelier's hook its workspace and group.
 - **Refresh**: a fast `wt list` every 10 s after 10 s idle, a full refresh (`--full`, reviews, issues) every 5 min, and remote responses cached in sqlite for 4 min, so each full refresh fetches anew while other TUIs and restarts reuse it. `R` bypasses the cache; a failed fetch falls back to the cached response at any age.
 - **Reviews**: listed per host of the registered repos' forges, across every project on it: GitHub through one paginated `gh api graphql` search per sub-tab (`review-requested:@me`, `author:@me`; it reports the head branch, which `gh search prs` does not), GitLab through `glab api --paginate /merge_requests` with `scope=reviews_for_me` or `created_by_me`. A review maps to a registered repo by its project's web page; `Space` runs `wt switch pr:N`/`mr:N` in that repo's default workspace and focuses the worktree's tab, and on an unregistered project says so.
+- **Issues**: GitHub through two paginated `gh api graphql` listings of each configured repo, most recently updated first: its open issues, then those closed and updated in the last 14 days. Jira through `acli jira workitem search --jql … --json --paginate`, in the search's order. Each scope is cached on its own. An issue's key (`ABC-123`, or `repo#12` on GitHub, `owner/repo#12` when two configured repos share a name) is the group of its linked work. `Space` opens its linked worktrees; with none, like `n`, it offers every registered repo, the linked work's repos first, then the issue's own GitHub repo, and never picks one, since a tracker-only repo holds issues whose work happens elsewhere. It then asks for a branch (`ABC-123-title` or `12-title`), and the worktree goes to the workspace of the linked work in that repo, else of any linked work, else the repo's default one, in the issue's group even when its branch names no ticket key.
 
 ## State
 
@@ -48,11 +49,11 @@ session_layout = "…"
 worktree_layout = "…"
 anchor_pane = "editor"
 
-[tracker.github]               # or [tracker.jira] with `jql` and `url` (fallback $ATLASSIAN_URL / $JIRA_URL)
+[tracker.github]               # and/or [tracker.jira] with `jql` and `url` (fallback $ATLASSIAN_URL / $JIRA_URL)
 repos = ["owner/name"]
 
 [tracker]
-hide = { labels = ["wontfix"] }
+hide = { labels = ["wontfix"] }  # same conditions as a section, applied first; none: nothing hidden
 
 [[tracker.sections]]           # ordered, first match wins; no conditions = catch-all; no sections = one per state
 title = "Ready for agent"
@@ -62,7 +63,29 @@ state = ["todo"]               # todo | in_progress | done
 blocked = false
 ```
 
-Issues are normalised from each source. `state` comes from Jira's `statusCategory`; every open GitHub issue is `todo`. `blocked` is true for a GitHub issue with an open `blockedBy`, or a Jira issue in status `Blocked`.
+Issues are normalised from each source. `state` comes from Jira's `statusCategory`. A GitHub issue is `done` once closed, completed or not planned; `in_progress` while a pull request that closes it is open; else `todo`. `blocked` is true for a GitHub issue with an open `blockedBy`, or a Jira issue in status `Blocked`. Labels compare ignoring case. A hidden issue is not listed; one that matches no section goes to a last `Other` section, shown only while it lists any.
+
+A triage label scheme, for example:
+
+```toml
+[tracker]
+hide = { labels = ["wontfix", "duplicate"] }
+
+[[tracker.sections]]
+title = "Blocked"
+blocked = true
+
+[[tracker.sections]]
+title = "Ready for agent"
+labels = ["ready-for-agent"]
+
+[[tracker.sections]]
+title = "Triage"
+labels = ["needs-triage", "needs-info"]
+
+[[tracker.sections]]
+title = "Backlog"                  # the catch-all
+```
 
 ## Zellij
 
@@ -79,7 +102,7 @@ Lazygit model: numbered side panels on the left, the main view on the right show
 | 1 | Workspaces │ Repos | Workspaces (current session first); repos with alias and default workspace |
 | 2 | Work | Worktrees and carnets of the selected workspace, grouped by group, foldable. Main worktrees always shown. |
 | 3 | To review │ Mine | Reviews |
-| 4 | one per section | Issues |
+| 4 | one per section | Issues; when the sections do not fit the title, only the active one shows, with its position |
 
 The main view is a structured key/value detail for each kind, plus recent commits. A carnet shows its rendered README; an issue shows its linked work. Errors go to the command log, not toasts.
 
@@ -95,10 +118,10 @@ Lazygit defaults. The keymap is one table in code that also feeds `?` and the hi
 | `h` `l` `←` `→` `Tab` `S-Tab` · `1`–`4` · `0` | previous/next panel · jump · focus main view |
 | `J` `K` `C-d` `C-u` `PgUp` `PgDn` · `H` `L` | scroll the main view from any panel · horizontally |
 | `[` `]` | previous/next sub-tab |
-| `Space` | open/focus tab · check out review · switch workspace |
+| `Space` | open/focus tab · check out review · open an issue's linked work or start it · switch workspace |
 | `Enter` | fold group header · focus main view on an item |
 | `-` `=` | collapse/expand all |
-| `n` | new worktree (menu with carnet when carnets are enabled) · new workspace in Workspaces |
+| `n` | new worktree (menu with carnet when carnets are enabled) · new worktree for an issue · new workspace in Workspaces |
 | `e` · `m` · `d` · `x` | edit group or repo alias · move to workspace or set a repo's workspace · remove worktree or workspace, forget repo (confirm) · close tab |
 | `p` | `git pull --ff-only` on the worktree |
 | `o` · `y` `C-o` | open in browser · copy path/branch/URL via OSC 52 |

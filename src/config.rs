@@ -19,6 +19,7 @@ pub struct Config {
     pub theme: Theme,
     pub icons: Icons,
     pub zellij: Zellij,
+    pub tracker: crate::issues::TrackerConfig,
 }
 
 /// Plain Unicode glyphs work in any font; Nerd Font icons need one installed.
