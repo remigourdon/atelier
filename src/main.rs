@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod forge;
 mod hooks;
 mod process;
 mod shell;

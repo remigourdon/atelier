@@ -150,7 +150,7 @@ mod tests {
     }
 
     fn loaded(width: u16, height: u16) -> Model {
-        let mut model = update::tests::model();
+        let mut model = update::tests::with_reviews(update::tests::model());
         model.size = (width, height);
         let path = model.snapshot.work[1].path().clone();
         model.snapshot.work[1].tab = true;
@@ -197,6 +197,14 @@ mod tests {
     #[test]
     fn short_terminal_folds_the_other_panels() {
         insta::assert_snapshot!(render(&loaded(120, 16), 120, 16));
+    }
+
+    #[test]
+    fn reviews_panel() {
+        let mut model = loaded(120, 30);
+        model.snapshot.work[0].tree.branch = Some("change-2".into());
+        update(&mut model, Action::Key(key('3')));
+        insta::assert_snapshot!(render(&model, 120, 30));
     }
 
     #[test]

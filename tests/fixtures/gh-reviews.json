@@ -1,0 +1,41 @@
+{
+  "data": {
+    "search": {
+      "nodes": [
+        {
+          "number": 10,
+          "title": "Phase 2: TUI frame, Workspaces and Work",
+          "url": "https://github.com/remigourdon/atelier/pull/10",
+          "isDraft": false,
+          "updatedAt": "2026-10-04T16:55:46Z",
+          "headRefName": "phase-2-tui",
+          "baseRefName": "main",
+          "author": {
+            "login": "remigourdon"
+          },
+          "repository": {
+            "nameWithOwner": "remigourdon/atelier",
+            "url": "https://github.com/remigourdon/atelier"
+          }
+        },
+        {
+          "number": 69,
+          "title": "Add SSH access and a Blink-friendly zellij to the desktop",
+          "url": "https://github.com/remigourdon/configue/pull/69",
+          "isDraft": true,
+          "updatedAt": "2026-10-04T13:06:49Z",
+          "headRefName": "add-ssh-server-to-nixos-desktop",
+          "baseRefName": "main",
+          "author": {
+            "login": "remigourdon"
+          },
+          "repository": {
+            "nameWithOwner": "remigourdon/configue",
+            "url": "https://github.com/remigourdon/configue"
+          }
+        },
+        {}
+      ]
+    }
+  }
+}

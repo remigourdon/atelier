@@ -7,7 +7,8 @@ use color_eyre::eyre::{Result, eyre};
 use regex::Regex;
 
 use super::app::{Action, Job, Removal, Snapshot, Work};
-use crate::config::Config;
+use crate::config::{Config, group_from_name};
+use crate::forge::{self, Provider, Review, Role};
 use crate::process::{Logged, Recorder, Runner, System};
 use crate::state::{self, State};
 use crate::zellij::{self, Layouts, Zellij};
@@ -71,6 +72,46 @@ pub fn run(context: &Context, job: Job) -> Action {
             let lines = commits(&recorder, &path).unwrap_or_default();
             Action::Commits(path, lines)
         }
+        // Like refreshes, these run constantly: log only failures.
+        Job::Reviews {
+            provider,
+            hosts,
+            force,
+        } => {
+            let fetched = context
+                .state()
+                .map(|state| reviews(&state, &recorder, provider, &hosts, force));
+            let mut log: Vec<Logged> = recorder
+                .take()
+                .into_iter()
+                .filter(|entry| entry.error.is_some())
+                .collect();
+            let reviews = fetched
+                .map(|(reviews, errors)| {
+                    for error in errors {
+                        // A failed command is logged already; a parse error is not.
+                        let error = format!("{error:#}");
+                        if !log.iter().any(|entry| {
+                            entry
+                                .error
+                                .as_ref()
+                                .is_some_and(|e| error.contains(e.as_str()))
+                        }) {
+                            log.push(Logged {
+                                command: format!("{} reviews", provider.cli()),
+                                error: Some(error),
+                            });
+                        }
+                    }
+                    reviews
+                })
+                .map_err(|err| err.to_string());
+            Action::Reviews {
+                provider,
+                reviews,
+                log,
+            }
+        }
         job => {
             let error = context
                 .state()
@@ -91,6 +132,31 @@ pub fn attach(context: &Context, session: &str) -> Vec<Logged> {
     let recorder = Recorder::new(&System);
     let _ = context.zellij(&recorder).open_session(session);
     recorder.take()
+}
+
+/// A provider's reviews in both roles on every host, with the fetches that failed.
+fn reviews(
+    state: &State,
+    runner: &dyn Runner,
+    provider: Provider,
+    hosts: &[String],
+    force: bool,
+) -> (Vec<Review>, Vec<color_eyre::Report>) {
+    let mut reviews = Vec::new();
+    let mut errors = Vec::new();
+    for host in hosts {
+        let host = host.clone();
+        let forge: Box<dyn forge::Forge> = match provider {
+            Provider::GitHub => Box::new(forge::Gh { runner, host }),
+            Provider::GitLab => Box::new(forge::Glab { runner, host }),
+        };
+        for role in Role::ALL {
+            let (found, error) = forge::fetch(state, forge.as_ref(), role, force);
+            reviews.extend(found);
+            errors.extend(error);
+        }
+    }
+    (reviews, errors)
 }
 
 fn commits(runner: &dyn Runner, path: &Path) -> Result<Vec<String>> {
@@ -163,7 +229,9 @@ fn execute(context: &Context, state: &mut State, zellij: &Zellij, job: Job) -> R
         }
     };
     match job {
-        Job::Refresh { .. } | Job::Commits(_) => unreachable!("run handles these"),
+        Job::Refresh { .. } | Job::Commits(_) | Job::Reviews { .. } => {
+            unreachable!("run handles these")
+        }
         Job::Open(paths) => failures(
             paths
                 .iter()
@@ -193,6 +261,19 @@ fn execute(context: &Context, state: &mut State, zellij: &Zellij, job: Job) -> R
             workspace,
             group,
         } => create(state, zellij, &repo, &branch, &workspace, &group),
+        Job::Checkout {
+            repo,
+            target,
+            branch,
+            workspace,
+            title,
+        } => {
+            let mut group = group_from_name(&context.ticket, &branch);
+            if group.is_empty() {
+                group = group_from_name(&context.ticket, &title);
+            }
+            checkout(state, zellij, &repo, &target, &branch, &workspace, &group)
+        }
         Job::Remove(removals) => failures(
             removals
                 .iter()
@@ -251,12 +332,56 @@ fn create(
     workspace: &str,
     group: &str,
 ) -> Result<()> {
-    let runner = zellij.runner;
     let repo_arg = repo.to_string_lossy();
     // Succeeds either way, so a new branch does not show as a failure in the log.
-    let exists = !runner
+    let exists = !zellij
+        .runner
         .output("git", &["-C", &repo_arg, "branch", "--list", branch])?
         .is_empty();
+    let target: &[&str] = if exists {
+        &[branch]
+    } else {
+        &["--create", branch]
+    };
+    let path = switch(state, zellij, repo, target, branch, workspace, group)?;
+    if let Some(path) = path
+        && state.tab(&path)?.is_none()
+    {
+        zellij.open_tab(state, &path)?;
+    }
+    Ok(())
+}
+
+/// Checks out a review's branch through worktrunk (`pr:N` or `mr:N`) and focuses its tab,
+/// whether the worktree is new or was there already.
+fn checkout(
+    state: &State,
+    zellij: &Zellij,
+    repo: &Path,
+    target: &str,
+    branch: &str,
+    workspace: &str,
+    group: &str,
+) -> Result<()> {
+    let path = switch(state, zellij, repo, &[target], branch, workspace, group)?
+        .ok_or_else(|| eyre!("wt switch {target} left no worktree on {branch}"))?;
+    zellij.open_tab(state, &path)?;
+    Ok(())
+}
+
+/// Runs `wt switch` with the workspace and group for atelier's hooks, then records the
+/// worktree on `branch` in case the hooks are not installed. Returns its path.
+fn switch(
+    state: &State,
+    zellij: &Zellij,
+    repo: &Path,
+    target: &[&str],
+    branch: &str,
+    workspace: &str,
+    group: &str,
+) -> Result<Option<PathBuf>> {
+    let runner = zellij.runner;
+    let repo_arg = repo.to_string_lossy();
     let workspace_env = format!("{}={workspace}", hooks::WORKSPACE_VAR);
     let group_env = format!("{}={group}", hooks::GROUP_HINT_VAR);
     let mut args = vec![
@@ -267,25 +392,20 @@ fn create(
         &repo_arg,
         "switch",
     ];
-    if !exists {
-        args.push("--create");
-    }
-    args.extend([branch, "--no-cd", "--yes"]);
+    args.extend(target);
+    args.extend(["--no-cd", "--yes"]);
     runner.output("env", &args)?;
-    // Without atelier's hooks installed nothing recorded it or opened its tab: do it here.
     let listing = worktrunk::list(runner, repo, false)?;
-    if let Some(tree) = listing
+    let Some(tree) = listing
         .worktrees
         .iter()
         .find(|tree| tree.branch.as_deref() == Some(branch))
-    {
-        let path = sync::canonical(&tree.path);
-        state.add_item(&path, "worktree", Some(repo), group, workspace)?;
-        if state.tab(&path)?.is_none() {
-            zellij.open_tab(state, &path)?;
-        }
-    }
-    Ok(())
+    else {
+        return Ok(None);
+    };
+    let path = sync::canonical(&tree.path);
+    state.add_item(&path, "worktree", Some(repo), group, workspace)?;
+    Ok(Some(path))
 }
 
 fn remove(state: &State, zellij: &Zellij, removal: &Removal) -> Result<()> {
@@ -417,6 +537,78 @@ mod tests {
             !fake.calls().iter().any(|call| call.contains("new-tab")),
             "the first create opened the tab"
         );
+    }
+
+    #[test]
+    fn checkout_switches_to_the_review_and_focuses_its_tab() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().canonicalize().unwrap();
+        let state =
+            State::from_connection(Connection::open_in_memory().unwrap(), "default").unwrap();
+        state.add_workspace("side").unwrap();
+        state.add_repo("/r", None, "default").unwrap();
+        state
+            .add_item(&tree, "worktree", Some(Path::new("/r")), "", "side")
+            .unwrap();
+        state
+            .set_tab(&state::Tab {
+                path: tree.clone(),
+                session: "side".into(),
+                tab_id: 4,
+                pane_id: "7".into(),
+            })
+            .unwrap();
+        let listing = format!(
+            r#"{{"items":[{{"branch":"ABC-1-x","worktree":{{"path":"{}"}}}}]}}"#,
+            tree.display()
+        );
+        let fake = Fake::default()
+            .always("wt -C /r --config-set", Some(&listing))
+            .always(
+                "zellij --session side action list-tabs",
+                Some(r#"[{"tab_id":4,"position":1,"name":"x"}]"#),
+            )
+            .always("zellij --session side action list-panes", Some("[]"));
+        let run = |target: &str, branch: &str| {
+            checkout(
+                &state,
+                &zellij(&fake),
+                Path::new("/r"),
+                target,
+                branch,
+                "default",
+                "ABC-1",
+            )
+        };
+        run("pr:12", "ABC-1-x").unwrap();
+        let calls = fake.calls();
+        assert_eq!(
+            calls[0],
+            "env ATELIER_WORKSPACE=default ATELIER_GROUP_HINT=ABC-1 wt -C /r switch pr:12 --no-cd --yes"
+        );
+        assert!(
+            calls.contains(&"zellij --session side action go-to-tab-by-id 4".into()),
+            "an existing worktree's tab is focused: {calls:?}"
+        );
+        let error = run("pr:13", "gone").unwrap_err();
+        assert!(error.to_string().contains("no worktree on gone"));
+    }
+
+    #[test]
+    fn reviews_cover_every_host_and_role_through_the_cache() {
+        let state =
+            State::from_connection(Connection::open_in_memory().unwrap(), "default").unwrap();
+        let gh = include_str!("../../tests/fixtures/gh-reviews.json");
+        let fake = Fake::default()
+            .always("gh api --hostname a", Some(gh))
+            .always("gh api --hostname b", None);
+        let hosts = ["a".to_owned(), "b".to_owned()];
+        let (found, errors) = reviews(&state, &fake, Provider::GitHub, &hosts, false);
+        assert_eq!(found.len(), 4, "both roles on host a");
+        assert_eq!(errors.len(), 2, "both roles on host b");
+        assert_eq!(fake.calls().len(), 4);
+        reviews(&state, &fake, Provider::GitHub, &hosts, false);
+        assert_eq!(fake.calls().len(), 6, "only the failed host is asked again");
     }
 
     #[test]
