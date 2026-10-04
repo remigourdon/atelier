@@ -41,7 +41,11 @@ impl Layouts {
                 Some(layout) => expand(layout),
                 None => built_in(
                     "worktree.kdl",
-                    worktree_layout(config.editor().as_deref(), config.agent_command()),
+                    worktree_layout(
+                        config.anchor_pane(),
+                        config.editor().as_deref(),
+                        config.agent_command(),
+                    ),
                 )?,
             },
         })
@@ -62,6 +66,7 @@ fn kdl_string(value: &str) -> String {
     serde_json::to_string(value).expect("strings serialise")
 }
 
+/// The session: an `atelier` tab, a plain shell until the TUI exists.
 pub fn session_layout() -> String {
     format!(
         r#"layout {{
@@ -75,23 +80,22 @@ pub fn session_layout() -> String {
         }}
     }}
     tab name="{ATELIER_TAB}" focus=true {{
-        pane name="{ATELIER_TAB}" command="atelier" {{
-            args "tui"
-        }}
+        pane name="{ATELIER_TAB}"
     }}
 }}
 "#
     )
 }
 
-/// The worktree tab: the anchor pane named `editor`, a shell, and a suspended agent.
-pub fn worktree_layout(editor: Option<&str>, agent_command: &str) -> String {
+/// The worktree tab: the anchor pane running the editor, a shell, and a suspended agent.
+pub fn worktree_layout(anchor: &str, editor: Option<&str>, agent_command: &str) -> String {
+    let anchor = kdl_string(anchor);
     let editor = match editor {
         Some(editor) => format!(
-            "pane size=\"60%\" name=\"editor\" command=\"sh\" focus=true {{\n            args \"-c\" {}\n        }}",
+            "pane size=\"60%\" name={anchor} command=\"sh\" focus=true {{\n            args \"-c\" {}\n        }}",
             kdl_string(&format!("exec {editor}"))
         ),
-        None => "pane size=\"60%\" name=\"editor\" focus=true".to_owned(),
+        None => format!("pane size=\"60%\" name={anchor} focus=true"),
     };
     format!(
         r#"layout {{
@@ -334,7 +338,7 @@ impl Zellij<'_> {
             }
         }
         for tab in &tabs {
-            let path = Path::new(&tab.path);
+            let path = tab.path.as_path();
             let Some((live_tabs, live_panes)) =
                 live.get(tab.session.as_str()).filter(|_| path.exists())
             else {
@@ -360,7 +364,7 @@ impl Zellij<'_> {
     }
 
     /// Opens an item's tab in the workspace that owns it, or focuses the one already open.
-    pub fn open_tab(&self, state: &State, path: &str) -> Result<Tab> {
+    pub fn open_tab(&self, state: &State, path: &Path) -> Result<Tab> {
         let item = state.require_item(path)?;
         self.reconcile(state)?;
         if let Some(tab) = state.tab(path)? {
@@ -383,7 +387,7 @@ impl Zellij<'_> {
                 "--layout",
                 &self.layouts.worktree,
                 "--cwd",
-                path,
+                &path.to_string_lossy(),
                 "--name",
                 &name,
             ],
@@ -392,7 +396,7 @@ impl Zellij<'_> {
             .trim()
             .parse()
             .map_err(|_| eyre!("zellij new-tab printed no tab id: {output:?}"))?;
-        let pane_id = self.find_anchor(session, tab_id, Path::new(path))?;
+        let pane_id = self.find_anchor(session, tab_id, path)?;
         let tab = Tab {
             path: path.to_owned(),
             session: session.clone(),
@@ -407,21 +411,37 @@ impl Zellij<'_> {
         Ok(tab)
     }
 
-    pub fn close_tab(&self, state: &State, path: &str) -> Result<()> {
-        let Some(tab) = state.tab(path)? else {
-            return Ok(());
-        };
-        // The tab may already be gone; forgetting it is what matters.
-        let _ = self.action(&tab.session, &["close-tab-by-id", &tab.tab_id.to_string()]);
-        state.remove_tab(path)?;
-        if let Some(repo) = state.item(path)?.and_then(|item| item.repo) {
+    pub fn close_tab(&self, state: &State, path: &Path) -> Result<()> {
+        if self.forget_tab(state, path)?
+            && let Some(repo) = state.item(path)?.and_then(|item| item.repo)
+        {
             self.sync_names(state, &repo)?;
         }
         Ok(())
     }
 
+    /// Closes every tab of a repo, before the repo is forgotten.
+    pub fn close_repo_tabs(&self, state: &State, repo: &Path) -> Result<()> {
+        self.reconcile(state)?;
+        for item in state.repo_items(repo)? {
+            self.forget_tab(state, &item.path)?;
+        }
+        Ok(())
+    }
+
+    /// Closes an item's tab and forgets it. Returns whether it had one.
+    fn forget_tab(&self, state: &State, path: &Path) -> Result<bool> {
+        let Some(tab) = state.tab(path)? else {
+            return Ok(false);
+        };
+        // The tab may already be gone; forgetting it is what matters.
+        let _ = self.action(&tab.session, &["close-tab-by-id", &tab.tab_id.to_string()]);
+        state.remove_tab(path)?;
+        Ok(true)
+    }
+
     /// The tab name for an item, counting it among the open tabs of its repo, workspace and group.
-    fn name_for(&self, state: &State, path: &str) -> Result<String> {
+    fn name_for(&self, state: &State, path: &Path) -> Result<String> {
         let item = state.require_item(path)?;
         let Some(repo_path) = &item.repo else {
             let name = crate::state::dir_name(path);
@@ -429,7 +449,7 @@ impl Zellij<'_> {
         };
         let repo = state
             .repo_by_path(repo_path)?
-            .ok_or_else(|| eyre!("unknown repo: {repo_path}"))?;
+            .ok_or_else(|| eyre!("unknown repo: {}", repo_path.display()))?;
         let siblings = self.open_siblings(state, &item)?;
         let branch =
             process::branch(self.runner, path).unwrap_or_else(|| crate::state::dir_name(path));
@@ -442,7 +462,7 @@ impl Zellij<'_> {
         ))
     }
 
-    fn open_siblings(&self, state: &State, item: &crate::state::Item) -> Result<Vec<String>> {
+    fn open_siblings(&self, state: &State, item: &crate::state::Item) -> Result<Vec<PathBuf>> {
         let Some(repo) = &item.repo else {
             return Ok(Vec::new());
         };
@@ -460,7 +480,7 @@ impl Zellij<'_> {
     }
 
     /// Renames every open tab of a repo, so duplicates in a group show their branch.
-    pub fn sync_names(&self, state: &State, repo: &str) -> Result<()> {
+    pub fn sync_names(&self, state: &State, repo: &Path) -> Result<()> {
         for item in state.repo_items(repo)? {
             if let Some(tab) = state.tab(&item.path)? {
                 let name = self.name_for(state, &item.path)?;
@@ -539,12 +559,14 @@ mod tests {
 
     #[test]
     fn layouts_name_the_anchor_pane_and_quote_commands() {
-        let layout = worktree_layout(Some("hx --vsplit"), "claude \"x\"");
+        let layout = worktree_layout("editor", Some("hx --vsplit"), "claude \"x\"");
         assert!(layout.contains(r#"name="editor""#));
         assert!(layout.contains(r#"args "-c" "exec hx --vsplit""#));
         assert!(layout.contains(r#"args "-lc" "claude \"x\"""#));
-        assert!(worktree_layout(None, "claude").contains(r#"name="editor" focus=true"#));
-        assert!(!worktree_layout(None, "claude").contains("nvim"));
+        assert!(worktree_layout("editor", None, "claude").contains(r#"name="editor" focus=true"#));
+        assert!(!worktree_layout("editor", None, "claude").contains("nvim"));
+        assert!(worktree_layout("main", None, "claude").contains(r#"name="main" focus=true"#));
+        assert!(!session_layout().contains("tui"));
     }
 
     fn state() -> State {
@@ -553,7 +575,7 @@ mod tests {
         state.add_workspace("w").unwrap();
         state.add_repo("/r", None, "w").unwrap();
         state
-            .add_item("/r/a", "worktree", Some("/r"), "", "w")
+            .add_item("/r/a", "worktree", Some(Path::new("/r")), "", "w")
             .unwrap();
         state
     }
@@ -583,7 +605,7 @@ mod tests {
             .always("zellij --session w action list-panes", Some(PANES))
             .always("git -C /r/a", Some("feat"));
         let tab = zellij(&fake, Some("default"))
-            .open_tab(&state, "/r/a")
+            .open_tab(&state, Path::new("/r/a"))
             .unwrap();
         assert_eq!(
             tab,
@@ -610,7 +632,9 @@ mod tests {
             .always("zellij --session w action list-tabs", Some("[]"))
             .always("zellij --session w action new-tab", Some("4"))
             .always("zellij --session w action list-panes", Some(PANES));
-        zellij(&fake, None).open_tab(&state, "/r/a").unwrap();
+        zellij(&fake, None)
+            .open_tab(&state, Path::new("/r/a"))
+            .unwrap();
         assert!(
             fake.calls()
                 .contains(&"zellij --layout S attach --create-background w".into())
@@ -639,7 +663,7 @@ mod tests {
             })
             .unwrap();
         zellij(&fake, Some("default"))
-            .open_tab(&state, path)
+            .open_tab(&state, Path::new(path))
             .unwrap();
         assert!(fake.calls().contains(
             &"zellij --session default action switch-session w --pane-id 7 --layout S".into()
@@ -690,7 +714,7 @@ mod tests {
         let tabs = state.tabs().unwrap();
         assert_eq!(tabs.len(), 1);
         assert_eq!((tabs[0].tab_id, tabs[0].pane_id.as_str()), (3, "5"));
-        assert_eq!(tabs[0].path, alive.to_str().unwrap());
+        assert_eq!(tabs[0].path, alive);
     }
 
     #[test]
@@ -713,7 +737,7 @@ mod tests {
     fn closing_a_duplicate_renames_the_remaining_tab() {
         let state = state();
         state
-            .add_item("/r/b", "worktree", Some("/r"), "", "w")
+            .add_item("/r/b", "worktree", Some(Path::new("/r")), "", "w")
             .unwrap();
         for (path, id) in [("/r/a", 1), ("/r/b", 2)] {
             state
@@ -726,10 +750,10 @@ mod tests {
                 .unwrap();
         }
         state
-            .add_item("/r/c", "worktree", Some("/r"), "G-1", "w")
+            .add_item("/r/c", "worktree", Some(Path::new("/r")), "G-1", "w")
             .unwrap();
         state
-            .add_item("/r/d", "worktree", Some("/r"), "G-1", "w")
+            .add_item("/r/d", "worktree", Some(Path::new("/r")), "G-1", "w")
             .unwrap();
         for (path, id) in [("/r/c", 3), ("/r/d", 4)] {
             state
@@ -745,12 +769,12 @@ mod tests {
             .always("git -C /r/d", Some("d"))
             .always("git -C /r/c", Some("c"));
         let z = zellij(&fake, None);
-        z.sync_names(&state, "/r").unwrap();
+        z.sync_names(&state, Path::new("/r")).unwrap();
         assert!(
             fake.calls()
                 .contains(&"zellij --session w action rename-tab-by-id 4 G-1·r:d".into())
         );
-        z.close_tab(&state, "/r/c").unwrap();
+        z.close_tab(&state, Path::new("/r/c")).unwrap();
         assert_eq!(
             fake.calls().last().unwrap(),
             "zellij --session w action rename-tab-by-id 4 G-1·r"

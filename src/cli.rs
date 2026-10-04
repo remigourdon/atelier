@@ -6,12 +6,12 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::engine::{ArgValueCandidates, CompletionCandidate};
 use color_eyre::eyre::{Result, WrapErr, bail};
-use toml_edit::DocumentMut;
 
 use crate::config::Config;
-use crate::hooks;
+use crate::hooks::{self, Phase};
 use crate::process::{Runner, System};
 use crate::state::{self, State};
+use crate::worktrunk::{self, HooksConfig};
 use crate::zellij::{self, Layouts, Zellij};
 
 /// A lazygit-style TUI and CLI that organise git worktrees into zellij sessions.
@@ -69,10 +69,7 @@ enum Command {
     Shell(Shell),
     /// Run by worktrunk with the hook context on stdin.
     #[command(hide = true)]
-    Hook {
-        #[arg(value_parser = hooks::PHASES)]
-        phase: String,
-    },
+    Hook { phase: Phase },
 }
 
 #[derive(Subcommand)]
@@ -122,7 +119,7 @@ pub fn run() -> Result<()> {
         Command::Hooks(command) => run_hooks(command),
         Command::Hook { phase } => {
             // A hook must never abort worktrunk: report and succeed.
-            if let Err(err) = run_hook(&phase) {
+            if let Err(err) = run_hook(phase) {
                 report_hook_error(&err);
             }
             Ok(())
@@ -165,7 +162,7 @@ fn run_state(command: Command, config: &Config, state: &mut State) -> Result<()>
                 .unwrap_or(state.default_workspace())
                 .to_owned();
             state.add_repo(&root, alias.as_deref(), &workspace)?;
-            println!("registered {root} in {workspace}");
+            println!("registered {} in {workspace}", root.display());
             Ok(())
         }
         Command::Update {
@@ -179,25 +176,18 @@ fn run_state(command: Command, config: &Config, state: &mut State) -> Result<()>
             state.update_repo(&repo, alias.as_deref(), workspace.as_deref())
         }
         Command::Rm { repo } => {
-            let tabs = state.remove_repo(&repo)?;
-            for tab in tabs {
-                // Best effort: the session may be gone already.
-                let _ = System.output(
-                    "zellij",
-                    &[
-                        "--session",
-                        &tab.session,
-                        "action",
-                        "close-tab-by-id",
-                        &tab.tab_id.to_string(),
-                    ],
-                );
-            }
-            Ok(())
+            let path = state.repo(&repo)?.path;
+            zellij_for(config, &System)?.close_repo_tabs(state, &path)?;
+            state.remove_repo(&path)
         }
         Command::Ls => {
             for repo in state.repos()? {
-                println!("{}\t{}\t{}", repo.name(), repo.default_workspace, repo.path);
+                println!(
+                    "{}\t{}\t{}",
+                    repo.name(),
+                    repo.default_workspace,
+                    repo.path.display()
+                );
             }
             Ok(())
         }
@@ -210,7 +200,7 @@ fn run_state(command: Command, config: &Config, state: &mut State) -> Result<()>
 }
 
 /// The main worktree of the repository containing `path`.
-fn main_worktree(runner: &dyn Runner, path: &Path) -> Result<String> {
+fn main_worktree(runner: &dyn Runner, path: &Path) -> Result<PathBuf> {
     let path = path.to_string_lossy();
     let listing = runner
         .output("git", &["-C", &path, "worktree", "list", "--porcelain"])
@@ -222,10 +212,10 @@ fn main_worktree(runner: &dyn Runner, path: &Path) -> Result<String> {
     else {
         bail!("git worktree list printed nothing for {path}");
     };
-    Ok(std::fs::canonicalize(main)?.to_string_lossy().into_owned())
+    Ok(std::fs::canonicalize(main)?)
 }
 
-fn run_hook(phase: &str) -> Result<()> {
+fn run_hook(phase: Phase) -> Result<()> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     let payload: hooks::Payload =
@@ -265,59 +255,38 @@ fn report_hook_error(err: &color_eyre::Report) {
 }
 
 fn run_hooks(command: Hooks) -> Result<()> {
-    let path = hooks::worktrunk_config();
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(err) => return Err(err.into()),
-    };
-    let mut doc: DocumentMut = text
-        .parse()
-        .wrap_err_with(|| format!("parsing {}", path.display()))?;
+    let mut config = HooksConfig::load(&worktrunk::config_path())?;
     match command {
         Hooks::Status => {
-            for phase in hooks::PHASES {
-                let status = if hooks::installed(&doc, phase) {
+            for phase in Phase::ALL {
+                let status = if config.installed(phase) {
                     "installed"
                 } else {
                     "missing"
                 };
-                println!("{phase}\t{status}");
+                println!("{}\t{status}", phase.name());
             }
             return Ok(());
         }
-        Hooks::Install => hooks::install(&mut doc)?,
-        Hooks::Uninstall => hooks::uninstall(&mut doc),
+        Hooks::Install => config.install()?,
+        Hooks::Uninstall => config.uninstall(),
     }
-    if doc.to_string() == text {
-        return Ok(());
+    if config.save()? {
+        println!("updated {}", config.path().display());
     }
-    std::fs::create_dir_all(path.parent().unwrap())?;
-    std::fs::write(&path, doc.to_string())?;
-    println!("updated {}", path.display());
     Ok(())
 }
 
-/// Reads candidates without creating or migrating the database.
-fn registry<T>(query: &str, row: impl FnMut(&rusqlite::Row) -> rusqlite::Result<T>) -> Vec<T> {
-    let open = rusqlite::Connection::open_with_flags(
-        state::db_path(),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    );
-    let Ok(db) = open else { return Vec::new() };
-    let Ok(mut statement) = db.prepare(query) else {
-        return Vec::new();
-    };
-    statement
-        .query_map([], row)
-        .map(|rows| rows.flatten().collect())
-        .unwrap_or_default()
+/// The registry for completions, without creating or migrating the database.
+fn registry() -> Option<State> {
+    let config = Config::load().unwrap_or_default();
+    State::open_read_only(&state::db_path(), config.default_workspace()).ok()
 }
 
 fn complete_workspaces() -> Vec<CompletionCandidate> {
-    let mut names = registry("SELECT name FROM workspaces ORDER BY name", |row| {
-        row.get::<_, String>(0)
-    });
+    let mut names = registry()
+        .and_then(|state| state.workspaces().ok())
+        .unwrap_or_default();
     if names.is_empty() {
         names.push(
             Config::load()
@@ -330,13 +299,9 @@ fn complete_workspaces() -> Vec<CompletionCandidate> {
 }
 
 fn complete_repos() -> Vec<CompletionCandidate> {
-    let repos = registry("SELECT path, alias FROM repos ORDER BY path", |row| {
-        Ok(state::Repo {
-            path: row.get(0)?,
-            alias: row.get(1)?,
-            default_workspace: String::new(),
-        })
-    });
+    let repos = registry()
+        .and_then(|state| state.repos().ok())
+        .unwrap_or_default();
     repos
         .iter()
         .map(|repo| {
@@ -345,12 +310,9 @@ fn complete_repos() -> Vec<CompletionCandidate> {
                 .filter(|other| other.name() == repo.name())
                 .count()
                 == 1;
-            let value = if unique {
-                repo.name()
-            } else {
-                repo.path.clone()
-            };
-            CompletionCandidate::new(value).help(Some(repo.path.clone().into()))
+            let path = repo.path.to_string_lossy().into_owned();
+            let value = if unique { repo.name() } else { path.clone() };
+            CompletionCandidate::new(value).help(Some(path.into()))
         })
         .collect()
 }
@@ -369,7 +331,7 @@ mod tests {
         );
         let fake = Fake::default().always("git -C .", Some(&listing));
         let main = main_worktree(&fake, Path::new(".")).unwrap();
-        assert_eq!(main, dir.path().canonicalize().unwrap().to_string_lossy());
+        assert_eq!(main, dir.path().canonicalize().unwrap());
         assert!(main_worktree(&Fake::default().always("git", None), Path::new(".")).is_err());
     }
 

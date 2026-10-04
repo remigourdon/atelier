@@ -1,6 +1,7 @@
 //! Live smoke test against a real zellij: a client attached through `script` (headless sessions
 //! don't spawn new tabs' panes), open a tab through the pre-start hook, find its anchor pane,
-//! and close it through post-remove. Skipped when zellij or script is not installed.
+//! and close it through post-remove. Needs zellij and util-linux `script`, so it only runs on
+//! request: `cargo test --test zellij_smoke -- --ignored`.
 
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
@@ -53,12 +54,10 @@ fn action(session: &str, args: &[&str]) -> Option<String> {
 }
 
 #[test]
-#[cfg(target_os = "linux")]
+#[ignore = "needs a live zellij"]
 fn open_find_anchor_and_close_a_tab() {
-    if !installed("zellij") || !Command::new("script").arg("--version").output().is_ok() {
-        eprintln!("skipping: zellij or script not installed");
-        return;
-    }
+    assert!(installed("zellij"), "zellij is not installed");
+    assert!(installed("script"), "util-linux script is not installed");
     let home = tempfile::tempdir().unwrap();
     let envs = [
         ("XDG_CONFIG_HOME", home.path().join("config")),

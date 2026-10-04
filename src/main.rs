@@ -4,6 +4,7 @@ mod hooks;
 mod process;
 mod shell;
 mod state;
+mod worktrunk;
 mod zellij;
 
 fn main() -> color_eyre::Result<()> {

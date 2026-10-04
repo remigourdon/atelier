@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{Result, bail, eyre};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, Transaction, params};
 
 /// Ordered and append-only: each runs once, tracked by `PRAGMA user_version`.
 /// Migration 1 is the baseline schema, a no-op on databases that already have it.
@@ -41,7 +41,7 @@ const MIGRATIONS: &[&str] = &["
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Repo {
-    pub path: String,
+    pub path: PathBuf,
     pub alias: Option<String>,
     pub default_workspace: String,
 }
@@ -55,15 +55,15 @@ impl Repo {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Item {
-    pub path: String,
-    pub repo: Option<String>,
+    pub path: PathBuf,
+    pub repo: Option<PathBuf>,
     pub group: String,
     pub workspace: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tab {
-    pub path: String,
+    pub path: PathBuf,
     pub session: String,
     pub tab_id: u64,
     pub pane_id: String,
@@ -78,11 +78,21 @@ pub fn db_path() -> PathBuf {
     crate::config::state_home().join("atelier/atelier.db")
 }
 
-pub fn dir_name(path: &str) -> String {
-    Path::new(path)
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_owned())
+/// A path's last component, or the whole path when it has none.
+pub fn dir_name(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Paths are stored as text.
+fn text(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn path_column(row: &Row, index: usize) -> rusqlite::Result<PathBuf> {
+    row.get::<_, String>(index).map(PathBuf::from)
 }
 
 impl State {
@@ -91,6 +101,14 @@ impl State {
             std::fs::create_dir_all(parent)?;
         }
         Self::from_connection(Connection::open(path)?, default_workspace)
+    }
+
+    /// Opens an existing database without creating or migrating it, as completions need.
+    pub fn open_read_only(path: &Path, default_workspace: &str) -> Result<Self> {
+        Ok(Self {
+            db: Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?,
+            default_workspace: default_workspace.to_owned(),
+        })
     }
 
     pub fn from_connection(mut db: Connection, default_workspace: &str) -> Result<Self> {
@@ -175,7 +193,7 @@ impl State {
         )?;
         let repos = statement.query_map([], |row| {
             Ok(Repo {
-                path: row.get(0)?,
+                path: path_column(row, 0)?,
                 alias: row.get(1)?,
                 default_workspace: row.get(2)?,
             })
@@ -183,7 +201,8 @@ impl State {
         Ok(repos.collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn repo_by_path(&self, path: &str) -> Result<Option<Repo>> {
+    pub fn repo_by_path(&self, path: impl AsRef<Path>) -> Result<Option<Repo>> {
+        let path = path.as_ref();
         Ok(self.repos()?.into_iter().find(|repo| repo.path == path))
     }
 
@@ -193,7 +212,7 @@ impl State {
             .repos()?
             .into_iter()
             .filter(|repo| {
-                repo.path == name
+                repo.path == Path::new(name)
                     || repo.alias.as_deref() == Some(name)
                     || dir_name(&repo.path) == name
             })
@@ -205,7 +224,7 @@ impl State {
         }
     }
 
-    fn check_alias(&self, alias: Option<&str>, path: &str) -> Result<()> {
+    fn check_alias(&self, alias: Option<&str>, path: &Path) -> Result<()> {
         if let Some(alias) = alias
             && self
                 .repos()?
@@ -217,15 +236,21 @@ impl State {
         Ok(())
     }
 
-    pub fn add_repo(&self, path: &str, alias: Option<&str>, workspace: &str) -> Result<()> {
+    pub fn add_repo(
+        &self,
+        path: impl AsRef<Path>,
+        alias: Option<&str>,
+        workspace: &str,
+    ) -> Result<()> {
+        let path = path.as_ref();
         self.require_workspace(workspace)?;
         if self.repo_by_path(path)?.is_some() {
-            bail!("repo already registered: {path}");
+            bail!("repo already registered: {}", path.display());
         }
         self.check_alias(alias, path)?;
         self.db.execute(
             "INSERT INTO repos(path, alias, default_workspace) VALUES (?, ?, ?)",
-            params![path, alias, workspace],
+            params![text(path), alias, workspace],
         )?;
         Ok(())
     }
@@ -249,32 +274,22 @@ impl State {
         self.db.execute(
             "UPDATE repos SET alias = ?, default_workspace = ?, last_used = CURRENT_TIMESTAMP \
              WHERE path = ?",
-            params![alias, workspace, repo.path],
+            params![alias, workspace, text(&repo.path)],
         )?;
         Ok(())
     }
 
-    pub fn touch_repo(&self, path: &str) -> Result<()> {
+    pub fn touch_repo(&self, path: impl AsRef<Path>) -> Result<()> {
         self.db.execute(
             "UPDATE repos SET last_used = CURRENT_TIMESTAMP WHERE path = ?",
-            [path],
+            [text(path.as_ref())],
         )?;
         Ok(())
     }
 
-    /// Forgets a repo with its items and tabs. Returns the tabs that were recorded.
-    pub fn remove_repo(&mut self, name: &str) -> Result<Vec<Tab>> {
-        let path = self.repo(name)?.path;
-        let items: Vec<String> = self
-            .repo_items(&path)?
-            .into_iter()
-            .map(|item| item.path)
-            .collect();
-        let tabs: Vec<Tab> = self
-            .tabs()?
-            .into_iter()
-            .filter(|tab| items.contains(&tab.path))
-            .collect();
+    /// Forgets a repo with its items and tabs.
+    pub fn remove_repo(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        let path = text(path.as_ref());
         let tx = self.db.transaction()?;
         tx.execute(
             "DELETE FROM tabs WHERE path IN (SELECT path FROM items WHERE repo = ?)",
@@ -283,15 +298,15 @@ impl State {
         tx.execute("DELETE FROM items WHERE repo = ?", [&path])?;
         tx.execute("DELETE FROM repos WHERE path = ?", [&path])?;
         tx.commit()?;
-        Ok(tabs)
+        Ok(())
     }
 
     /// Records an item unless it already exists. Returns whether it was new.
     pub fn add_item(
         &self,
-        path: &str,
+        path: impl AsRef<Path>,
         kind: &str,
-        repo: Option<&str>,
+        repo: Option<&Path>,
         group: &str,
         workspace: &str,
     ) -> Result<bool> {
@@ -299,21 +314,21 @@ impl State {
         let added = self.db.execute(
             "INSERT OR IGNORE INTO items(path, kind, repo, group_key, workspace) \
              VALUES (?, ?, ?, ?, ?)",
-            params![path, kind, repo, group, workspace],
+            params![text(path.as_ref()), kind, repo.map(text), group, workspace],
         )?;
         Ok(added > 0)
     }
 
-    pub fn item(&self, path: &str) -> Result<Option<Item>> {
+    pub fn item(&self, path: impl AsRef<Path>) -> Result<Option<Item>> {
         Ok(self
             .db
             .query_row(
                 "SELECT path, repo, group_key, workspace FROM items WHERE path = ?",
-                [path],
+                [text(path.as_ref())],
                 |row| {
                     Ok(Item {
-                        path: row.get(0)?,
-                        repo: row.get(1)?,
+                        path: path_column(row, 0)?,
+                        repo: row.get::<_, Option<String>>(1)?.map(PathBuf::from),
                         group: row.get(2)?,
                         workspace: row.get(3)?,
                     })
@@ -322,25 +337,28 @@ impl State {
             .optional()?)
     }
 
-    pub fn require_item(&self, path: &str) -> Result<Item> {
+    pub fn require_item(&self, path: impl AsRef<Path>) -> Result<Item> {
+        let path = path.as_ref();
         self.item(path)?
-            .ok_or_else(|| eyre!("unknown item: {path}"))
+            .ok_or_else(|| eyre!("unknown item: {}", path.display()))
     }
 
-    pub fn repo_items(&self, repo: &str) -> Result<Vec<Item>> {
+    pub fn repo_items(&self, repo: impl AsRef<Path>) -> Result<Vec<Item>> {
         let mut statement = self
             .db
             .prepare("SELECT path FROM items WHERE repo = ? ORDER BY path")?;
-        let paths: Vec<String> = statement
-            .query_map([repo], |row| row.get(0))?
+        let paths: Vec<PathBuf> = statement
+            .query_map([text(repo.as_ref())], |row| path_column(row, 0))?
             .collect::<rusqlite::Result<_>>()?;
         paths.iter().map(|path| self.require_item(path)).collect()
     }
 
-    pub fn remove_item(&self, path: &str) -> Result<()> {
-        self.db.execute("DELETE FROM tabs WHERE path = ?", [path])?;
+    pub fn remove_item(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = text(path.as_ref());
         self.db
-            .execute("DELETE FROM items WHERE path = ?", [path])?;
+            .execute("DELETE FROM tabs WHERE path = ?", [&path])?;
+        self.db
+            .execute("DELETE FROM items WHERE path = ?", [&path])?;
         Ok(())
     }
 
@@ -350,7 +368,7 @@ impl State {
             .prepare("SELECT path, session, tab_id, pane_id FROM tabs ORDER BY path")?;
         let tabs = statement.query_map([], |row| {
             Ok(Tab {
-                path: row.get(0)?,
+                path: path_column(row, 0)?,
                 session: row.get(1)?,
                 tab_id: row.get::<_, i64>(2)? as u64,
                 pane_id: row.get(3)?,
@@ -359,20 +377,22 @@ impl State {
         Ok(tabs.collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn tab(&self, path: &str) -> Result<Option<Tab>> {
+    pub fn tab(&self, path: impl AsRef<Path>) -> Result<Option<Tab>> {
+        let path = path.as_ref();
         Ok(self.tabs()?.into_iter().find(|tab| tab.path == path))
     }
 
     pub fn set_tab(&self, tab: &Tab) -> Result<()> {
         self.db.execute(
             "INSERT OR REPLACE INTO tabs(path, session, tab_id, pane_id) VALUES (?, ?, ?, ?)",
-            params![tab.path, tab.session, tab.tab_id as i64, tab.pane_id],
+            params![text(&tab.path), tab.session, tab.tab_id as i64, tab.pane_id],
         )?;
         Ok(())
     }
 
-    pub fn remove_tab(&self, path: &str) -> Result<()> {
-        self.db.execute("DELETE FROM tabs WHERE path = ?", [path])?;
+    pub fn remove_tab(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.db
+            .execute("DELETE FROM tabs WHERE path = ?", [text(path.as_ref())])?;
         Ok(())
     }
 }
@@ -493,7 +513,7 @@ mod tests {
         );
         state.update_repo("r", None, Some("default")).unwrap();
         state
-            .add_item("/r/x", "worktree", Some("/r"), "", "w")
+            .add_item("/r/x", "worktree", Some(Path::new("/r")), "", "w")
             .unwrap();
         assert!(
             state
@@ -509,8 +529,8 @@ mod tests {
         let state = fresh();
         state.add_repo("/a/proj", Some("p"), "default").unwrap();
         state.add_repo("/b/proj", None, "default").unwrap();
-        assert_eq!(state.repo("p").unwrap().path, "/a/proj");
-        assert_eq!(state.repo("/b/proj").unwrap().path, "/b/proj");
+        assert_eq!(state.repo("p").unwrap().path, Path::new("/a/proj"));
+        assert_eq!(state.repo("/b/proj").unwrap().path, Path::new("/b/proj"));
         assert!(
             state
                 .repo("proj")
@@ -528,7 +548,7 @@ mod tests {
         let mut state = fresh();
         state.add_repo("/r", None, "default").unwrap();
         state
-            .add_item("/r", "worktree", Some("/r"), "", "default")
+            .add_item("/r", "worktree", Some(Path::new("/r")), "", "default")
             .unwrap();
         let tab = Tab {
             path: "/r".into(),
@@ -537,9 +557,25 @@ mod tests {
             pane_id: "4".into(),
         };
         state.set_tab(&tab).unwrap();
-        assert_eq!(state.remove_repo("r").unwrap(), [tab]);
+        state.remove_repo("/r").unwrap();
+        assert!(state.repo_by_path("/r").unwrap().is_none());
         assert!(state.item("/r").unwrap().is_none());
         assert!(state.tabs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn read_only_open_neither_creates_nor_migrates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("atelier.db");
+        assert!(State::open_read_only(&path, "default").is_err());
+        assert!(!path.exists());
+        State::open(&path, "default")
+            .unwrap()
+            .add_workspace("w")
+            .unwrap();
+        let state = State::open_read_only(&path, "default").unwrap();
+        assert_eq!(state.workspaces().unwrap(), ["default", "w"]);
+        assert!(state.add_workspace("x").is_err());
     }
 
     #[test]

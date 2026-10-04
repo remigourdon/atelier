@@ -1,5 +1,6 @@
 //! External commands, behind a trait so orchestration can be tested without them.
 
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use color_eyre::eyre::{Result, bail};
@@ -40,11 +41,12 @@ impl Runner for System {
 }
 
 /// The branch checked out at `path`, if any.
-pub fn branch(runner: &dyn Runner, path: &str) -> Option<String> {
+pub fn branch(runner: &dyn Runner, path: &Path) -> Option<String> {
+    let path = path.to_string_lossy();
     runner
         .output(
             "git",
-            &["-C", path, "symbolic-ref", "--quiet", "--short", "HEAD"],
+            &["-C", &path, "symbolic-ref", "--quiet", "--short", "HEAD"],
         )
         .ok()
         .filter(|branch| !branch.is_empty())
