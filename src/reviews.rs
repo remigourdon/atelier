@@ -52,7 +52,7 @@ impl Provider {
         }
     }
 
-    /// How the forge writes a review's number: `#12` or `!12`.
+    /// How the provider writes a review's number: `#12` or `!12`.
     pub fn reference(self, number: u64) -> String {
         match self {
             Provider::GitHub => format!("#{number}"),
@@ -274,16 +274,16 @@ pub fn parse_glab(json: &str, role: Role) -> Result<Vec<Review>> {
         .collect())
 }
 
-/// My reviews in `role` from the cache while fresh (unless `force`), else from the forge.
+/// My reviews in `role` from the cache while fresh (unless `force`), else from the provider.
 /// A failed fetch falls back to the cache at any age and also returns the error.
 pub fn fetch(
     state: &State,
-    forge: &dyn Reviews,
+    api: &dyn Reviews,
     role: Role,
     force: bool,
 ) -> (Vec<Review>, Option<Report>) {
-    let source = forge.provider().cli();
-    let key = format!("{} {}", forge.host(), role.key());
+    let source = api.provider().cli();
+    let key = format!("{} {}", api.host(), role.key());
     let cached = |max_age| -> Option<Vec<Review>> {
         let json = state.cached(source, &key, max_age).ok()??;
         serde_json::from_str(&json).ok()
@@ -291,7 +291,7 @@ pub fn fetch(
     if !force && let Some(reviews) = cached(Some(CACHE_SECS)) {
         return (reviews, None);
     }
-    let fetched = forge.reviews(role).and_then(|reviews| {
+    let fetched = api.reviews(role).and_then(|reviews| {
         state.store_cache(source, &key, &serde_json::to_string(&reviews)?)?;
         Ok(reviews)
     });
@@ -299,12 +299,12 @@ pub fn fetch(
         Ok(reviews) => (reviews, None),
         Err(err) => (
             cached(None).unwrap_or_default(),
-            Some(err.wrap_err(format!("{source} reviews on {}", forge.host()))),
+            Some(err.wrap_err(format!("{source} reviews on {}", api.host()))),
         ),
     }
 }
 
-/// The subset of each forge's JSON that atelier reads.
+/// The subset of each provider's JSON that atelier reads.
 mod raw {
     use super::Deserialize;
 
@@ -489,7 +489,7 @@ mod tests {
         ));
     }
 
-    /// A forge that counts its calls and fails when told to.
+    /// Reviews that count their calls and fail when told to.
     struct Counting {
         calls: Cell<usize>,
         fail: bool,
@@ -520,18 +520,18 @@ mod tests {
     #[test]
     fn fetch_serves_fresh_cache_and_refetches_when_forced() {
         let state = state();
-        let forge = Counting {
+        let api = Counting {
             calls: Cell::new(0),
             fail: false,
         };
-        let (reviews, error) = fetch(&state, &forge, Role::Mine, false);
+        let (reviews, error) = fetch(&state, &api, Role::Mine, false);
         assert_eq!((reviews.len(), error.is_none()), (3, true));
-        fetch(&state, &forge, Role::Mine, false);
-        assert_eq!(forge.calls.get(), 1, "served from the cache");
-        fetch(&state, &forge, Role::ToReview, false);
-        assert_eq!(forge.calls.get(), 2, "each role has its own entry");
-        fetch(&state, &forge, Role::Mine, true);
-        assert_eq!(forge.calls.get(), 3);
+        fetch(&state, &api, Role::Mine, false);
+        assert_eq!(api.calls.get(), 1, "served from the cache");
+        fetch(&state, &api, Role::ToReview, false);
+        assert_eq!(api.calls.get(), 2, "each role has its own entry");
+        fetch(&state, &api, Role::Mine, true);
+        assert_eq!(api.calls.get(), 3);
     }
 
     #[test]

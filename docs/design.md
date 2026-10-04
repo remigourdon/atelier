@@ -5,14 +5,14 @@ Goals: a fast lazygit-style TUI and CLI over worktrunk and zellij, and no assump
 ## Scope
 
 - CLI: `ws add|rm|ls`, `add`, `update`, `rm`, `ls`, `open`, `carnet new|add`, `tui`, `hooks install|uninstall|status`, `shell init fish`, hidden `hook <phase>`.
-- External tools stay subprocesses: `wt`, `zellij`, `git`, `gh`, `glab`, `acli`. Forge and tracker access sit behind traits so native APIs can come later.
+- External tools stay subprocesses: `wt`, `zellij`, `git`, `gh`, `glab`, `acli`. Review and issue access sit behind traits so native APIs can come later.
 
 ## Architecture
 
 Single crate. `src/tui` depends on core modules, never the reverse.
 
 ```
-src/  cli  config  state  sync  hooks  shell  process  zellij  worktrunk  forge  tracker  tui/{app,update,view,widgets,jobs}
+src/  cli  config  state  sync  hooks  shell  process  zellij  worktrunk  reviews  issues  tui/{app,update,view,widgets,jobs}
 ```
 
 - **Processes**: every external command goes through the `process::Runner` trait, so orchestration is tested against a fake that records calls.

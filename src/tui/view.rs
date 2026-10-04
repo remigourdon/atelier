@@ -231,7 +231,7 @@ fn render_panel(frame: &mut Frame, model: &Model, palette: &Palette, panel: Pane
     let rows = rows(model, palette, list);
     if rows.is_empty() {
         let loading = match list.role() {
-            Some(_) => (model.loading.keys()).any(|source| matches!(source, Source::Forge(_))),
+            Some(_) => (model.loading.keys()).any(|source| matches!(source, Source::Reviews(_))),
             None => !model.loaded,
         };
         let empty = if loading {

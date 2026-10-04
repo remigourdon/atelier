@@ -15,8 +15,8 @@ use super::app::{
     Work, lookup, popup_lookup,
 };
 use super::view::{areas, main_len, offset};
-use crate::forge::{self, Provider};
 use crate::process::Logged;
+use crate::reviews::{self, Provider};
 
 pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
     match action {
@@ -87,7 +87,7 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
             reviews,
             log,
         } => {
-            done(model, Source::Forge(provider));
+            done(model, Source::Reviews(provider));
             model.push_log(log);
             match reviews {
                 Ok(reviews) => {
@@ -159,13 +159,13 @@ fn fetch_reviews(model: &mut Model) -> Vec<Effect> {
     for provider in Provider::ALL {
         let mut hosts: Vec<String> = (model.snapshot.forges.values())
             .filter(|forge| Provider::from_name(&forge.provider) == Some(provider))
-            .filter_map(|forge| forge::host(&forge.url).map(Into::into))
+            .filter_map(|forge| reviews::host(&forge.url).map(Into::into))
             .collect();
         hosts.sort();
         hosts.dedup();
         if hosts.is_empty() {
             model.reviews.retain(|review| review.provider != provider);
-        } else if model.loading.contains_key(&Source::Forge(provider)) {
+        } else if model.loading.contains_key(&Source::Reviews(provider)) {
             busy = true;
         } else {
             effects.push(run(
@@ -1044,7 +1044,7 @@ pub mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::forge::{Review, Role};
+    use crate::reviews::{Review, Role};
     use crate::state::Repo;
     use crate::tui::app::{Snapshot, Work};
     use crate::worktrunk::{Forge, Worktree};

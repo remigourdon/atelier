@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use tui_input::Input;
 
-use crate::forge::{self, Provider, Review, Role};
 use crate::process::Logged;
+use crate::reviews::{self, Provider, Review, Role};
 use crate::state::Repo;
 use crate::worktrunk::{Forge, Worktree};
 
@@ -221,7 +221,7 @@ pub enum ReviewsDue {
 pub enum Source {
     Wt,
     Git,
-    Forge(Provider),
+    Reviews(Provider),
     Run,
 }
 
@@ -230,7 +230,7 @@ impl Source {
         match self {
             Source::Wt => "wt",
             Source::Git => "git",
-            Source::Forge(provider) => provider.cli(),
+            Source::Reviews(provider) => provider.cli(),
             Source::Run => "run",
         }
     }
@@ -242,7 +242,7 @@ impl Job {
         match self {
             Job::Refresh { .. } => Source::Wt,
             Job::Commits(_) => Source::Git,
-            Job::Reviews { provider, .. } => Source::Forge(*provider),
+            Job::Reviews { provider, .. } => Source::Reviews(*provider),
             _ => Source::Run,
         }
     }
@@ -701,7 +701,7 @@ impl Model {
     /// The registered repo a review belongs to, by its forge web page.
     pub fn review_repo(&self, review: &Review) -> Option<&Repo> {
         let path = self.snapshot.forges.iter().find_map(|(path, forge)| {
-            forge::same_project(&forge.url, &review.project_url).then_some(path)
+            reviews::same_project(&forge.url, &review.project_url).then_some(path)
         })?;
         self.snapshot.repos.iter().find(|repo| repo.path == *path)
     }

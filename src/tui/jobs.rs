@@ -8,8 +8,8 @@ use regex::Regex;
 
 use super::app::{Action, Job, Removal, Snapshot, Work};
 use crate::config::{Config, group_from_name};
-use crate::forge::{self, Provider, Review, Role};
 use crate::process::{Logged, Recorder, Runner, System};
+use crate::reviews::{self, Provider, Review, Role};
 use crate::state::{self, State};
 use crate::zellij::{self, Layouts, Zellij};
 use crate::{hooks, sync, worktrunk};
@@ -125,9 +125,9 @@ fn reviews(
     let mut reviews = Vec::new();
     let mut log = Vec::new();
     for host in hosts {
-        let forge = provider.reviews(recorder, host.clone());
+        let api = provider.reviews(recorder, host.clone());
         for role in Role::ALL {
-            let (found, error) = forge::fetch(state, forge.as_ref(), role, force);
+            let (found, error) = reviews::fetch(state, api.as_ref(), role, force);
             reviews.extend(found);
             let failed: Vec<Logged> = (recorder.take().into_iter())
                 .filter(|entry| entry.error.is_some())
