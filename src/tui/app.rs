@@ -140,6 +140,8 @@ pub enum Job {
         group: String,
     },
     Remove(Vec<Removal>),
+    /// Closes carnets and their tabs.
+    CloseCarnet(Vec<PathBuf>),
     /// Creates a carnet and opens its tab.
     NewCarnet {
         name: String,
@@ -164,11 +166,8 @@ pub enum Job {
     },
     Forget(PathBuf),
     AddWorkspace(String),
-    /// Removes a workspace, forgetting the carnets its confirmation listed.
-    RemoveWorkspace {
-        name: String,
-        carnets: Vec<PathBuf>,
-    },
+    /// Removes a workspace; its carnets move to the default workspace.
+    RemoveWorkspace(String),
     SwitchWorkspace(String),
     Browse(String),
     /// Lists my reviews on each host, from the cache unless `force`.
@@ -377,6 +376,7 @@ pub enum Cmd {
     Remove,
     Close,
     Pull,
+    CloseCarnet,
     Browse,
     CopyMenu,
     CopyPath,
@@ -474,6 +474,7 @@ pub const KEYMAP: &[Binding] = &[
     Binding { keys: &[ch('m')], label: "m", cmd: Cmd::Move, help: "move to workspace · set repo workspace", hint: &[Kind::Repos, Kind::Work], on: On::Lists(&[Kind::Repos, Kind::Work]) },
     Binding { keys: &[ch('d')], label: "d", cmd: Cmd::Remove, help: "remove", hint: LOCAL, on: On::Lists(LOCAL) },
     Binding { keys: &[ch('x')], label: "x", cmd: Cmd::Close, help: "close tab", hint: WORK, on: On::Lists(WORK) },
+    Binding { keys: &[ch('c')], label: "c", cmd: Cmd::CloseCarnet, help: "close carnet", hint: NONE, on: On::Lists(WORK) },
     Binding { keys: &[ch('p')], label: "p", cmd: Cmd::Pull, help: "pull (git pull --ff-only)", hint: WORK, on: On::Lists(WORK) },
     Binding { keys: &[ch('o')], label: "o", cmd: Cmd::Browse, help: "browse (open in the browser)", hint: REMOTE, on: On::Lists(&[Kind::Repos, Kind::Work, Kind::Reviews, Kind::Issues]) },
     Binding { keys: &[ch('y')], label: "y", cmd: Cmd::CopyMenu, help: "copy path, branch or URL", hint: NONE, on: On::Lists(ALL) },
@@ -826,10 +827,14 @@ impl Model {
     }
 
     /// An issue's linked work: the worktrees in its group, which is its key.
+    /// An issue's linked work: the worktrees in its group and the carnets, closed ones too,
+    /// that list its key among their tickets.
     pub fn issue_work(&self, issue: &Issue) -> Vec<&Work> {
-        (self.snapshot.work.iter())
-            .filter(|work| work.group == issue.key)
-            .collect()
+        let worktrees =
+            (self.snapshot.work.iter()).filter(|work| !work.is_carnet() && work.group == issue.key);
+        let carnets =
+            (self.snapshot.carnets.iter()).filter(|carnet| carnet.tickets().contains(&issue.key));
+        worktrees.chain(carnets).collect()
     }
 
     /// The workspace whose work panel 2 shows: the one selected in panel 1.
@@ -902,9 +907,13 @@ impl Model {
                             ..
                         },
                     ) => (x, !tx.main, a.branch()).cmp(&(y, !ty.main, b.branch())),
-                    (WorkKind::Worktree { .. }, WorkKind::Carnet) => std::cmp::Ordering::Less,
-                    (WorkKind::Carnet, WorkKind::Worktree { .. }) => std::cmp::Ordering::Greater,
-                    (WorkKind::Carnet, WorkKind::Carnet) => {
+                    (WorkKind::Worktree { .. }, WorkKind::Carnet { .. }) => {
+                        std::cmp::Ordering::Less
+                    }
+                    (WorkKind::Carnet { .. }, WorkKind::Worktree { .. }) => {
+                        std::cmp::Ordering::Greater
+                    }
+                    (WorkKind::Carnet { .. }, WorkKind::Carnet { .. }) => {
                         b.path.file_name().cmp(&a.path.file_name())
                     }
                 })

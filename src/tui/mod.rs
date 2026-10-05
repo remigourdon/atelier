@@ -248,7 +248,8 @@ mod tests {
         for key in [key('G'), enter, key('j')] {
             update(&mut model, Action::Key(key));
         }
-        let readme = "# 2026-10-02-ideas\n\nWhat I found **so far**.\n";
+        let readme =
+            "+++\nsummary = \"hidden\"\n+++\n# 2026-10-02-ideas\n\nWhat I found **so far**.\n";
         update(
             &mut model,
             Action::Readme("/data/2026-10-02-ideas".into(), Some(readme.into())),

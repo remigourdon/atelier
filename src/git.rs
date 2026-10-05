@@ -49,6 +49,19 @@ pub fn init(runner: &dyn Runner, path: &Path) -> Result<()> {
         .map(drop)
 }
 
+pub fn add(runner: &dyn Runner, path: &Path, file: &str) -> Result<()> {
+    let path = path.to_string_lossy();
+    runner.output("git", &["-C", &path, "add", file]).map(drop)
+}
+
+/// Commits only `file`, so nothing else staged is swept in.
+pub fn commit(runner: &dyn Runner, path: &Path, message: &str, file: &str) -> Result<()> {
+    let path = path.to_string_lossy();
+    runner
+        .output("git", &["-C", &path, "commit", "-m", message, "--", file])
+        .map(drop)
+}
+
 /// The main worktree of the repository containing `path`.
 pub fn main_worktree(runner: &dyn Runner, path: &Path) -> Result<PathBuf> {
     let path = path.to_string_lossy();

@@ -1,19 +1,18 @@
 ---
 source: src/tui/mod.rs
-assertion_line: 257
 expression: "render(&model, 120, 30)"
 ---
 "╭[1] Workspaces │ Repos────────────────╮╭ Main ────────────────────────────────────────────────────────────────────────╮"
 "│default (here) 1 open                 ││Carnet     2026-10-02-ideas                                                   │"
 "│side                                  ││Path       /data/2026-10-02-ideas                                             │"
 "│                                      ││Workspace  default                                                            │"
-"│                                      ││Group                                                                         │"
-"╰──────────────────────────────────────╯│Tab        closed                                                             │"
-"╭[2] Work · default────────────────────╮│                                                                              │"
-"│▾ ABC-1 3 · 1 open                    ││# 2026-10-02-ideas                                                            │"
-"│  ● api:ABC-1-login !                 ││                                                                              │"
-"│  ○ web:ABC-1-form                    ││What I found so far.                                                          │"
-"│  ○ 2026-10-01-ABC-1-logs             ││                                                                              │"
+"│                                      ││Tickets                                                                       │"
+"╰──────────────────────────────────────╯│Summary                                                                       │"
+"╭[2] Work · default────────────────────╮│Tab        closed                                                             │"
+"│▾ ABC-1 3 · 1 open                    ││                                                                              │"
+"│  ● api:ABC-1-login !                 ││# 2026-10-02-ideas                                                            │"
+"│  ○ web:ABC-1-form                    ││                                                                              │"
+"│  ○ 2026-10-01-ABC-1-logs             ││What I found so far.                                                          │"
 "│○ api:main ↓3                         ││                                                                              │"
 "│▾ Carnets 2 · 0 open                  ││                                                                              │"
 "│  ○ 2026-10-02-ideas                  ││                                                                              │"

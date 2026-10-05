@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use color_eyre::eyre::{Result, eyre};
+use color_eyre::eyre::{Result, bail, eyre};
 use regex::Regex;
 
 use crate::config::{Config, group_from_name};
@@ -23,9 +23,10 @@ pub struct Snapshot {
     /// The current session first.
     pub workspaces: Vec<String>,
     pub repos: Vec<Repo>,
+    /// Worktrees and open carnets.
     pub work: Vec<Work>,
-    /// Every recorded carnet, shown or not, so removing a workspace can name the ones it owns.
-    pub all_carnets: Vec<state::Item>,
+    /// Every carnet, closed ones included, newest first; none while carnets are disabled.
+    pub carnets: Vec<Work>,
     /// Each repo's forge web page, by repo path.
     pub forges: HashMap<PathBuf, Forge>,
 }
@@ -40,7 +41,7 @@ pub struct Work {
     pub kind: WorkKind,
 }
 
-/// What only a worktree has; a carnet is a folder and its README.
+/// What only a worktree or only a carnet has.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorkKind {
     Worktree {
@@ -48,7 +49,14 @@ pub enum WorkKind {
         repo_name: String,
         tree: Box<Worktree>,
     },
-    Carnet,
+    /// What its README's front matter records.
+    Carnet {
+        tickets: Vec<String>,
+        closed: bool,
+        summary: String,
+        /// The README as the snapshot read it, so a stale loaded one can be told apart.
+        readme: Option<String>,
+    },
 }
 
 impl Work {
@@ -57,7 +65,20 @@ impl Work {
     }
 
     pub fn is_carnet(&self) -> bool {
-        self.kind == WorkKind::Carnet
+        matches!(self.kind, WorkKind::Carnet { .. })
+    }
+
+    /// A closed carnet; a worktree is never closed.
+    pub fn closed(&self) -> bool {
+        matches!(self.kind, WorkKind::Carnet { closed: true, .. })
+    }
+
+    /// A carnet's tickets; a worktree has none.
+    pub fn tickets(&self) -> &[String] {
+        match &self.kind {
+            WorkKind::Carnet { tickets, .. } => tickets,
+            WorkKind::Worktree { .. } => &[],
+        }
     }
 
     /// An ungrouped carnet, listed in the `Carnets` group.
@@ -69,7 +90,7 @@ impl Work {
     pub fn repo(&self) -> Option<&PathBuf> {
         match &self.kind {
             WorkKind::Worktree { repo, .. } => Some(repo),
-            WorkKind::Carnet => None,
+            WorkKind::Carnet { .. } => None,
         }
     }
 
@@ -77,7 +98,7 @@ impl Work {
     pub fn tree(&self) -> Option<&Worktree> {
         match &self.kind {
             WorkKind::Worktree { tree, .. } => Some(tree),
-            WorkKind::Carnet => None,
+            WorkKind::Carnet { .. } => None,
         }
     }
 
@@ -86,7 +107,7 @@ impl Work {
     pub fn tree_mut(&mut self) -> &mut Worktree {
         match &mut self.kind {
             WorkKind::Worktree { tree, .. } => tree,
-            WorkKind::Carnet => panic!("a carnet has no worktree"),
+            WorkKind::Carnet { .. } => panic!("a carnet has no worktree"),
         }
     }
 
@@ -96,47 +117,41 @@ impl Work {
             .unwrap_or_else(|| state::dir_name(&self.path))
     }
 
-    /// A worktree that is not its repo's main one, so it can be removed.
+    /// A worktree that is not its repo's main one, so it can be removed. A carnet is closed
+    /// instead.
     pub fn removable(&self) -> bool {
-        !self.tree().is_some_and(|tree| tree.main)
+        self.tree().is_some_and(|tree| !tree.main)
     }
 
     /// `repo:branch`, or a carnet's folder name.
     pub fn title(&self) -> String {
         match &self.kind {
             WorkKind::Worktree { repo_name, .. } => format!("{repo_name}:{}", self.branch()),
-            WorkKind::Carnet => state::dir_name(&self.path),
+            WorkKind::Carnet { .. } => state::dir_name(&self.path),
         }
     }
 }
 
-/// A removal: a worktree, removed through worktrunk, or a carnet, only forgotten.
+/// A worktree to remove through worktrunk, and whether it has changes that will be discarded.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Removal {
     pub path: PathBuf,
-    pub worktree: Option<RemovedWorktree>,
-}
-
-/// A worktree to remove, and whether it has changes that will be discarded.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RemovedWorktree {
     pub repo: PathBuf,
     pub branch: Option<String>,
     pub force: bool,
 }
 
 impl Removal {
-    pub fn of(work: &Work) -> Self {
-        Self {
-            path: work.path.clone(),
-            worktree: match &work.kind {
-                WorkKind::Worktree { repo, tree, .. } => Some(RemovedWorktree {
-                    repo: repo.clone(),
-                    branch: tree.branch.clone(),
-                    force: tree.dirty,
-                }),
-                WorkKind::Carnet => None,
-            },
+    /// A removable worktree's removal.
+    pub fn of(work: &Work) -> Option<Self> {
+        match &work.kind {
+            WorkKind::Worktree { repo, tree, .. } if work.removable() => Some(Self {
+                path: work.path.clone(),
+                repo: repo.clone(),
+                branch: tree.branch.clone(),
+                force: tree.dirty,
+            }),
+            _ => None,
         }
     }
 }
@@ -165,6 +180,7 @@ pub struct Items<'a> {
     config: &'a Config,
     zellij: Zellij<'a>,
     ticket: Regex,
+    names: carnet::Names,
 }
 
 impl<'a> Items<'a> {
@@ -181,6 +197,7 @@ impl<'a> Items<'a> {
             config,
             zellij: Zellij::new(runner, config, layouts),
             ticket: config.ticket_regex()?,
+            names: carnet::Names::new(config.ticket_pattern())?,
         })
     }
 
@@ -317,15 +334,14 @@ impl<'a> Items<'a> {
         Ok(path)
     }
 
-    /// Creates a carnet in `workspace`, in the group its name starts with, else `group`.
-    /// Returns its path.
+    /// Creates a carnet in `workspace`, its ticket the key its name starts with, else `group`
+    /// when it is a ticket key. Returns its path.
     pub fn create_carnet(&self, name: &str, workspace: &str, group: &str) -> Result<PathBuf> {
         let root = self.config.require_carnet_root()?;
-        let names = carnet::Names::new(self.config.ticket_pattern())?;
         carnet::create(
             self.state,
             self.runner,
-            &names,
+            &self.names,
             &root,
             name,
             workspace,
@@ -333,14 +349,23 @@ impl<'a> Items<'a> {
         )
     }
 
-    /// Removes each worktree through worktrunk, or forgets each carnet and leaves its folder.
+    /// Closes or reopens each carnet. Closing also closes its tab.
+    pub fn set_carnets_closed(&self, paths: &[PathBuf], closed: bool) -> Result<()> {
+        each(paths, |path| {
+            carnet::set_closed(self.runner, path, closed)?;
+            if closed {
+                self.zellij.close_tab(self.state, path)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Removes each worktree through worktrunk and forgets it.
     pub fn remove(&self, removals: &[Removal]) -> Result<()> {
         each(removals, |removal| {
-            if let Some(worktree) = &removal.worktree {
-                let path = removal.path.to_string_lossy();
-                let target = worktree.branch.as_deref().unwrap_or(&path);
-                worktrunk::remove(self.runner, &worktree.repo, target, worktree.force)?;
-            }
+            let path = removal.path.to_string_lossy();
+            let target = removal.branch.as_deref().unwrap_or(&path);
+            worktrunk::remove(self.runner, &removal.repo, target, removal.force)?;
             self.forget(&removal.path)
         })
     }
@@ -358,16 +383,19 @@ impl<'a> Items<'a> {
         })
     }
 
-    /// Puts each item in `group`, as given, and renames the tabs it changes.
+    /// Puts each worktree in `group`, as given, and renames the tabs it changes. A carnet's
+    /// first ticket becomes `group`, its others kept; an empty `group` removes it.
     pub fn regroup(&self, paths: &[PathBuf], group: &str) -> Result<()> {
         let mut repos = HashSet::new();
         for path in paths {
-            self.state.set_group(path, group)?;
             let item = self.state.require_item(path)?;
-            let carnet = item.is_carnet();
-            match item.repo.filter(|_| !carnet) {
-                Some(repo) => drop(repos.insert(repo)),
-                None => self.zellij.rename_tab(self.state, path)?,
+            if item.is_carnet() {
+                let tickets = carnet::set_first_ticket(self.runner, &self.names, path, group)?;
+                (self.state).set_group(path, tickets.first().map_or("", String::as_str))?;
+                self.zellij.rename_tab(self.state, path)?;
+            } else {
+                self.state.set_group(path, group)?;
+                repos.extend(item.repo);
             }
         }
         for repo in repos {
@@ -397,9 +425,9 @@ impl<'a> Items<'a> {
         self.state.add_workspace(name)
     }
 
-    /// Removes an unused workspace, forgetting the carnets in `carnets`.
-    pub fn remove_workspace(&self, name: &str, carnets: &[PathBuf]) -> Result<()> {
-        self.state.remove_workspace(name, carnets)
+    /// Removes a workspace that owns no worktree, moving its carnets to the default one.
+    pub fn remove_workspace(&self, name: &str) -> Result<()> {
+        self.state.remove_workspace(name)
     }
 
     /// Syncs the recorded items with worktrunk and gathers what the panels show, with the
@@ -428,19 +456,8 @@ impl<'a> Items<'a> {
                 },
             });
         }
-        // Sync forgot the carnets whose folder is gone.
-        let all_carnets = self.state.carnets()?;
-        if self.config.carnets_enabled() {
-            for item in &all_carnets {
-                work.push(Work {
-                    path: item.path.clone(),
-                    tab: self.state.tab(&item.path)?.is_some(),
-                    workspace: item.workspace.clone(),
-                    group: item.group.clone(),
-                    kind: WorkKind::Carnet,
-                });
-            }
-        }
+        let carnets = self.scan_carnets()?;
+        work.extend(carnets.iter().filter(|carnet| !carnet.closed()).cloned());
         let here = self.zellij.here().map(str::to_owned);
         let mut workspaces = self.state.workspaces()?;
         if let Some(here) = &here
@@ -454,7 +471,7 @@ impl<'a> Items<'a> {
             workspaces,
             repos: self.state.repos()?,
             work,
-            all_carnets,
+            carnets,
             forges: synced.forges,
         };
         Ok((snapshot, problems))
@@ -462,7 +479,7 @@ impl<'a> Items<'a> {
 
     /// Lists every repo's worktrees, records the unknown ones in their repo's default
     /// workspace with the group their branch names, and forgets the worktrees a listing no
-    /// longer names and the carnets whose folder is gone.
+    /// longer names.
     fn sync(&self, full: bool) -> Result<Synced> {
         let state = self.state;
         let mut synced = Synced::default();
@@ -495,16 +512,90 @@ impl<'a> Items<'a> {
             }
         }
         for item in state.items()? {
-            // A carnet whose folder is gone was deleted on purpose.
-            let gone = match item.kind {
-                ItemKind::Worktree => !listed.contains(&item.path),
-                ItemKind::Carnet => !item.path.exists(),
-            };
-            if gone {
+            if item.kind == ItemKind::Worktree && !listed.contains(&item.path) {
                 state.remove_item(&item.path)?;
             }
         }
         Ok(synced)
+    }
+
+    /// Scans the carnet root when carnets are enabled: records each carnet found, a new one in
+    /// the default workspace, caches its first ticket as its group, and deletes the rows of
+    /// carnets no longer found. Returns every carnet, newest first.
+    fn scan_carnets(&self) -> Result<Vec<Work>> {
+        let state = self.state;
+        let Some(root) = self.config.carnet_root() else {
+            return Ok(Vec::new());
+        };
+        let found = carnet::scan(&root, &self.names)?;
+        let mut carnets = Vec::new();
+        for carnet in found {
+            let group = carnet.group().to_owned();
+            if state
+                .item(&carnet.path)?
+                .is_some_and(|item| !item.is_carnet())
+            {
+                continue;
+            }
+            let path = &carnet.path;
+            let default = state.default_workspace();
+            if !state.add_item(path, ItemKind::Carnet, None, &group, default)?
+                && state.require_item(path)?.group != group
+            {
+                state.set_group(path, &group)?;
+                // As with reconcile, zellij not running should not hide the carnets.
+                let _ = self.zellij.rename_tab(state, path);
+            }
+            carnets.push(Work {
+                workspace: state.require_item(path)?.workspace,
+                tab: state.tab(path)?.is_some(),
+                group,
+                path: carnet.path,
+                kind: WorkKind::Carnet {
+                    tickets: carnet.tickets,
+                    closed: carnet.closed,
+                    summary: carnet.summary,
+                    readme: carnet.readme,
+                },
+            });
+        }
+        let found: HashSet<&Path> = carnets.iter().map(|work| work.path.as_path()).collect();
+        for item in state.carnets()? {
+            if !found.contains(item.path.as_path()) {
+                state.remove_item(&item.path)?;
+            }
+        }
+        Ok(carnets)
+    }
+
+    /// The newest open carnet listing `key` among its tickets, else the group of the recorded
+    /// item containing `dir`. Reads the folders only: no git or network command.
+    pub fn carnet_path(&self, key: Option<&str>, dir: &Path) -> Result<PathBuf> {
+        let root = self.config.require_carnet_root()?;
+        let key = match key {
+            Some(key) => key.to_owned(),
+            None => {
+                let dir = canonical(dir);
+                let item = (self.state.items()?.into_iter())
+                    .filter(|item| dir.starts_with(&item.path))
+                    .max_by_key(|item| item.path.as_os_str().len())
+                    .ok_or_else(|| {
+                        eyre!(
+                            "{} is in no worktree or carnet atelier knows",
+                            dir.display()
+                        )
+                    })?;
+                if item.group.is_empty() {
+                    bail!("{} is in no group: pass a ticket key", item.path.display());
+                }
+                item.group
+            }
+        };
+        let carnets = carnet::scan(&root, &self.names)?;
+        match carnet::newest_open(&carnets, &key) {
+            Some(carnet) => Ok(carnet.path.clone()),
+            None => bail!("no open carnet for {key}: create one with `atelier carnet new`"),
+        }
     }
 
     /// Records a worktree a hook reports, registering its repo when it is new, and opens its
@@ -658,19 +749,6 @@ mod tests {
     }
 
     #[test]
-    fn sync_forgets_carnets_whose_folder_is_gone() {
-        let state = state();
-        let dir = tempfile::tempdir().unwrap();
-        for path in [dir.path(), Path::new("/gone-carnet")] {
-            (state.add_item(path, ItemKind::Carnet, None, "", "default")).unwrap();
-        }
-        let fake = Fake::default().always("wt -C /r", Some(LISTING));
-        items(&state, &fake).sync(false).unwrap();
-        assert!(state.item(dir.path()).unwrap().is_some());
-        assert!(state.item("/gone-carnet").unwrap().is_none());
-    }
-
-    #[test]
     fn a_failed_listing_keeps_the_repos_items() {
         let state = state();
         worktree(&state, "/r.gone", "", "default");
@@ -697,39 +775,230 @@ mod tests {
         assert_eq!(problems[0].command, "wt list in broken");
     }
 
+    /// Carnets enabled, under `root`.
+    fn with_root<'a>(state: &'a State, fake: &'a Fake, root: &Path) -> Items<'a> {
+        configured(
+            state,
+            fake,
+            &format!("[carnets]\nroot = {:?}", root.display().to_string()),
+        )
+    }
+
     #[test]
-    fn snapshot_lists_carnets_only_when_enabled() {
+    fn snapshot_scans_the_carnet_root_when_enabled() {
         let state = state();
         let dir = tempfile::tempdir().unwrap();
-        let notes = dir.path().join("2026-10-01-notes");
-        std::fs::create_dir(&notes).unwrap();
-        let bare = dir.path().join("2026-10-02-bare");
-        std::fs::create_dir(&bare).unwrap();
-        for path in [&notes, &bare, &dir.path().join("gone")] {
-            (state.add_item(path, ItemKind::Carnet, None, "G-1", "default")).unwrap();
-        }
+        let root = dir.path().canonicalize().unwrap();
+        let closed = "+++\ntickets = [\"web#3\"]\nclosed = true\n+++\n";
+        let placed = carnet::tests::repo(&root, "2026-10-01-ABC-1-notes", None);
+        let new = carnet::tests::repo(
+            &root,
+            "2026-10-02-G-2-bare",
+            Some("+++\ntickets = [\"G-3\"]\n+++\n"),
+        );
+        let done = carnet::tests::repo(&root, "2026-09-01-done", Some(closed));
+        state
+            .add_item(&placed, ItemKind::Carnet, None, "OLD-1", "side")
+            .unwrap();
+        (state.add_item("/data/2026-01-01-gone", ItemKind::Carnet, None, "", "side")).unwrap();
+        tab(&state, "/data/2026-01-01-gone", "side", 4);
         let fake = Fake::default().always("wt", Some(r#"{"items":[]}"#));
         let (snapshot, _) = items(&state, &fake).snapshot(false).unwrap();
-        assert!(snapshot.work.is_empty());
-        assert_eq!(
-            snapshot.all_carnets.len(),
-            2,
-            "hidden carnets are still known"
+        assert!(snapshot.work.is_empty() && snapshot.carnets.is_empty());
+        assert!(
+            state.item("/data/2026-01-01-gone").unwrap().is_some(),
+            "disabled, carnet rows are left alone"
         );
-        let enabled = "[carnets]\nroot = \"/notes\"";
-        let (snapshot, _) = configured(&state, &fake, enabled).snapshot(false).unwrap();
-        let carnets: Vec<_> = (snapshot.work.iter())
-            .map(|work| (work.title(), work.group.as_str()))
-            .collect();
+        let (snapshot, _) = with_root(&state, &fake, &root).snapshot(false).unwrap();
+        let listed = |work: &[Work]| -> Vec<(String, String, String)> {
+            (work.iter())
+                .map(|work| (work.title(), work.group.clone(), work.workspace.clone()))
+                .collect()
+        };
+        let row = |title: &str, group: &str, workspace: &str| {
+            (title.to_owned(), group.to_owned(), workspace.to_owned())
+        };
         assert_eq!(
-            carnets,
+            listed(&snapshot.carnets),
             [
-                ("2026-10-01-notes".into(), "G-1"),
-                ("2026-10-02-bare".into(), "G-1")
+                row("2026-10-02-G-2-bare", "G-3", "default"),
+                row("2026-10-01-ABC-1-notes", "ABC-1", "side"),
+                row("2026-09-01-done", "web#3", "default"),
             ],
-            "a missing folder is forgotten"
+            "newest first; a known carnet keeps its workspace, a new one goes to the default"
         );
-        assert!(snapshot.work.iter().all(Work::is_carnet));
+        assert_eq!(
+            listed(&snapshot.work),
+            [
+                row("2026-10-02-G-2-bare", "G-3", "default"),
+                row("2026-10-01-ABC-1-notes", "ABC-1", "side"),
+            ],
+            "open carnets only"
+        );
+        assert_eq!(
+            state.require_item(&placed).unwrap().group,
+            "ABC-1",
+            "the group is cached"
+        );
+        assert_eq!(state.require_item(&new).unwrap().group, "G-3");
+        assert!(state.item(&done).unwrap().is_some());
+        assert_eq!(state.item("/data/2026-01-01-gone").unwrap(), None);
+        assert_eq!(
+            state.tabs().unwrap(),
+            [],
+            "a vanished carnet's tab row goes with it"
+        );
+    }
+
+    #[test]
+    fn regroup_sets_a_carnets_first_ticket() {
+        let state = state();
+        let dir = tempfile::tempdir().unwrap();
+        let readme = "+++\ntickets = [\"A-1\", \"B-2\"]\n+++\n";
+        let path = carnet::tests::repo(dir.path(), "2026-10-01-notes", Some(readme));
+        state
+            .add_item(&path, ItemKind::Carnet, None, "A-1", "default")
+            .unwrap();
+        tab(&state, &path, "default", 4);
+        let fake = Fake::default();
+        let items = with_root(&state, &fake, dir.path());
+        items
+            .regroup(std::slice::from_ref(&path), "atelier#14")
+            .unwrap();
+        let readme = std::fs::read_to_string(path.join("README.md")).unwrap();
+        assert!(
+            readme.contains(r#"tickets = ["atelier#14", "B-2"]"#),
+            "{readme}"
+        );
+        assert_eq!(state.require_item(&path).unwrap().group, "atelier#14");
+        let calls = fake.calls();
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.ends_with("commit -m Link atelier#14 -- README.md"))
+        );
+        assert!(
+            calls.contains(
+                &"zellij --session default action rename-tab-by-id 4 atelier#14·2026-10-01-notes"
+                    .into()
+            ),
+            "{calls:?}"
+        );
+        items.regroup(std::slice::from_ref(&path), "").unwrap();
+        assert_eq!(
+            state.require_item(&path).unwrap().group,
+            "B-2",
+            "the next ticket"
+        );
+    }
+
+    #[test]
+    fn closing_a_carnet_records_it_and_closes_its_tab() {
+        let state = state();
+        let dir = tempfile::tempdir().unwrap();
+        let path = carnet::tests::repo(dir.path(), "2026-10-01-notes", None);
+        state
+            .add_item(&path, ItemKind::Carnet, None, "", "default")
+            .unwrap();
+        tab(&state, &path, "default", 4);
+        let fake = Fake::default()
+            .always(
+                "zellij --session default action list-tabs",
+                Some(r#"[{"tab_id":4,"position":1}]"#),
+            )
+            .always("zellij --session default action list-panes", Some("[]"));
+        let items = with_root(&state, &fake, dir.path());
+        items
+            .set_carnets_closed(std::slice::from_ref(&path), true)
+            .unwrap();
+        let calls = fake.calls();
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.ends_with("commit -m Close -- README.md"))
+        );
+        assert!(calls.contains(&"zellij --session default action close-tab-by-id 4".into()));
+        assert_eq!(state.tab(&path).unwrap(), None);
+        let (snapshot, _) = items.snapshot(false).unwrap();
+        assert!(snapshot.work.is_empty() && snapshot.carnets[0].closed());
+        items
+            .set_carnets_closed(std::slice::from_ref(&path), false)
+            .unwrap();
+        assert!(
+            fake.calls()
+                .last()
+                .unwrap()
+                .ends_with("commit -m Reopen -- README.md")
+        );
+    }
+
+    #[test]
+    fn removing_a_workspace_moves_its_carnets_to_the_default_one() {
+        let state = state();
+        state.add_workspace("gone").unwrap();
+        (state.add_item("/data/2026-01-01-x", ItemKind::Carnet, None, "", "gone")).unwrap();
+        let fake = Fake::default();
+        items(&state, &fake).remove_workspace("gone").unwrap();
+        assert_eq!(
+            state.require_item("/data/2026-01-01-x").unwrap().workspace,
+            "default"
+        );
+    }
+
+    #[test]
+    fn carnet_path_finds_the_newest_open_carnet_of_a_key_or_of_the_current_group() {
+        let state = state();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("carnets");
+        let older = carnet::tests::repo(&root, "2026-01-01-ABC-1-a", None);
+        let newer = carnet::tests::repo(&root, "2026-02-01-ABC-1-b", None);
+        carnet::tests::repo(
+            &root,
+            "2026-03-01-ABC-1-c",
+            Some("+++\nclosed = true\n+++\n"),
+        );
+        let tree = dir.path().join("r.ABC-1-x");
+        std::fs::create_dir_all(tree.join("src")).unwrap();
+        let tree = tree.canonicalize().unwrap();
+        worktree(&state, &tree, "ABC-1", "default");
+        std::fs::create_dir(dir.path().join("r.plain")).unwrap();
+        let plain = dir.path().join("r.plain").canonicalize().unwrap();
+        worktree(&state, &plain, "", "default");
+        state
+            .add_item(&older, ItemKind::Carnet, None, "ABC-1", "default")
+            .unwrap();
+        let fake = Fake::default();
+        let items = with_root(&state, &fake, &root);
+        let found = |key: Option<&str>, dir: &Path| {
+            items.carnet_path(key, dir).map_err(|err| err.to_string())
+        };
+        assert_eq!(
+            found(Some("ABC-1"), dir.path()),
+            Ok(newer.clone()),
+            "the closed one is skipped"
+        );
+        assert_eq!(
+            found(None, &tree.join("src")),
+            Ok(newer.clone()),
+            "the worktree's group"
+        );
+        assert_eq!(
+            found(None, &older),
+            Ok(newer),
+            "inside a carnet, its own group"
+        );
+        assert!(
+            found(None, dir.path())
+                .unwrap_err()
+                .contains("no worktree or carnet")
+        );
+        assert!(found(None, &plain).unwrap_err().contains("no group"));
+        assert!(
+            found(Some("XYZ-9"), dir.path())
+                .unwrap_err()
+                .contains("atelier carnet new")
+        );
+        assert!(fake.calls().is_empty(), "no command runs");
     }
 
     #[test]
@@ -893,11 +1162,9 @@ mod tests {
         let fake = Fake::default();
         let removal = Removal {
             path: "/r.x".into(),
-            worktree: Some(RemovedWorktree {
-                repo: "/r".into(),
-                branch: Some("x".into()),
-                force: true,
-            }),
+            repo: "/r".into(),
+            branch: Some("x".into()),
+            force: true,
         };
         items(&state, &fake).remove(&[removal]).unwrap();
         assert_eq!(
@@ -905,22 +1172,6 @@ mod tests {
             ["wt -C /r remove --foreground --yes --force x"]
         );
         assert!(state.item("/r.x").unwrap().is_none());
-    }
-
-    #[test]
-    fn removing_a_carnet_forgets_it_without_worktrunk() {
-        let state = state();
-        let dir = tempfile::tempdir().unwrap();
-        (state.add_item(dir.path(), ItemKind::Carnet, None, "", "default")).unwrap();
-        let fake = Fake::default();
-        let removal = Removal {
-            path: dir.path().into(),
-            worktree: None,
-        };
-        items(&state, &fake).remove(&[removal]).unwrap();
-        assert!(fake.calls().is_empty());
-        assert!(state.item(dir.path()).unwrap().is_none());
-        assert!(dir.path().exists());
     }
 
     #[test]

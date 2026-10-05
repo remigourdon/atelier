@@ -381,7 +381,8 @@ fn select_moved(model: &mut Model, list: List, index: usize) -> Vec<Effect> {
 }
 
 /// Drops what a refresh made stale: everything on a full refresh, else what was loaded for
-/// items no longer listed, and the commits of worktrees whose head moved.
+/// items no longer listed, the commits of worktrees whose head moved, and the README and
+/// commits of carnets whose README changed.
 fn drop_stale(model: &mut Model, old: &Snapshot, full: bool) {
     if full {
         model.commits.clear();
@@ -392,17 +393,25 @@ fn drop_stale(model: &mut Model, old: &Snapshot, full: bool) {
     let heads: HashMap<&Path, Option<String>> = (model.snapshot.work.iter())
         .map(|work| (work.path.as_path(), head(work)))
         .collect();
+    let rewritten = (model.snapshot.work.iter()).filter(|work| match &work.kind {
+        WorkKind::Carnet { readme, .. } => {
+            (model.readmes.get(&work.path)).is_some_and(|loaded| loaded != readme)
+        }
+        WorkKind::Worktree { .. } => false,
+    });
     let moved: HashSet<&Path> = (old.work.iter())
         .filter(|work| {
             heads
                 .get(work.path.as_path())
                 .is_some_and(|now| *now != head(work))
         })
+        .chain(rewritten)
         .map(|work| work.path.as_path())
         .collect();
     (model.commits)
         .retain(|path, _| heads.contains_key(path.as_path()) && !moved.contains(path.as_path()));
-    (model.readmes).retain(|path, _| heads.contains_key(path.as_path()));
+    (model.readmes)
+        .retain(|path, _| heads.contains_key(path.as_path()) && !moved.contains(path.as_path()));
 }
 
 /// Fetches the selected item's recent commits, and a carnet's README, unless they are loaded.
@@ -702,6 +711,16 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
                 return vec![run(model, Job::Close(paths))];
             }
         }
+        Cmd::CloseCarnet => {
+            let carnets: Vec<_> = work_targets(model)
+                .into_iter()
+                .filter(|work| work.is_carnet())
+                .collect();
+            let paths = paths(&carnets);
+            if !paths.is_empty() {
+                return vec![run(model, Job::CloseCarnet(paths))];
+            }
+        }
         Cmd::Pull => {
             let trees: Vec<_> = work_targets(model)
                 .into_iter()
@@ -956,7 +975,7 @@ fn new(model: &mut Model) -> Vec<Effect> {
                 WorkKind::Worktree {
                     repo, repo_name, ..
                 } => Some((repo.clone(), repo_name.clone())),
-                WorkKind::Carnet => None,
+                WorkKind::Carnet { .. } => None,
             });
             let mut entries: Vec<MenuEntry> = match selected {
                 Some((repo, name)) if !model.carnets => return update(model, ask(repo, name)),
@@ -1115,20 +1134,12 @@ fn remove(model: &mut Model) -> Vec<Effect> {
             let Some(name) = model.workspace().map(str::to_owned) else {
                 return Vec::new();
             };
-            let mut lines = vec![format!("Remove the workspace {name}?")];
-            let carnets: Vec<PathBuf> = (model.snapshot.all_carnets.iter())
-                .filter(|carnet| carnet.workspace == name)
-                .map(|carnet| carnet.path.clone())
-                .collect();
-            if !carnets.is_empty() {
-                lines.push("Its carnets will be forgotten; their folders stay on disk:".into());
-                lines.extend(carnets.iter().map(|path| format!("  {}", path.display())));
-            }
+            let lines = vec![format!("Remove the workspace {name}?")];
             confirm(
                 model,
                 "Remove workspace".into(),
                 lines,
-                Job::RemoveWorkspace { name, carnets },
+                Job::RemoveWorkspace(name),
             )
         }
         List::Repos => {
@@ -1147,23 +1158,22 @@ fn remove(model: &mut Model) -> Vec<Effect> {
         }
         List::Work => {
             let targets = model.targets();
-            let removable: Vec<_> = targets
-                .into_iter()
-                .filter(|work| work.removable())
+            let removable: Vec<(&Work, Removal)> = (targets.into_iter())
+                .filter_map(|work| Some((work, Removal::of(work)?)))
                 .collect();
-            let removals: Vec<Removal> = removable.iter().map(|work| Removal::of(work)).collect();
-            if removals.is_empty() {
-                return note(model, "main worktrees are never removed");
+            if removable.is_empty() {
+                return note(model, "main worktrees and carnets are never removed");
             }
             let mut lines = vec!["Remove these?".to_owned()];
-            for work in &removable {
-                let note = match work.tree() {
-                    None => "  (forgotten: its folder stays on disk)",
-                    Some(tree) if tree.dirty => "  (uncommitted changes will be lost)",
-                    Some(_) => "",
+            for (work, removal) in &removable {
+                let note = if removal.force {
+                    "  (uncommitted changes will be lost)"
+                } else {
+                    ""
                 };
                 lines.push(format!("  {}{note}", work.title()));
             }
+            let removals = removable.into_iter().map(|(_, removal)| removal).collect();
             confirm(model, "Remove".into(), lines, Job::Remove(removals))
         }
     }
@@ -1299,41 +1309,40 @@ pub mod tests {
         }
     }
 
+    /// A carnet whose one ticket, if any, is `group`.
     pub fn carnet(name: &str, group: &str, workspace: &str) -> Work {
         Work {
             path: PathBuf::from(format!("/data/{name}")),
             workspace: workspace.into(),
             group: group.into(),
             tab: false,
-            kind: WorkKind::Carnet,
+            kind: WorkKind::Carnet {
+                tickets: Some(group.to_owned())
+                    .filter(|group| !group.is_empty())
+                    .into_iter()
+                    .collect(),
+                closed: false,
+                summary: String::new(),
+                readme: None,
+            },
         }
     }
 
-    /// With carnets enabled, one in the ABC-1 group and two ungrouped, and one in `side`.
+    /// With carnets enabled, one in the ABC-1 group and two ungrouped, open, and one closed in
+    /// `side`.
     pub fn with_carnets(mut model: Model) -> Model {
         model.carnets = true;
-        model.snapshot.work.extend([
+        let open = [
             carnet("2026-10-01-ABC-1-logs", "ABC-1", "default"),
             carnet("2026-09-20-old", "", "default"),
             carnet("2026-10-02-ideas", "", "default"),
-        ]);
-        model.snapshot.all_carnets = (model.snapshot.work.iter())
-            .filter(|work| work.is_carnet())
-            .map(|work| crate::state::Item {
-                path: work.path.clone(),
-                kind: crate::state::ItemKind::Carnet,
-                repo: None,
-                group: work.group.clone(),
-                workspace: work.workspace.clone(),
-            })
-            .chain([crate::state::Item {
-                path: "/data/2026-08-01-hidden".into(),
-                kind: crate::state::ItemKind::Carnet,
-                repo: None,
-                group: String::new(),
-                workspace: "side".into(),
-            }])
-            .collect();
+        ];
+        let mut closed = carnet("2026-08-01-done", "", "side");
+        if let WorkKind::Carnet { closed, .. } = &mut closed.kind {
+            *closed = true;
+        }
+        model.snapshot.work.extend(open.clone());
+        model.snapshot.carnets = open.into_iter().chain([closed]).collect();
         model
     }
 
@@ -1353,7 +1362,7 @@ pub mod tests {
                 work("web", "ABC-1-form", "ABC-1", "default"),
                 work("web", "main", "", "side"),
             ],
-            all_carnets: Vec::new(),
+            carnets: Vec::new(),
             forges: [(
                 PathBuf::from("/src/api"),
                 Forge {
@@ -1510,10 +1519,7 @@ pub mod tests {
             panic!("{jobs:?}");
         };
         assert_eq!(removals.len(), 2);
-        assert!(
-            removals[0].worktree.as_ref().unwrap().force
-                && !removals[1].worktree.as_ref().unwrap().force
-        );
+        assert!(removals[0].force && !removals[1].force);
         press(&mut model, "G");
         press(&mut model, "d");
         assert!(model.modal.is_none());
@@ -1531,10 +1537,7 @@ pub mod tests {
         press(&mut model, "jd");
         assert_eq!(
             jobs(press(&mut model, "y")),
-            [Job::RemoveWorkspace {
-                name: "side".into(),
-                carnets: Vec::new()
-            }]
+            [Job::RemoveWorkspace("side".into())]
         );
         press(&mut model, "]d");
         assert_eq!(
@@ -2459,25 +2462,58 @@ pub mod tests {
     }
 
     #[test]
-    fn removing_a_workspace_names_the_carnets_it_forgets() {
-        let mut model = with_carnets(model());
-        press(&mut model, "1jd");
-        let Some(Modal::Confirm { lines, job, .. }) = &model.modal else {
-            panic!("no confirmation");
+    fn a_carnet_listing_an_issues_key_is_its_linked_work() {
+        let mut model = with_issues(with_carnets(model()));
+        let mut linked = carnet("2026-07-01-notes", "", "side");
+        if let WorkKind::Carnet {
+            tickets, closed, ..
+        } = &mut linked.kind
+        {
+            *tickets = vec!["XYZ-1".into(), "api#4".into()];
+            *closed = true;
+        }
+        model.snapshot.carnets.push(linked);
+        let issue = |key: &str| {
+            let issue = model.issues.iter().find(|issue| issue.key == key);
+            issue.unwrap().clone()
         };
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("/data/2026-08-01-hidden")),
-            "a hidden carnet is named: {lines:?}"
+        let titles = |issue| {
+            (model.issue_work(&issue).iter())
+                .map(|work| work.title())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            titles(issue("api#4")),
+            ["2026-07-01-notes"],
+            "a closed carnet, by a later ticket"
         );
         assert_eq!(
-            *job,
-            Job::RemoveWorkspace {
-                name: "side".into(),
-                carnets: vec!["/data/2026-08-01-hidden".into()]
-            }
+            titles(issue("ABC-1")),
+            ["api:ABC-1-login", "web:ABC-1-form", "2026-10-01-ABC-1-logs"],
+            "an open carnet once, after the worktrees"
         );
+    }
+
+    #[test]
+    fn c_closes_the_selected_carnets() {
+        let mut model = with_carnets(model());
+        press(&mut model, "G");
+        assert_eq!(
+            jobs(press(&mut model, "c")),
+            [Job::CloseCarnet(vec![
+                "/data/2026-10-02-ideas".into(),
+                "/data/2026-09-20-old".into()
+            ])],
+            "every carnet of the group"
+        );
+        press(&mut model, "gg");
+        assert_eq!(
+            jobs(press(&mut model, "c")),
+            [Job::CloseCarnet(vec!["/data/2026-10-01-ABC-1-logs".into()])],
+            "only the carnets of a group with worktrees"
+        );
+        press(&mut model, "j");
+        assert!(jobs(press(&mut model, "c")).is_empty(), "a worktree");
     }
 
     #[test]
@@ -2524,30 +2560,17 @@ pub mod tests {
     }
 
     #[test]
-    fn removing_a_carnet_forgets_it_and_keeps_its_folder() {
+    fn carnets_are_never_removed() {
         let mut model = with_carnets(model());
         press(&mut model, "Gd");
-        let Some(Modal::Confirm { lines, .. }) = &model.modal else {
-            panic!("no confirmation");
-        };
+        assert!(model.modal.is_none());
         assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("2026-10-02-ideas") && line.contains("stays on disk")),
-            "{lines:?}"
-        );
-        assert_eq!(
-            jobs(press(&mut model, "y")),
-            [Job::Remove(vec![
-                Removal {
-                    path: "/data/2026-10-02-ideas".into(),
-                    worktree: None,
-                },
-                Removal {
-                    path: "/data/2026-09-20-old".into(),
-                    worktree: None,
-                },
-            ])]
+            model
+                .log
+                .last()
+                .unwrap()
+                .command
+                .contains("carnets are never removed")
         );
     }
 }

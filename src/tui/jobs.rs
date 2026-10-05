@@ -245,13 +245,14 @@ fn execute(context: &Context, state: &State, runner: &dyn Runner, job: Job) -> R
             items.open(&[path])
         }
         Job::Remove(removals) => items.remove(&removals),
+        Job::CloseCarnet(paths) => items.set_carnets_closed(&paths, true),
         Job::Move { paths, workspace } => items.move_to(&paths, &workspace),
         Job::Regroup { paths, group } => items.regroup(&paths, &group),
         Job::SetAlias { repo, alias } => items.set_alias(&repo, &alias),
         Job::SetRepoWorkspace { repo, workspace } => items.set_repo_workspace(&repo, &workspace),
         Job::Forget(repo) => items.forget_repo(&repo),
         Job::AddWorkspace(name) => items.add_workspace(&name),
-        Job::RemoveWorkspace { name, carnets } => items.remove_workspace(&name, &carnets),
+        Job::RemoveWorkspace(name) => items.remove_workspace(&name),
         Job::SwitchWorkspace(name) => context.zellij(runner).open_session(&name),
         Job::Browse(url) => browse(context, runner, &url),
     }

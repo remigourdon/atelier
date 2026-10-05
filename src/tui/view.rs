@@ -567,17 +567,22 @@ fn detail(model: &Model) -> Vec<(String, String)> {
             }
             Some(Row::Item(index)) => {
                 let work = &model.snapshot.work[index];
-                let WorkKind::Worktree {
-                    repo_name, tree, ..
-                } = &work.kind
-                else {
-                    return vec![
-                        pair("Carnet", work.title()),
-                        pair("Path", work.path.display().to_string()),
-                        pair("Workspace", work.workspace.clone()),
-                        pair("Group", work.group.clone()),
-                        pair("Tab", if work.tab { "open" } else { "closed" }.into()),
-                    ];
+                let (repo_name, tree) = match &work.kind {
+                    WorkKind::Worktree {
+                        repo_name, tree, ..
+                    } => (repo_name, tree),
+                    WorkKind::Carnet {
+                        tickets, summary, ..
+                    } => {
+                        return vec![
+                            pair("Carnet", work.title()),
+                            pair("Path", work.path.display().to_string()),
+                            pair("Workspace", work.workspace.clone()),
+                            pair("Tickets", tickets.join(", ")),
+                            pair("Summary", summary.clone()),
+                            pair("Tab", if work.tab { "open" } else { "closed" }.into()),
+                        ];
+                    }
                 };
                 vec![
                     pair("Repo", repo_name.clone()),
@@ -693,7 +698,9 @@ fn readme(model: &Model) -> Option<Text<'_>> {
     match (model.active(), model.work_row()?) {
         (List::Work, Row::Item(index)) => {
             let readme = model.readmes.get(model.snapshot.work[index].path())?;
-            Some(tui_markdown::from_str(readme.as_deref()?))
+            Some(tui_markdown::from_str(crate::carnet::body(
+                readme.as_deref()?,
+            )))
         }
         _ => None,
     }
