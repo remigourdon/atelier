@@ -390,7 +390,8 @@ impl Issues for Acli<'_> {
                 "--jql",
                 &self.jql,
                 "--fields",
-                "key,summary,status,labels,assignee,updated,issuetype,priority",
+                // ACLI search accepts only its supported display fields, not `updated`.
+                "key,summary,status,labels,assignee,issuetype,priority",
                 "--json",
                 "--paginate",
             ],
@@ -771,14 +772,26 @@ pub mod tests {
     }
 
     #[test]
-    fn acli_runs_the_search_with_every_field_it_reads() {
-        let fake = Fake::default().always("acli", Some(ACLI));
+    fn acli_runs_the_search_with_supported_fields() {
+        let mut response: serde_json::Value = serde_json::from_str(ACLI).unwrap();
+        for issue in response.as_array_mut().unwrap() {
+            issue["fields"].as_object_mut().unwrap().remove("updated");
+        }
+        let json = response.to_string();
+        let fake = Fake::default().always("acli", Some(&json));
         let jira = Tracker::Jira.issues(&fake, "project = ORD".into(), &TrackerConfig::default());
-        assert_eq!(jira.issues().unwrap().len(), 3);
+        let issues = jira.issues().unwrap();
+        assert_eq!(issues.len(), 3);
+        assert!(issues.iter().all(|issue| issue.updated_at.is_empty()));
+        assert_eq!(issues[0].state, State::InProgress);
+        assert_eq!(issues[0].labels, ["backend", "perf"]);
+        assert_eq!(issues[0].assignees, ["Alice Martin"]);
+        assert_eq!(issues[0].kind.as_deref(), Some("Story"));
+        assert_eq!(issues[0].priority.as_deref(), Some("High"));
         assert_eq!(
             fake.calls(),
             ["acli jira workitem search --jql project = ORD \
-                 --fields key,summary,status,labels,assignee,updated,issuetype,priority \
+                 --fields key,summary,status,labels,assignee,issuetype,priority \
                  --json --paginate"]
         );
     }

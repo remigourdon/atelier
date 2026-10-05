@@ -55,6 +55,9 @@ anchor_pane = "editor"
 [tracker.github]               # and/or [tracker.jira] with `jql` and `url` (fallback $ATLASSIAN_URL / $JIRA_URL)
 repos = ["owner/name"]
 
+[reviews]                      # absent or empty: no review fetching; independent of [tracker]
+providers = ["gitlab", "github"] # hosts come from registered repos; requires glab and gh respectively
+
 [tracker]
 hide = { labels = ["wontfix"] }  # same conditions as a section, applied first; none: nothing hidden
 
@@ -67,6 +70,10 @@ blocked = false
 ```
 
 Issues are normalised from each source. `state` comes from Jira's `statusCategory`. A GitHub issue is `done` once closed, completed or not planned; `in_progress` while a pull request that closes it is open; else `todo`. `blocked` is true for a GitHub issue with an open `blockedBy`, or a Jira issue in status `Blocked`. Labels compare ignoring case. A hidden issue is not listed; one that matches no section goes to a last `Other` section, shown only while it lists any.
+
+Jira search requests `key,summary,status,labels,assignee,issuetype,priority`: ACLI rejects
+`updated` as a search field. The parser keeps an updated timestamp when returned and leaves it
+empty when omitted. Issue order still follows the configured JQL.
 
 A triage label scheme, for example:
 

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use color_eyre::eyre::{Result, WrapErr};
+use color_eyre::eyre::{Report, Result, WrapErr, eyre};
 
 pub trait Runner {
     /// Runs a command to completion and returns its trimmed stdout, failing on a non-zero exit.
@@ -43,12 +43,21 @@ pub fn exited_with(err: &color_eyre::Report, code: i32) -> bool {
 
 pub struct System;
 
+fn launch_error(program: &str, error: std::io::Error) -> Report {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        eyre!("command '{program}' not found on PATH")
+    } else {
+        Report::from(error).wrap_err(format!("starting command '{program}'"))
+    }
+}
+
 impl Runner for System {
     fn output(&self, program: &str, args: &[&str]) -> Result<String> {
         let output = Command::new(program)
             .args(args)
             .stdin(Stdio::null())
-            .output()?;
+            .output()
+            .map_err(|error| launch_error(program, error))?;
         if !output.status.success() {
             return Err(Failed {
                 message: format!(
@@ -64,7 +73,10 @@ impl Runner for System {
     }
 
     fn interactive(&self, program: &str, args: &[&str]) -> Result<()> {
-        let status = Command::new(program).args(args).status()?;
+        let status = Command::new(program)
+            .args(args)
+            .status()
+            .map_err(|error| launch_error(program, error))?;
         if !status.success() {
             return Err(Failed {
                 message: format!("{program} {} failed", args.join(" ")),
@@ -81,7 +93,8 @@ impl Runner for System {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn()?;
+            .spawn()
+            .map_err(|error| launch_error(program, error))?;
         Ok(())
     }
 }
@@ -225,6 +238,15 @@ mod tests {
         assert_eq!(log[0].error, None);
         assert_eq!(log[1].error.as_deref(), Some("git fail failed"));
         assert!(recorder.take().is_empty());
+    }
+
+    #[test]
+    fn missing_commands_report_the_program_and_path() {
+        let error = System.output("atelier-test-missing-cli", &[]).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "command 'atelier-test-missing-cli' not found on PATH"
+        );
     }
 
     #[test]
