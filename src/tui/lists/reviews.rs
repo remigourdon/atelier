@@ -3,10 +3,10 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, pair};
+use super::{ListKind, close_tabs, pair};
 use crate::reviews::{Review, Role};
 use crate::state::Repo;
-use crate::tui::app::{Effect, Feed, Job, Kind, List, Model, Source, Work};
+use crate::tui::app::{Cmd, Effect, Feed, Job, Kind, List, Model, Source, Work};
 use crate::tui::update::{note, run};
 use crate::tui::view::{Palette, icon};
 use crate::worktrunk;
@@ -194,6 +194,20 @@ impl ListKind for Reviews {
             review: Box::new(review.clone()),
         };
         vec![run(model, job)]
+    }
+
+    fn command(&self, model: &mut Model, _list: List, cmd: Cmd) -> Vec<Effect> {
+        if cmd != Cmd::Close {
+            return Vec::new();
+        }
+        let paths = model
+            .review()
+            .and_then(|review| model.review_work(review))
+            .filter(|work| work.tab)
+            .map(|work| work.path.clone())
+            .into_iter()
+            .collect();
+        close_tabs(model, paths)
     }
 
     fn branch(&self, model: &Model, _list: List) -> Option<String> {

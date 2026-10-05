@@ -478,6 +478,7 @@ const ALL: &[Kind] = &[
     Kind::Reviews,
     Kind::Issues,
 ];
+const TABS: &[Kind] = &[Kind::Work, Kind::Carnets, Kind::Reviews, Kind::Issues];
 const FINISH: &[Kind] = &[Kind::Workspaces, Kind::Work, Kind::Issues];
 const NONE: &[Kind] = &[];
 
@@ -513,7 +514,7 @@ pub const KEYMAP: &[Binding] = &[
     Binding { keys: &[ch('e')], label: "e", cmd: Cmd::Edit, help: "edit group · edit repo alias", hint: &[Kind::Repos, Kind::Work], on: On::Lists(&[Kind::Repos, Kind::Work]) },
     Binding { keys: &[ch('m')], label: "m", cmd: Cmd::Move, help: "move to workspace · set repo workspace", hint: &[Kind::Repos, Kind::Work], on: On::Lists(&[Kind::Repos, Kind::Work]) },
     Binding { keys: &[ch('d')], label: "d", cmd: Cmd::Remove, help: "remove", hint: LOCAL, on: On::Lists(LOCAL) },
-    Binding { keys: &[ch('x')], label: "x", cmd: Cmd::Close, help: "close tab", hint: WORK, on: On::Lists(WORK) },
+    Binding { keys: &[ch('x')], label: "x", cmd: Cmd::Close, help: "close tab", hint: TABS, on: On::Lists(TABS) },
     Binding { keys: &[ch('c')], label: "c", cmd: Cmd::ToggleCarnet, help: "close or reopen carnet", hint: CARNETS, on: On::Lists(CARNETS) },
     Binding { keys: &[ch('s')], label: "s", cmd: Cmd::Search, help: "search inside carnets (rg)", hint: &[Kind::Carnets], on: On::Lists(&[Kind::Carnets]) },
     Binding { keys: &[ch('p')], label: "p", cmd: Cmd::Pull, help: "pull (git pull --ff-only --prune)", hint: WORK, on: On::Lists(WORK) },

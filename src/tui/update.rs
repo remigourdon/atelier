@@ -1317,6 +1317,82 @@ pub mod tests {
     }
 
     #[test]
+    fn x_closes_carnet_tabs_without_changing_their_lifecycle() {
+        let mut model = with_carnets(model());
+        press(&mut model, "]G");
+        assert!(jobs(press(&mut model, "x")).is_empty());
+        model.snapshot.carnets.last_mut().unwrap().tab = true;
+        assert_eq!(
+            jobs(press(&mut model, "x")),
+            [Job::Close(vec!["/data/2026-08-01-done".into()])]
+        );
+        assert!(model.carnet().unwrap().closed());
+        assert!(model.modal.is_none());
+        press(&mut model, "gg");
+        model.snapshot.carnets[0].tab = true;
+        assert_eq!(
+            jobs(press(&mut model, "x")),
+            [Job::Close(vec!["/data/2026-10-02-ideas".into()])]
+        );
+        assert!(!model.carnet().unwrap().closed());
+    }
+
+    #[test]
+    fn x_closes_review_tabs_from_both_review_lists() {
+        let mut model = with_reviews(model());
+        press(&mut model, "3");
+        assert!(jobs(press(&mut model, "x")).is_empty());
+        model.snapshot.work[1].tree_mut().branch = Some("change-2".into());
+        assert!(jobs(press(&mut model, "x")).is_empty());
+        model.snapshot.work[1].tab = true;
+        assert_eq!(
+            jobs(press(&mut model, "x")),
+            [Job::Close(vec!["/src/api.ABC-1-login".into()])]
+        );
+        press(&mut model, "j");
+        assert!(jobs(press(&mut model, "x")).is_empty(), "unregistered repo");
+        press(&mut model, "]");
+        let branch = model.review().unwrap().branch.clone();
+        model.snapshot.work[1].tree_mut().branch = Some(branch);
+        assert_eq!(
+            jobs(press(&mut model, "x")),
+            [Job::Close(vec!["/src/api.ABC-1-login".into()])]
+        );
+        assert!(model.modal.is_none());
+    }
+
+    #[test]
+    fn x_closes_only_open_issue_tabs_across_workspaces_including_shared_carnets() {
+        let mut model = with_issues(with_carnets(model()));
+        press(&mut model, "4]");
+        assert!(jobs(press(&mut model, "x")).is_empty(), "no linked work");
+        press(&mut model, "j");
+        assert_eq!(model.issue().unwrap().key, "ABC-1");
+        assert!(jobs(press(&mut model, "x")).is_empty(), "no open tabs");
+        model.snapshot.work[1].tab = true;
+        model.snapshot.work[1].workspace = "side".into();
+        let mut shared = carnet("shared", "ABC-1", "side");
+        shared.tab = true;
+        if let WorkKind::Carnet {
+            tickets, closed, ..
+        } = &mut shared.kind
+        {
+            tickets.push("api#4".into());
+            *closed = true;
+        }
+        model.snapshot.carnets.push(shared);
+        assert_eq!(
+            jobs(press(&mut model, "x")),
+            [Job::Close(vec![
+                "/src/api.ABC-1-login".into(),
+                "/data/shared".into()
+            ])]
+        );
+        assert!(model.snapshot.carnets.last().unwrap().closed());
+        assert!(model.modal.is_none());
+    }
+
+    #[test]
     fn pull_and_close_act_on_the_selection() {
         let mut model = model();
         model.snapshot.work[2].tab = true;
@@ -2121,7 +2197,7 @@ pub mod tests {
             jobs(press(&mut model, "o")),
             [Job::Browse("https://forge/api/issues/api#1".into())]
         );
-        for keys in ["d", "e", "m", "x", "p"] {
+        for keys in ["d", "e", "m", "p"] {
             assert!(jobs(press(&mut model, keys)).is_empty(), "{keys}");
             assert!(model.modal.is_none(), "{keys}");
         }

@@ -3,12 +3,12 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, kind, pair, paths, plan};
+use super::{ListKind, close_tabs, kind, pair, paths, plan};
 use crate::finish::Scope;
 use crate::issues::{Issue, State};
 use crate::state::Repo;
 use crate::tui::app::{
-    Action, Effect, Feed, Job, Kind, List, MenuEntry, Modal, Model, Source, Submit, Work,
+    Action, Cmd, Effect, Feed, Job, Kind, List, MenuEntry, Modal, Model, Source, Submit, Work,
 };
 use crate::tui::update::{note, run};
 use crate::tui::view::{Palette, icon};
@@ -224,6 +224,24 @@ impl ListKind for Issues {
         } else {
             vec![run(model, Job::Open(paths))]
         }
+    }
+
+    fn command(&self, model: &mut Model, _list: List, cmd: Cmd) -> Vec<Effect> {
+        if cmd != Cmd::Close {
+            return Vec::new();
+        }
+        let paths = model
+            .issue()
+            .map(|issue| {
+                model
+                    .issue_work(issue)
+                    .into_iter()
+                    .filter(|work| work.tab)
+                    .map(|work| work.path.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        close_tabs(model, paths)
     }
 
     fn create(&self, model: &mut Model, _list: List) -> Vec<Effect> {
