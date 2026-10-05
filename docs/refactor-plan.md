@@ -107,7 +107,7 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
      - `init` from `carnet.rs`
 6. **Zellij stops carrying the runner.**
    - `Zellij::new(runner, &config)` replaces the four hand-built `Zellij { … }` values (`cli.rs`, `jobs.rs`, and the tests in `jobs.rs`, `zellij.rs` and `hooks.rs`).
-   - Its fields become private, with `here()` as an accessor.
+   - Its fields become private, with `here()` as an accessor. That includes `reconciled`, added in step 1 as a public field that every literal sets.
    - Callers that ran other commands through `zellij.runner` use their own runner.
    - `name_for` and `open_siblings` ask `item.is_carnet()` instead of treating `item.repo == None` as "carnet".
 7. **Callers become thin.**
@@ -159,6 +159,7 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
    - `WorkKind::Carnet` carries `tickets`, `closed` and `summary`.
    - `Snapshot.work` holds open carnets only.
    - `Snapshot.carnets` holds every carnet with its workspace and tab, for step 5. `Snapshot.all_carnets` is deleted.
+   - Since step 1, a fast refresh keeps the loaded READMEs and commits, so a carnet's stay stale until the next full refresh. The scan already reads each README: when a carnet's README differs from the loaded one, `Action::Loaded` drops that carnet's README and commits.
 4. **Verbs.**
    - `regroup` on a carnet calls `set_first_ticket` and renames its tab. Worktrees keep today's path.
    - New `close_carnet(path)`, which also closes its tab, and `reopen_carnet(path)`.
