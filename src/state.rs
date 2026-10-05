@@ -83,7 +83,7 @@ pub enum ItemKind {
 }
 
 impl ItemKind {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             ItemKind::Worktree => "worktree",
             ItemKind::Carnet => "carnet",
@@ -509,6 +509,18 @@ impl State {
                  AND (?3 IS NULL OR fetched_at >= datetime('now', ?3))",
                 params![source, key, since],
                 |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// A cached remote response of any age and when it was fetched, `YYYY-MM-DD HH:MM:SS` UTC.
+    pub fn cached_entry(&self, source: &str, key: &str) -> Result<Option<(String, String)>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT json, fetched_at FROM cache WHERE source = ? AND key = ?",
+                params![source, key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?)
     }

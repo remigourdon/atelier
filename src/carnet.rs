@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use color_eyre::eyre::{Result, WrapErr, bail, eyre};
+use color_eyre::eyre::{Result, WrapErr, bail};
 use regex::Regex;
 use toml_edit::{Array, DocumentMut, value};
 
@@ -177,41 +177,6 @@ pub fn newest_open<'a>(carnets: &'a [Carnet], key: &str) -> Option<&'a Carnet> {
     (carnets.iter())
         .filter(|carnet| !carnet.closed && carnet.tickets.iter().any(|ticket| ticket == key))
         .max_by(|a, b| a.path.cmp(&b.path))
-}
-
-/// The newest open carnet under `root` listing `key` among its tickets, else the group of the
-/// recorded item containing `dir`. Reads the folders and the database only: no command runs.
-pub fn path_for(
-    state: &State,
-    names: &Names,
-    root: &Path,
-    key: Option<&str>,
-    dir: &Path,
-) -> Result<PathBuf> {
-    let key = match key {
-        Some(key) => key.to_owned(),
-        None => {
-            let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_owned());
-            let item = (state.items()?.into_iter())
-                .filter(|item| dir.starts_with(&item.path))
-                .max_by_key(|item| item.path.as_os_str().len())
-                .ok_or_else(|| {
-                    eyre!(
-                        "{} is in no worktree or carnet atelier knows",
-                        dir.display()
-                    )
-                })?;
-            if item.group.is_empty() {
-                bail!("{} is in no group: pass a ticket key", item.path.display());
-            }
-            item.group
-        }
-    };
-    let carnets = scan(root, names)?;
-    match newest_open(&carnets, &key) {
-        Some(carnet) => Ok(carnet.path.clone()),
-        None => bail!("no open carnet for {key}: create one with `atelier carnet new`"),
-    }
 }
 
 /// A README's front matter and the rest of it.
@@ -814,68 +779,6 @@ pub mod tests {
         let found = newest_open(&carnets, "ORD-7").unwrap();
         assert_eq!(found.name, "ORD-7-b");
         assert!(newest_open(&carnets, "ORD-8").is_none());
-    }
-
-    /// A worktree of the repo `/r`, registered when new.
-    fn worktree(state: &State, path: &Path, group: &str) {
-        if state.repo_by_path("/r").unwrap().is_none() {
-            state.add_repo("/r", None, "default").unwrap();
-        }
-        let repo = Some(Path::new("/r"));
-        (state.add_item(path, ItemKind::Worktree, repo, group, "default")).unwrap();
-    }
-
-    #[test]
-    fn path_for_finds_the_newest_open_carnet_of_a_key_or_of_the_current_group() {
-        let state = state();
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("carnets");
-        let older = repo(&root, "2026-01-01-ABC-1-a", None);
-        let newer = repo(&root, "2026-02-01-ABC-1-b", None);
-        repo(
-            &root,
-            "2026-03-01-ABC-1-c",
-            Some("+++\nclosed = true\n+++\n"),
-        );
-        let tree = dir.path().join("r.ABC-1-x");
-        std::fs::create_dir_all(tree.join("src")).unwrap();
-        let tree = tree.canonicalize().unwrap();
-        worktree(&state, &tree, "ABC-1");
-        std::fs::create_dir(dir.path().join("r.plain")).unwrap();
-        let plain = dir.path().join("r.plain").canonicalize().unwrap();
-        worktree(&state, &plain, "");
-        state
-            .add_item(&older, ItemKind::Carnet, None, "ABC-1", "default")
-            .unwrap();
-        let found = |key: Option<&str>, dir: &Path| {
-            path_for(&state, &names(), &root, key, dir).map_err(|err| err.to_string())
-        };
-        assert_eq!(
-            found(Some("ABC-1"), dir.path()),
-            Ok(newer.clone()),
-            "the closed one is skipped"
-        );
-        assert_eq!(
-            found(None, &tree.join("src")),
-            Ok(newer.clone()),
-            "the worktree's group"
-        );
-        assert_eq!(
-            found(None, &older),
-            Ok(newer),
-            "inside a carnet, its own group"
-        );
-        assert!(
-            found(None, dir.path())
-                .unwrap_err()
-                .contains("no worktree or carnet")
-        );
-        assert!(found(None, &plain).unwrap_err().contains("no group"));
-        assert!(
-            found(Some("XYZ-9"), dir.path())
-                .unwrap_err()
-                .contains("atelier carnet new")
-        );
     }
 
     #[test]

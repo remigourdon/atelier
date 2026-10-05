@@ -506,6 +506,33 @@ pub fn fetch(
     (issues, error)
 }
 
+/// The issue `key` as the last fetch of a configured scope left it in the cache, and when that
+/// fetch ran. Runs no command.
+pub fn cached(
+    state: &crate::state::State,
+    config: &TrackerConfig,
+    key: &str,
+) -> Result<Option<(Issue, String)>> {
+    let mut found = None;
+    for (tracker, scopes) in config.scopes() {
+        for scope in scopes {
+            let entry = state.cached_entry(tracker.cli(), &format!("issues {scope}"))?;
+            let Some((json, fetched_at)) = entry else {
+                continue;
+            };
+            let Ok(issues) = serde_json::from_str::<Vec<Issue>>(&json) else {
+                continue;
+            };
+            if let Some(issue) = issues.into_iter().find(|issue| issue.key == key)
+                && found.as_ref().is_none_or(|(_, at)| *at < fetched_at)
+            {
+                found = Some((issue, fetched_at));
+            }
+        }
+    }
+    Ok(found)
+}
+
 /// The subset of each tracker's JSON that atelier reads.
 mod raw {
     use super::Deserialize;

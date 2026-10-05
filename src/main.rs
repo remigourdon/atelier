@@ -1,6 +1,7 @@
 mod carnet;
 mod cli;
 mod config;
+mod context;
 mod git;
 mod hooks;
 mod issues;
