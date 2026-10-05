@@ -10,6 +10,7 @@ use super::lists;
 pub use super::lists::carnets::Search;
 pub use super::lists::work::Row;
 use super::schedule::Schedule;
+use crate::carnet::Stamp;
 use crate::issues::{self, Issue, TrackerConfig};
 pub use crate::items::{Removal, Snapshot, Work, WorkKind};
 use crate::process::Logged;
@@ -103,6 +104,8 @@ pub enum Job {
         full: bool,
     },
     Commits(PathBuf),
+    /// Reads a carnet's README.
+    Readme(PathBuf),
     Open(Vec<PathBuf>),
     Close(Vec<PathBuf>),
     Pull(Vec<PathBuf>),
@@ -233,7 +236,7 @@ impl Job {
     pub fn source(&self) -> Source {
         match self {
             Job::Refresh { .. } => Source::Wt,
-            Job::Commits(_) => Source::Git,
+            Job::Commits(_) | Job::Readme(_) => Source::Git,
             Job::Fetch { feed, .. } => Source::Feed(*feed),
             _ => Source::Run,
         }
@@ -330,6 +333,7 @@ pub enum Action {
         log: Vec<Logged>,
     },
     Commits(PathBuf, Vec<String>),
+    Readme(Readme),
     /// A carnet search's hit lines by carnet, `None` when it failed.
     Searched {
         text: String,
@@ -584,6 +588,16 @@ pub fn popup_hints(popup: Popup) -> String {
 
 const LOG_LIMIT: usize = 500;
 
+/// A carnet's README as a job read it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Readme {
+    pub path: PathBuf,
+    /// Taken before reading, so a README written meanwhile reads again at the next refresh.
+    pub stamp: Option<Stamp>,
+    /// `None` when the carnet has none.
+    pub text: Option<String>,
+}
+
 pub struct Model {
     pub snapshot: Snapshot,
     pub loaded: bool,
@@ -608,6 +622,8 @@ pub struct Model {
     /// What is loading, and when to refresh.
     pub schedule: Schedule,
     pub commits: HashMap<PathBuf, Vec<String>>,
+    /// The selected carnet's README, the only one kept, shown until read again.
+    pub readme: Option<Readme>,
     /// Both providers' reviews in both roles, most recently updated first.
     pub reviews: Vec<Review>,
     /// Where issues come from and their sections.
@@ -643,6 +659,7 @@ impl Model {
             log: Vec::new(),
             schedule: Schedule::default(),
             commits: HashMap::new(),
+            readme: None,
             reviews: Vec::new(),
             tracker_config: TrackerConfig::default(),
             issues: Vec::new(),

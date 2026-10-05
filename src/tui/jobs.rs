@@ -4,15 +4,16 @@ use std::path::PathBuf;
 
 use color_eyre::eyre::{Report, Result, eyre};
 
-use super::app::{Action, Feed, Job, Rows};
+use super::app::{Action, Feed, Job, Readme, Rows};
+use crate::carnet::{self, Stamp};
 use crate::config::Config;
+use crate::git;
 use crate::issues::{self, TrackerConfig};
 use crate::items::Items;
 use crate::process::{Logged, Recorder, Runner, System};
 use crate::reviews::{self, Role};
 use crate::state::{self, State};
 use crate::zellij::{Layouts, Zellij};
-use crate::{carnet, git};
 
 /// What every job needs, shared across them.
 pub struct Context {
@@ -74,6 +75,11 @@ pub fn run(context: &Context, job: Job) -> Action {
         Job::Commits(path) => {
             let lines = git::log(&recorder, &path).unwrap_or_default();
             Action::Commits(path, lines)
+        }
+        Job::Readme(path) => {
+            let stamp = Stamp::of(&path);
+            let text = std::fs::read_to_string(path.join("README.md")).ok();
+            Action::Readme(Readme { path, stamp, text })
         }
         Job::SearchCarnets(text) => {
             let hits = match context.config.carnet_root() {
@@ -189,7 +195,11 @@ fn fetch(
 fn execute(context: &Context, state: &State, runner: &dyn Runner, job: Job) -> Result<()> {
     let items = context.items(state, runner)?;
     match job {
-        Job::Refresh { .. } | Job::Commits(_) | Job::SearchCarnets(_) | Job::Fetch { .. } => {
+        Job::Refresh { .. }
+        | Job::Commits(_)
+        | Job::Readme(_)
+        | Job::SearchCarnets(_)
+        | Job::Fetch { .. } => {
             unreachable!("run handles these")
         }
         Job::Open(paths) => items.open(&paths),

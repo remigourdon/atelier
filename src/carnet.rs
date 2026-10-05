@@ -2,7 +2,9 @@
 //! the front matter of their README.
 
 use std::collections::BTreeMap;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use color_eyre::eyre::{Result, WrapErr, bail, eyre};
 use regex::Regex;
@@ -80,8 +82,8 @@ pub struct Carnet {
     pub tickets: Vec<String>,
     pub closed: bool,
     pub summary: String,
-    /// The README as read, `None` when it has none.
-    pub readme: Option<String>,
+    /// Its README's stamp, `None` when it has none.
+    pub readme: Option<Stamp>,
 }
 
 impl Carnet {
@@ -89,6 +91,46 @@ impl Carnet {
     pub fn group(&self) -> &str {
         self.tickets.first().map_or("", String::as_str)
     }
+}
+
+/// A README's size and modification time, which change when it is written, so a copy read
+/// earlier can be told stale without keeping the text to compare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stamp {
+    pub len: u64,
+    pub modified: Option<SystemTime>,
+}
+
+impl Stamp {
+    /// The stamp of the README in `carnet`, `None` when it has none.
+    pub fn of(carnet: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(carnet.join("README.md")).ok()?;
+        Some(Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        })
+    }
+}
+
+/// The start of a README up to the end of its front matter, else its first line, so a long
+/// README costs a few lines to scan. Empty when it cannot be read.
+fn read_front(readme: &Path) -> String {
+    let Ok(file) = std::fs::File::open(readme) else {
+        return String::new();
+    };
+    let mut reader = BufReader::new(file);
+    let mut front = String::new();
+    loop {
+        let start = front.len();
+        if !matches!(reader.read_line(&mut front), Ok(read) if read > 0) {
+            break;
+        }
+        let fence = front[start..].trim_end() == FENCE;
+        if fence != (start == 0) {
+            break;
+        }
+    }
+    front
 }
 
 /// Every carnet directly under `root`: a directory named `YYYY-MM-DD-…` with a `.git`, newest
@@ -107,15 +149,14 @@ pub fn scan(root: &Path, names: &Names) -> Result<Vec<Carnet>> {
         if !path.is_dir() || !path.join(".git").exists() {
             continue;
         }
-        let readme = std::fs::read_to_string(path.join("README.md")).ok();
-        let front = Front::parse(readme.as_deref().unwrap_or("")).unwrap_or_default();
+        let front = Front::parse(&read_front(&path.join("README.md"))).unwrap_or_default();
         carnets.push(Carnet {
             tickets: front.tickets().unwrap_or_else(|| fallback(names, &folder)),
             closed: front.closed(),
             summary: front.summary(),
             date: captures[1].to_owned(),
             name: captures[2].to_owned(),
-            readme,
+            readme: Stamp::of(&path),
             path,
         });
     }
@@ -656,9 +697,23 @@ pub mod tests {
         );
         assert!(carnets[0].closed && carnets[0].summary == "Slow");
         assert!(!carnets[1].closed && carnets[1].summary.is_empty());
-        assert_eq!(carnets[1].readme.as_deref(), Some("# no front matter\n"));
+        assert_eq!(carnets[1].readme.map(|stamp| stamp.len), Some(18));
         assert_eq!(carnets[2].readme, None);
         assert_eq!(scan(&root.join("missing"), &names()).unwrap(), []);
+    }
+
+    #[test]
+    fn a_scan_reads_a_readme_up_to_its_front_matter_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let read = |readme: &str| {
+            let path = dir.path().join("README.md");
+            std::fs::write(&path, readme).unwrap();
+            read_front(&path)
+        };
+        assert_eq!(read("+++\na = 1\n+++\n# T\nlong\n"), "+++\na = 1\n+++\n");
+        assert_eq!(read("# T\nlong\n"), "# T\n", "no front matter");
+        assert_eq!(read("+++\nunclosed\n"), "+++\nunclosed\n");
+        assert_eq!(read_front(&dir.path().join("missing")), "");
     }
 
     #[test]

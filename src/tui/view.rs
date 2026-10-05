@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use super::app::{
-    Cmd, Focus, KEYMAP, List, Model, Panel, Popup, Screen, Source, Work, WorkKind, popup_hints,
+    Cmd, Focus, KEYMAP, List, Model, Panel, Popup, Screen, Source, Work, popup_hints,
 };
 use super::lists;
 use super::widgets;
@@ -291,13 +291,12 @@ fn selected(model: &Model) -> Option<&Work> {
     lists::of(list).item(model, list)
 }
 
-/// The selected carnet's README, as the snapshot read it.
+/// The selected carnet's README, rendered once read.
 fn readme(model: &Model) -> Option<Text<'_>> {
-    let WorkKind::Carnet { readme, .. } = &selected(model)?.kind else {
-        return None;
-    };
+    let path = selected(model)?.path();
+    let readme = (model.readme.as_ref()).filter(|readme| readme.path == *path)?;
     Some(tui_markdown::from_str(crate::carnet::body(
-        readme.as_deref()?,
+        readme.text.as_deref()?,
     )))
 }
 

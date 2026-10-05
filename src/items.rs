@@ -54,8 +54,8 @@ pub enum WorkKind {
         tickets: Vec<String>,
         closed: bool,
         summary: String,
-        /// The README as the snapshot read it, so a stale loaded one can be told apart.
-        readme: Option<String>,
+        /// Its README's stamp, so a stale loaded one can be told apart.
+        readme: Option<carnet::Stamp>,
     },
 }
 

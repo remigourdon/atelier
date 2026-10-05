@@ -252,12 +252,12 @@ mod tests {
         }
         let text =
             "+++\nsummary = \"hidden\"\n+++\n# 2026-10-02-ideas\n\nWhat I found **so far**.\n";
-        let listed = (model.snapshot.work.iter_mut()).chain(&mut model.snapshot.carnets);
-        for work in listed.filter(|work| work.path.ends_with("2026-10-02-ideas")) {
-            if let WorkKind::Carnet { readme, .. } = &mut work.kind {
-                *readme = Some(text.into());
-            }
-        }
+        let readme = app::Readme {
+            path: "/data/2026-10-02-ideas".into(),
+            stamp: None,
+            text: Some(text.into()),
+        };
+        update(&mut model, Action::Readme(readme));
         model.schedule.finish_all();
         insta::assert_snapshot!(render(&model, 120, 30));
     }

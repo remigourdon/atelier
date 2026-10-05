@@ -12,8 +12,8 @@ use tui_input::backend::crossterm::EventHandler;
 
 use super::app::{
     Action, Binding, Cmd, Effect, Feed, Focus, Job, KEYMAP, List, MenuEntry, Modal, Model, On,
-    Panel, Popup, PopupCmd, Row, Rows, Screen, Search, Snapshot, Source, Submit, Work, lookup,
-    popup_lookup,
+    Panel, Popup, PopupCmd, Row, Rows, Screen, Search, Snapshot, Source, Submit, Work, WorkKind,
+    lookup, popup_lookup,
 };
 use super::lists;
 use super::view::{areas, main_len, offset};
@@ -88,6 +88,13 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
         }
         Action::Commits(path, lines) => {
             model.commits.insert(path, lines);
+            done(model, Source::Git)
+        }
+        Action::Readme(readme) => {
+            // A read for a carnet since left is dropped, so it does not replace the selected one's.
+            if selected(model).is_some_and(|work| work.path == readme.path) {
+                model.readme = Some(readme);
+            }
             done(model, Source::Git)
         }
         Action::Searched { text, hits, log } => {
@@ -280,15 +287,26 @@ fn selected(model: &Model) -> Option<&Work> {
     (lists::of(list).item(model, list)).or_else(|| lists::of(List::Work).item(model, List::Work))
 }
 
-/// Fetches the selected item's recent commits unless they are loaded.
+/// Fetches the selected item's recent commits unless they are loaded, and a carnet's README
+/// unless the one loaded is its current one.
 fn commits(model: &mut Model) -> Vec<Effect> {
-    match selected(model) {
-        Some(work) if !model.commits.contains_key(&work.path) => {
-            let path = work.path.clone();
-            vec![run(model, Job::Commits(path))]
-        }
-        _ => Vec::new(),
+    let Some(work) = selected(model) else {
+        return Vec::new();
+    };
+    let path = work.path.clone();
+    let stale_readme = match &work.kind {
+        WorkKind::Carnet { readme: stamp, .. } => (model.readme.as_ref())
+            .is_none_or(|readme| readme.path != path || readme.stamp != *stamp),
+        WorkKind::Worktree { .. } => false,
+    };
+    let mut effects = Vec::new();
+    if stale_readme {
+        effects.push(run(model, Job::Readme(path.clone())));
     }
+    if !model.commits.contains_key(&path) {
+        effects.push(run(model, Job::Commits(path)));
+    }
+    effects
 }
 
 fn key_press(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
@@ -749,8 +767,9 @@ fn mouse_event(model: &mut Model, mouse: MouseEvent) -> Vec<Effect> {
 
 #[cfg(test)]
 pub mod tests {
+    use super::super::app::Readme;
     use super::*;
-    use crate::items::WorkKind;
+    use crate::carnet::Stamp;
     use crate::reviews::{Review, Role};
     use crate::state::Repo;
     use crate::worktrunk::{Forge, Worktree};
@@ -1889,6 +1908,79 @@ pub mod tests {
                 group: String::new(),
             }],
             "the Carnets group is no group"
+        );
+    }
+
+    #[test]
+    fn a_carnets_readme_is_read_when_selected_and_again_once_written() {
+        let mut model = with_carnets(model());
+        press(&mut model, "G\n");
+        let path = PathBuf::from("/data/2026-10-02-ideas");
+        let any_reads = |effects: &[Effect]| {
+            (effects.iter())
+                .filter(|effect| matches!(effect, Effect::Run(Job::Readme(_))))
+                .count()
+        };
+        let reads = |effects: &[Effect]| {
+            (effects.iter())
+                .filter(|effect| matches!(effect, Effect::Run(Job::Readme(read)) if *read == path))
+                .count()
+        };
+        let effects = press(&mut model, "j");
+        assert!(
+            effects.contains(&Effect::Run(Job::Readme(path.clone()))),
+            "{effects:?}"
+        );
+        let readme = |text: &str, len| Readme {
+            path: path.clone(),
+            stamp: Some(Stamp {
+                len,
+                modified: None,
+            }),
+            text: Some(text.into()),
+        };
+        let refresh = |model: &mut Model, len| {
+            let mut snapshot = model.snapshot.clone();
+            let listed = snapshot.work.iter_mut().chain(&mut snapshot.carnets);
+            for work in listed.filter(|work| work.path == path) {
+                if let WorkKind::Carnet { readme, .. } = &mut work.kind {
+                    *readme = Some(Stamp {
+                        len,
+                        modified: None,
+                    });
+                }
+            }
+            model.schedule.finish_all();
+            let log = Vec::new();
+            let snapshot = Ok(snapshot);
+            let action = Action::Loaded {
+                snapshot,
+                full: false,
+                log,
+            };
+            update(model, action)
+        };
+        assert_eq!(reads(&refresh(&mut model, 1)), 1);
+        update(&mut model, Action::Readme(readme("# ideas", 1)));
+        assert_eq!(reads(&press(&mut model, "jk")), 0, "read once");
+        assert_eq!(reads(&refresh(&mut model, 1)), 0, "unchanged");
+        assert_eq!(reads(&refresh(&mut model, 2)), 1, "written");
+        assert!(model.readme.is_some(), "shown until read again");
+        press(&mut model, "j");
+        update(&mut model, Action::Readme(readme("# late", 2)));
+        assert_ne!(
+            model
+                .readme
+                .as_ref()
+                .and_then(|readme| readme.text.as_deref()),
+            Some("# late"),
+            "a read for a carnet since left is dropped"
+        );
+        press(&mut model, "gg");
+        assert_eq!(
+            any_reads(&press(&mut model, "j")),
+            0,
+            "a worktree has no README"
         );
     }
 
