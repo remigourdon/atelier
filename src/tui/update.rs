@@ -109,6 +109,24 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
             }
             effects
         }
+        Action::Planned { plan, log } => {
+            let mut effects = done(model, Source::Run);
+            model.push_log(log);
+            match plan {
+                Ok(plan) => {
+                    let selected = plan.checkable().first().copied().unwrap_or(0);
+                    model.modal = Some(Modal::Finish { plan, selected });
+                }
+                Err(error) => model.push_log([Logged {
+                    command: "finish plan".into(),
+                    error: Some(error),
+                }]),
+            }
+            // Its fresh listing may show the marks anew.
+            let jobs = model.schedule.changed();
+            effects.extend(start(model, jobs));
+            effects
+        }
         Action::Fetched { feed, rows, log } => {
             let effects = done(model, Source::Feed(feed));
             model.push_log(log);
@@ -394,7 +412,7 @@ fn modal_key(model: &mut Model, modal: Modal, key: KeyEvent) -> Vec<Effect> {
                 Some(PopupCmd::Up) => selected = selected.saturating_sub(1),
                 Some(PopupCmd::Top) => selected = 0,
                 Some(PopupCmd::Bottom) => selected = last,
-                None => {
+                Some(PopupCmd::Toggle) | None => {
                     let shortcut = entries
                         .iter()
                         .find(|entry| match key.code {
@@ -412,6 +430,35 @@ fn modal_key(model: &mut Model, modal: Modal, key: KeyEvent) -> Vec<Effect> {
                 entries,
                 selected,
             });
+            Vec::new()
+        }
+        Modal::Finish { mut plan, selected } => {
+            let checkable = plan.checkable();
+            let at = checkable.iter().position(|&index| index == selected);
+            let selected = match popup_lookup(Popup::Finish, &key) {
+                Some(PopupCmd::Accept) => {
+                    let steps = plan.checked();
+                    return if steps.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![run(model, Job::Finish(steps))]
+                    };
+                }
+                Some(PopupCmd::Cancel) => return Vec::new(),
+                Some(PopupCmd::Toggle) => {
+                    plan.toggle(selected);
+                    selected
+                }
+                Some(PopupCmd::Down) => at
+                    .and_then(|at| checkable.get(at + 1))
+                    .copied()
+                    .unwrap_or(selected),
+                Some(PopupCmd::Up) => {
+                    (at.filter(|&at| at > 0)).map_or(selected, |at| checkable[at - 1])
+                }
+                _ => selected,
+            };
+            model.modal = Some(Modal::Finish { plan, selected });
             Vec::new()
         }
     }
@@ -586,6 +633,7 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
         Cmd::Close | Cmd::ToggleCarnet | Cmd::Pull | Cmd::Search => {
             return lists::of(list).command(model, list, cmd);
         }
+        Cmd::Finish => return lists::of(list).finish(model, list),
         Cmd::Browse => {
             return match lists::of(list).url(model, list) {
                 Some(url) => vec![run(model, Job::Browse(url))],
@@ -770,6 +818,7 @@ pub mod tests {
     use super::super::app::Readme;
     use super::*;
     use crate::carnet::Stamp;
+    use crate::finish::{self, Scope, Step};
     use crate::reviews::{Review, Role};
     use crate::state::Repo;
     use crate::worktrunk::{Forge, Worktree};
@@ -793,6 +842,7 @@ pub mod tests {
                     path,
                     branch: Some(branch.into()),
                     main,
+                    on_default: main,
                     short_sha: "abc1234".into(),
                     subject: "Commit".into(),
                     ..Worktree::default()
@@ -1018,6 +1068,136 @@ pub mod tests {
         press(&mut model, "d");
         assert!(model.modal.is_none());
         assert!(model.log.last().unwrap().command.contains("main"));
+    }
+
+    fn plan_scope(effects: Vec<Effect>) -> (Scope, Vec<PathBuf>) {
+        match &jobs(effects)[..] {
+            [Job::Plan { scope, repos }] => (scope.clone(), repos.clone()),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn f_plans_the_selections_groups_a_workspace_or_an_issues_linked_work() {
+        let mut model = with_issues(model());
+        let both = vec![PathBuf::from("/src/api"), PathBuf::from("/src/web")];
+        let group = Scope::Work {
+            groups: vec!["ABC-1".into()],
+            items: Vec::new(),
+        };
+        assert_eq!(
+            plan_scope(press(&mut model, "jf")),
+            (group, both.clone()),
+            "one row selected, its whole group across repos"
+        );
+        let alone = Scope::Work {
+            groups: Vec::new(),
+            items: vec!["/src/api".into()],
+        };
+        assert_eq!(
+            plan_scope(press(&mut model, "Gf")),
+            (alone, vec!["/src/api".into()]),
+            "an item in no group, alone"
+        );
+        assert_eq!(
+            plan_scope(press(&mut model, "1f")),
+            (Scope::Workspace("default".into()), both.clone())
+        );
+        let (scope, repos) = plan_scope(press(&mut model, "4]jf"));
+        assert_eq!(
+            scope,
+            Scope::Issue {
+                key: "ABC-1".into(),
+                state: "to do".into()
+            }
+        );
+        assert_eq!(repos, both);
+        assert!(model.schedule.is_loading(Source::Run), "fetching shows");
+        press(&mut model, "3");
+        assert!(
+            jobs(press(&mut model, "f")).is_empty(),
+            "reviews have no plan"
+        );
+    }
+
+    /// The ABC-1 plan: api:ABC-1-login integrated, web:ABC-1-form gone and dirty.
+    fn planned(model: &mut Model) -> Vec<Effect> {
+        model.snapshot.work[1].tree_mut().integrated = true;
+        let form = model.snapshot.work[2].tree_mut();
+        (form.gone, form.dirty) = (true, true);
+        let scope = Scope::Work {
+            groups: vec!["ABC-1".into()],
+            items: Vec::new(),
+        };
+        let plan = finish::plan(&model.snapshot, &scope, &[]);
+        let log = vec![Logged {
+            command: "git -C /src/api fetch --prune".into(),
+            error: None,
+        }];
+        update(
+            model,
+            Action::Planned {
+                plan: Ok(plan),
+                log,
+            },
+        )
+    }
+
+    fn finish_modal(model: &Model) -> (&finish::Plan, usize) {
+        match &model.modal {
+            Some(Modal::Finish { plan, selected }) => (plan, *selected),
+            other => panic!("no finish plan: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_finish_plan_opens_toggles_and_runs_its_checked_lines() {
+        let mut model = model();
+        let effects = planned(&mut model);
+        assert_eq!(effects, [Effect::Run(Job::Refresh { full: false })]);
+        assert_eq!(model.log.len(), 1, "the fetch is logged");
+        let (plan, selected) = finish_modal(&model);
+        assert_eq!(selected, 0);
+        assert_eq!(plan.checked().len(), 1, "the dirty one is unchecked");
+        press(&mut model, "jj");
+        assert_eq!(
+            finish_modal(&model).1,
+            1,
+            "stays on the last checkable line"
+        );
+        press(&mut model, " k ");
+        assert_eq!(finish_modal(&model).1, 0);
+        let jobs = jobs(press(&mut model, "\n"));
+        let [Job::Finish(steps)] = &jobs[..] else {
+            panic!("{jobs:?}");
+        };
+        let [Step::Remove(removal)] = &steps[..] else {
+            panic!("{steps:?}");
+        };
+        assert_eq!(removal.path, PathBuf::from("/src/web.ABC-1-form"));
+        assert!(removal.force);
+        assert!(model.modal.is_none());
+    }
+
+    #[test]
+    fn the_finish_plan_cancels_and_runs_nothing_when_nothing_is_checked() {
+        let mut model = model();
+        planned(&mut model);
+        assert!(jobs(press(&mut model, "\x1b")).is_empty());
+        assert!(model.modal.is_none());
+        planned(&mut model);
+        press(&mut model, " ");
+        assert!(jobs(press(&mut model, "\n")).is_empty());
+        assert!(model.modal.is_none());
+        update(
+            &mut model,
+            Action::Planned {
+                plan: Err("no database".into()),
+                log: Vec::new(),
+            },
+        );
+        assert!(model.modal.is_none());
+        assert_eq!(model.log.last().unwrap().command, "finish plan");
     }
 
     #[test]

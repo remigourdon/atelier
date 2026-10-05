@@ -282,6 +282,45 @@ mod tests {
         insta::assert_snapshot!(render(&model, 120, 30));
     }
 
+    /// The ABC-1 group's work finished: the login worktree integrated with its tab open, the
+    /// form one's upstream gone with two unmerged commits, and a third still in flight.
+    fn finished(width: u16, height: u16) -> Model {
+        let mut model = update::tests::with_carnets(loaded(width, height));
+        model.snapshot.work[1].tree_mut().dirty = false;
+        model.snapshot.work[1].tree_mut().symbols = String::new();
+        model.snapshot.work[1].tree_mut().integrated = true;
+        let form = model.snapshot.work[2].tree_mut();
+        (form.gone, form.ahead_of_default) = (true, Some(2));
+        let mut wip = update::tests::work("web", "ABC-1-wip", "ABC-1", "side");
+        wip.tree_mut().upstream = Some((1, 0));
+        model.snapshot.work.push(wip);
+        model
+    }
+
+    #[test]
+    fn finished_rows_are_dimmed_and_marked() {
+        insta::assert_snapshot!(render(&finished(120, 30), 120, 30));
+    }
+
+    #[test]
+    fn finish_plan() {
+        let mut model = finished(120, 30);
+        let scope = crate::finish::Scope::Work {
+            groups: vec!["ABC-1".into()],
+            items: Vec::new(),
+        };
+        let plan = crate::finish::plan(&model.snapshot, &scope, &["web".into()]);
+        update(
+            &mut model,
+            Action::Planned {
+                plan: Ok(plan),
+                log: Vec::new(),
+            },
+        );
+        model.schedule.finish_all();
+        insta::assert_snapshot!(render(&model, 120, 30));
+    }
+
     #[test]
     fn actions_menu() {
         let mut model = loaded(100, 30);

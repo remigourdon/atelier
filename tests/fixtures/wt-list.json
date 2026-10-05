@@ -93,6 +93,48 @@
       }
     },
     {
+      "branch": "ABC-9-merged",
+      "head": {
+        "sha": "2c3d4e5f60718293a4b5c6d7e8f9012345678a1b",
+        "short_sha": "2c3d4e5",
+        "subject": "Fix the login flake",
+        "committed_at": "2026-10-03T09:00:00Z"
+      },
+      "worktree": {
+        "path": "/home/remi/atelier.ABC-9-merged",
+        "main": false,
+        "current": false,
+        "previous": false,
+        "detached": false,
+        "branch_mismatch": false,
+        "duplicate_branch": false,
+        "changes": {
+          "staged": false,
+          "modified": false,
+          "untracked": false,
+          "renamed": false,
+          "deleted": false,
+          "conflicted": false,
+          "diff": {
+            "added": 0,
+            "deleted": 0
+          }
+        }
+      },
+      "default_branch": {
+        "ahead": 1,
+        "behind": 2,
+        "integration": {
+          "reason": "trees_match"
+        }
+      },
+      "display": {
+        "state": "integrated",
+        "symbols": "⊂",
+        "statusline": "ABC-9-merged  ⊂"
+      }
+    },
+    {
       "branch": "old-branch",
       "head": {
         "sha": "0000000000000000000000000000000000000000",

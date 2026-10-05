@@ -1,6 +1,5 @@
 ---
 source: src/tui/mod.rs
-assertion_line: 259
 expression: "render(&model, 120, 30)"
 ---
 "╭[1] Workspaces │ Repos────────────────╮╭ Main ────────────────────────────────────────────────────────────────────────╮"
@@ -32,4 +31,4 @@ expression: "render(&model, 120, 30)"
 "│                                      ││                                                                              │"
 "│                                      ││                                                                              │"
 "╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯"
-"Space open · n new · e edit · m move · d remove · x close · c close · p pull · ? actions · q quit                       "
+"Space open · n new · e edit · m move · d remove · x close · c close · p pull · f finish · ? actions · q quit            "

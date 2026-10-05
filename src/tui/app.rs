@@ -11,6 +11,7 @@ pub use super::lists::carnets::Search;
 pub use super::lists::work::Row;
 use super::schedule::Schedule;
 use crate::carnet::Stamp;
+use crate::finish::{Plan, Scope, Step};
 use crate::issues::{self, Issue, TrackerConfig};
 pub use crate::items::{Removal, Snapshot, Work, WorkKind};
 use crate::process::Logged;
@@ -156,6 +157,13 @@ pub enum Job {
         keys: Vec<String>,
         force: bool,
     },
+    /// Fetches the scope's repos, then builds its finish plan from a fresh listing.
+    Plan {
+        scope: Scope,
+        repos: Vec<PathBuf>,
+    },
+    /// Runs a finish plan's checked steps.
+    Finish(Vec<Step>),
     /// Checks out a review's branch with `wt switch pr:N` or `mr:N` in its registered repo and
     /// workspace, and focuses its tab.
     Checkout {
@@ -309,6 +317,8 @@ pub enum Modal {
         entries: Vec<MenuEntry>,
         selected: usize,
     },
+    /// A finish plan, its lines toggled before running; `selected` indexes its lines.
+    Finish { plan: Plan, selected: usize },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -338,6 +348,11 @@ pub enum Action {
     Searched {
         text: String,
         hits: Option<BTreeMap<PathBuf, Vec<String>>>,
+        log: Vec<Logged>,
+    },
+    /// A finish plan, built once its repos were fetched.
+    Planned {
+        plan: Result<Plan, String>,
         log: Vec<Logged>,
     },
     /// A feed's rows, replacing the ones it listed before.
@@ -384,6 +399,7 @@ pub enum Cmd {
     Remove,
     Close,
     Pull,
+    Finish,
     ToggleCarnet,
     Search,
     Browse,
@@ -456,6 +472,7 @@ const ALL: &[Kind] = &[
     Kind::Reviews,
     Kind::Issues,
 ];
+const FINISH: &[Kind] = &[Kind::Workspaces, Kind::Work, Kind::Issues];
 const NONE: &[Kind] = &[];
 
 /// The keymap: it drives key handling, the `?` menu and the hint bar.
@@ -493,7 +510,8 @@ pub const KEYMAP: &[Binding] = &[
     Binding { keys: &[ch('x')], label: "x", cmd: Cmd::Close, help: "close tab", hint: WORK, on: On::Lists(WORK) },
     Binding { keys: &[ch('c')], label: "c", cmd: Cmd::ToggleCarnet, help: "close or reopen carnet", hint: CARNETS, on: On::Lists(CARNETS) },
     Binding { keys: &[ch('s')], label: "s", cmd: Cmd::Search, help: "search inside carnets (rg)", hint: &[Kind::Carnets], on: On::Lists(&[Kind::Carnets]) },
-    Binding { keys: &[ch('p')], label: "p", cmd: Cmd::Pull, help: "pull (git pull --ff-only)", hint: WORK, on: On::Lists(WORK) },
+    Binding { keys: &[ch('p')], label: "p", cmd: Cmd::Pull, help: "pull (git pull --ff-only --prune)", hint: WORK, on: On::Lists(WORK) },
+    Binding { keys: &[ch('f')], label: "f", cmd: Cmd::Finish, help: "finish merged work: remove worktrees, close carnet, pull main", hint: FINISH, on: On::Lists(FINISH) },
     Binding { keys: &[ch('o')], label: "o", cmd: Cmd::Browse, help: "browse (open in the browser)", hint: REMOTE, on: On::Lists(&[Kind::Repos, Kind::Work, Kind::Reviews, Kind::Issues]) },
     Binding { keys: &[ch('y')], label: "y", cmd: Cmd::CopyMenu, help: "copy path, branch or URL", hint: NONE, on: On::Lists(ALL) },
     Binding { keys: &[ctrl('o')], label: "C-o", cmd: Cmd::CopyPath, help: "copy path", hint: NONE, on: On::Lists(ALL) },
@@ -523,6 +541,7 @@ pub enum Popup {
     Confirm,
     Menu,
     Filter,
+    Finish,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -535,6 +554,8 @@ pub enum PopupCmd {
     Accept,
     /// Close, or clear the filter.
     Cancel,
+    /// Check or uncheck a line.
+    Toggle,
 }
 
 pub struct PopupBinding {
@@ -558,6 +579,11 @@ pub const POPUP_KEYMAP: &[PopupBinding] = &[
     PopupBinding { popup: Popup::Menu, keys: &[ch('>'), code(KeyCode::End), ch('G')], label: ">/End/G", cmd: PopupCmd::Bottom, help: "bottom" },
     PopupBinding { popup: Popup::Menu, keys: &[code(KeyCode::Enter)], label: "Enter", cmd: PopupCmd::Accept, help: "run" },
     PopupBinding { popup: Popup::Menu, keys: &[code(KeyCode::Esc), ch('q')], label: "Esc", cmd: PopupCmd::Cancel, help: "close" },
+    PopupBinding { popup: Popup::Finish, keys: &[ch('j'), code(KeyCode::Down)], label: "j/↓", cmd: PopupCmd::Down, help: "next" },
+    PopupBinding { popup: Popup::Finish, keys: &[ch('k'), code(KeyCode::Up)], label: "k/↑", cmd: PopupCmd::Up, help: "previous" },
+    PopupBinding { popup: Popup::Finish, keys: &[ch(' ')], label: "Space", cmd: PopupCmd::Toggle, help: "toggle" },
+    PopupBinding { popup: Popup::Finish, keys: &[code(KeyCode::Enter)], label: "Enter", cmd: PopupCmd::Accept, help: "run" },
+    PopupBinding { popup: Popup::Finish, keys: &[code(KeyCode::Esc), ch('q')], label: "Esc", cmd: PopupCmd::Cancel, help: "cancel" },
     PopupBinding { popup: Popup::Filter, keys: &[code(KeyCode::Enter)], label: "Enter", cmd: PopupCmd::Accept, help: "keep" },
     PopupBinding { popup: Popup::Filter, keys: &[code(KeyCode::Esc)], label: "Esc", cmd: PopupCmd::Cancel, help: "clear" },
 ];
@@ -576,12 +602,31 @@ pub fn popup_lookup(popup: Popup, key: &KeyEvent) -> Option<PopupCmd> {
 
 /// How to accept or leave a popup, as its border shows.
 pub fn popup_hints(popup: Popup) -> String {
+    hints(popup, |_| String::new())
+}
+
+/// A finish plan's keys, counting the lines `Enter` runs.
+pub fn finish_hints(checked: usize) -> String {
+    hints(Popup::Finish, |cmd| {
+        if cmd == PopupCmd::Accept {
+            format!(" {checked}")
+        } else {
+            String::new()
+        }
+    })
+}
+
+fn hints(popup: Popup, suffix: impl Fn(PopupCmd) -> String) -> String {
     POPUP_KEYMAP
         .iter()
         .filter(|binding| {
-            binding.popup == popup && matches!(binding.cmd, PopupCmd::Accept | PopupCmd::Cancel)
+            binding.popup == popup
+                && matches!(
+                    binding.cmd,
+                    PopupCmd::Toggle | PopupCmd::Accept | PopupCmd::Cancel
+                )
         })
-        .map(|binding| format!("{} {}", binding.label, binding.help))
+        .map(|binding| format!("{} {}{}", binding.label, binding.help, suffix(binding.cmd)))
         .collect::<Vec<_>>()
         .join(" · ")
 }

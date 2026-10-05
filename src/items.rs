@@ -8,6 +8,7 @@ use color_eyre::eyre::{Result, eyre};
 use regex::Regex;
 
 use crate::config::{Config, group_from_name};
+use crate::finish::Step;
 use crate::process::{Logged, Runner};
 use crate::reviews::Review;
 use crate::state::{self, ItemKind, Repo, State, Tab};
@@ -370,6 +371,29 @@ impl<'a> Items<'a> {
         })
     }
 
+    /// Fetches each repo, pruning gone branches, and returns the repos whose fetch failed with
+    /// the error.
+    pub fn fetch(&self, repos: &[PathBuf]) -> Vec<(PathBuf, color_eyre::Report)> {
+        (repos.iter())
+            .filter_map(|repo| {
+                let err = git::fetch_prune(self.runner, repo).err()?;
+                Some((repo.clone(), err))
+            })
+            .collect()
+    }
+
+    /// Runs a finish plan's checked steps: the removals, then the carnet closes, then the
+    /// pulls, each whatever the others did.
+    pub fn finish(&self, steps: &[Step]) -> Result<()> {
+        let mut steps = steps.to_vec();
+        steps.sort_by_key(Step::order);
+        each(&steps, |step| match step {
+            Step::Remove(removal) => self.remove(std::slice::from_ref(removal)),
+            Step::CloseCarnet(path) => self.set_carnets_closed(std::slice::from_ref(path), true),
+            Step::Pull(path) => git::pull_ff_only(self.runner, path),
+        })
+    }
+
     /// Moves each item to `workspace`, reopening its tab there if one was open.
     pub fn move_to(&self, paths: &[PathBuf], workspace: &str) -> Result<()> {
         each(paths, |path| {
@@ -521,8 +545,11 @@ impl<'a> Items<'a> {
             if let Some(forge) = listing.forge {
                 synced.forges.insert(repo.path.clone(), forge);
             }
+            // Only a sign of finished work, so a failure leaves every branch not gone.
+            let gone = git::gone_branches(self.runner, &repo.path).unwrap_or_default();
             for mut tree in listing.worktrees {
                 tree.path = canonical(&tree.path);
+                tree.gone = (tree.branch.as_ref()).is_some_and(|branch| gone.contains(branch));
                 let name = (tree.branch.clone()).unwrap_or_else(|| state::dir_name(&tree.path));
                 state.add_item(
                     &tree.path,
@@ -1180,6 +1207,83 @@ mod tests {
     }
 
     #[test]
+    fn finish_removes_then_closes_then_pulls_whatever_fails() {
+        let state = state();
+        worktree(&state, "/r.a", "G-1", "default");
+        worktree(&state, "/r.b", "G-1", "default");
+        let dir = tempfile::tempdir().unwrap();
+        let notes = carnet::tests::repo(dir.path(), "2026-10-01-G-1-notes", None);
+        (state.add_item(&notes, ItemKind::Carnet, None, "G-1", "default")).unwrap();
+        let fake = Fake::default().always("wt -C /r remove --foreground --yes a", None);
+        let removal = |branch: &str, force| {
+            Step::Remove(Removal {
+                path: format!("/r.{branch}").into(),
+                repo: "/r".into(),
+                branch: Some(branch.into()),
+                force,
+            })
+        };
+        let steps = [
+            Step::Pull("/r".into()),
+            Step::CloseCarnet(notes.clone()),
+            removal("a", false),
+            removal("b", true),
+        ];
+        let err = items(&state, &fake).finish(&steps).unwrap_err();
+        assert!(err.to_string().contains("remove"), "{err}");
+        let calls = fake.calls();
+        let at = |command: &str| {
+            (calls.iter().position(|call| call.contains(command)))
+                .unwrap_or_else(|| panic!("no {command} in {calls:?}"))
+        };
+        assert_eq!(calls[0], "wt -C /r remove --foreground --yes a");
+        assert_eq!(calls[1], "wt -C /r remove --foreground --yes --force b");
+        assert!(at("commit -m Close") > 1);
+        assert_eq!(calls.last().unwrap(), "git -C /r pull --ff-only --prune");
+        assert!(!calls.iter().any(|call| call.contains(" -D")), "{calls:?}");
+        assert!(
+            state.item("/r.a").unwrap().is_some(),
+            "kept: its removal failed"
+        );
+        assert!(state.item("/r.b").unwrap().is_none());
+    }
+
+    #[test]
+    fn sync_marks_branches_whose_upstream_is_gone() {
+        let state = state();
+        let fake = Fake::default()
+            .always("wt -C /r", Some(LISTING))
+            .always("git -C /r for-each-ref", Some("main\0\nABC-1-x\0[gone]"));
+        let synced = items(&state, &fake).sync(false).unwrap();
+        let gone: Vec<bool> = (synced.worktrees.iter())
+            .map(|(_, _, tree)| tree.gone)
+            .collect();
+        assert_eq!(gone, [false, true]);
+        let fake = Fake::default()
+            .always("wt -C /r", Some(LISTING))
+            .always("git", None);
+        let synced = items(&state, &fake).sync(false).unwrap();
+        assert!(
+            synced.failures.is_empty(),
+            "a failed check is no failed listing"
+        );
+        assert!(synced.worktrees.iter().all(|(_, _, tree)| !tree.gone));
+    }
+
+    #[test]
+    fn fetch_returns_the_repos_whose_fetch_failed() {
+        let state = state();
+        let fake = Fake::default().always("git -C /b fetch", None);
+        let failed = items(&state, &fake).fetch(&["/a".into(), "/b".into()]);
+        assert_eq!(
+            fake.calls(),
+            ["git -C /a fetch --prune", "git -C /b fetch --prune"]
+        );
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].0, Path::new("/b"));
+    }
+
+    #[test]
     fn move_to_reopens_a_tab_only_if_one_was_open() {
         let state = state();
         let dir = tempfile::tempdir().unwrap();
@@ -1314,6 +1418,6 @@ mod tests {
         (items(&state, &fake))
             .pull(&["/r.a".into(), "/notes".into()])
             .unwrap();
-        assert_eq!(fake.calls(), ["git -C /r.a pull --ff-only"]);
+        assert_eq!(fake.calls(), ["git -C /r.a pull --ff-only --prune"]);
     }
 }

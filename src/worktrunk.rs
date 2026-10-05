@@ -176,6 +176,16 @@ pub struct Worktree {
     pub committed_at: String,
     /// worktrunk's compact status, such as `!?↑`.
     pub symbols: String,
+    /// Its branch is the repo's default branch.
+    pub on_default: bool,
+    /// worktrunk finds its branch integrated into the default branch's remote, so it is
+    /// finished: `default_branch.integration` set, or `display.state` `integrated` or `empty`.
+    pub integrated: bool,
+    /// Commits ahead of the default branch, when worktrunk reports them.
+    pub ahead_of_default: Option<u64>,
+    /// Its branch's configured upstream no longer exists, as after a merged review deleted it.
+    /// `wt list` cannot tell this apart from never pushed: [`crate::git::gone_branches`] does.
+    pub gone: bool,
 }
 
 /// Lists a repo's worktrees, pinning the JSON schema whatever the user's config says.
@@ -222,12 +232,18 @@ impl Listing {
     /// Parses the JSON, keeping items that have a worktree (`--branches` adds ones that don't).
     pub fn parse(json: &str) -> Result<Self> {
         let raw: raw::Listing = serde_json::from_str(json).wrap_err("parsing wt list")?;
+        let default_branch = raw.repo.default_branch;
         let worktrees = raw
             .items
             .into_iter()
             .filter_map(|item| {
                 let tree = item.worktree?;
                 let changes = tree.changes;
+                let on_default = match &default_branch {
+                    Some(default) => item.branch.as_ref() == Some(default),
+                    None => tree.main,
+                };
+                let to_default = item.default_branch.unwrap_or_default();
                 Some(Worktree {
                     path: tree.path,
                     branch: item.branch.filter(|_| !tree.detached),
@@ -243,7 +259,12 @@ impl Listing {
                     short_sha: item.head.short_sha,
                     subject: item.head.subject,
                     committed_at: item.head.committed_at,
+                    integrated: to_default.integration.is_some()
+                        || matches!(item.display.state.as_str(), "integrated" | "empty"),
+                    ahead_of_default: to_default.ahead,
                     symbols: item.display.symbols,
+                    on_default,
+                    gone: false,
                 })
             })
             .collect();
@@ -262,6 +283,7 @@ mod raw {
     use std::path::PathBuf;
 
     use serde::Deserializer;
+    use serde::de::IgnoredAny;
 
     use super::Deserialize;
 
@@ -284,6 +306,7 @@ mod raw {
     #[derive(Deserialize, Default)]
     pub struct Repo {
         pub forge: Option<Forge>,
+        pub default_branch: Option<String>,
     }
 
     #[derive(Deserialize)]
@@ -300,8 +323,20 @@ mod raw {
         pub head: Head,
         pub worktree: Option<Tree>,
         pub upstream: Option<Upstream>,
+        /// Absent or `null` when worktrunk did not compare it.
+        pub default_branch: Option<DefaultBranch>,
         #[serde(default)]
         pub display: Display,
+    }
+
+    /// How a branch compares with the repo's default branch.
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    pub struct DefaultBranch {
+        pub ahead: Option<u64>,
+        /// Why it is integrated (`{"reason": "ancestor"}`, …); absent when it is not, `null`
+        /// when undetermined.
+        pub integration: Option<IgnoredAny>,
     }
 
     #[derive(Deserialize, Default)]
@@ -353,6 +388,7 @@ mod raw {
     #[derive(Deserialize, Default)]
     #[serde(default)]
     pub struct Display {
+        pub state: String,
         pub symbols: String,
     }
 }
@@ -389,8 +425,9 @@ mod tests {
             forge.branch_url("a/b"),
             "https://github.com/remigourdon/atelier/tree/a/b"
         );
-        assert_eq!(listing.worktrees.len(), 2);
+        assert_eq!(listing.worktrees.len(), 3);
         let main = &listing.worktrees[0];
+        assert!(main.on_default);
         assert_eq!(main.path, Path::new("/home/remi/atelier"));
         assert_eq!(main.branch.as_deref(), Some("main"));
         assert!(main.main && !main.dirty);
@@ -402,6 +439,46 @@ mod tests {
         assert_eq!(feature.upstream, None);
         assert_eq!(feature.symbols, "!?↑");
         assert_eq!(feature.diff, (12, 3));
+        assert!(!feature.integrated && !feature.on_default && !feature.gone);
+        let merged = &listing.worktrees[2];
+        assert!(merged.integrated);
+        assert_eq!(merged.ahead_of_default, Some(1));
+    }
+
+    fn integrated(item: &str) -> bool {
+        let json = format!(r#"{{"items":[{{"branch":"b","worktree":{{"path":"/r.b"}},{item}}}]}}"#);
+        Listing::parse(&json).unwrap().worktrees[0].integrated
+    }
+
+    #[test]
+    fn integration_or_an_integrated_state_marks_a_branch_integrated() {
+        assert!(integrated(
+            r#""default_branch":{"integration":{"reason":"ancestor"}}"#
+        ));
+        assert!(!integrated(r#""default_branch":{"ahead":2}"#), "absent");
+        assert!(
+            !integrated(r#""default_branch":{"integration":null}"#),
+            "undetermined"
+        );
+        assert!(!integrated(r#""default_branch":null"#));
+        assert!(integrated(r#""display":{"state":"integrated"}"#));
+        assert!(integrated(r#""display":{"state":"empty"}"#));
+        assert!(!integrated(r#""display":{"state":"ahead"}"#));
+    }
+
+    #[test]
+    fn the_default_branch_is_the_repos_else_the_main_worktrees() {
+        let listing = Listing::parse(
+            r#"{"repo":{"default_branch":"trunk"},"items":[
+                {"branch":"main","worktree":{"path":"/r","main":true}},
+                {"branch":"trunk","worktree":{"path":"/r.t"}}]}"#,
+        )
+        .unwrap();
+        assert!(!listing.worktrees[0].on_default && listing.worktrees[1].on_default);
+        let listing =
+            Listing::parse(r#"{"items":[{"branch":"main","worktree":{"path":"/r","main":true}}]}"#)
+                .unwrap();
+        assert!(listing.worktrees[0].on_default);
     }
 
     #[test]

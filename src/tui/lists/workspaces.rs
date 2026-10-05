@@ -3,7 +3,8 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, pair};
+use super::{ListKind, pair, plan};
+use crate::finish::Scope;
 use crate::tui::app::{Action, Effect, Job, Kind, List, Model, Submit};
 use crate::tui::update::{confirm, run, update};
 use crate::tui::view::{Palette, icon};
@@ -149,6 +150,14 @@ impl ListKind for Workspaces {
             lines,
             Job::RemoveWorkspace(name),
         )
+    }
+
+    /// A sweep of the workspace.
+    fn finish(&self, model: &mut Model, _list: List) -> Vec<Effect> {
+        match model.workspace().map(str::to_owned) {
+            Some(name) => plan(model, Scope::Workspace(name)),
+            None => Vec::new(),
+        }
     }
 
     fn copy_path(&self, model: &Model, _list: List) -> Option<String> {
