@@ -680,6 +680,7 @@ pub struct Model {
     pub reviews: Vec<Review>,
     /// Where issues come from and their sections.
     pub tracker_config: TrackerConfig,
+    pub review_config: crate::reviews::ReviewConfig,
     /// Every tracker's issues, each source in its own order.
     pub issues: Vec<Issue>,
     /// The carnet search narrowing the Carnets list, until `Esc`.
@@ -714,6 +715,7 @@ impl Model {
             readme: None,
             reviews: Vec::new(),
             tracker_config: TrackerConfig::default(),
+            review_config: crate::reviews::ReviewConfig::default(),
             issues: Vec::new(),
             search: None,
             frame: 0,

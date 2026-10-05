@@ -194,12 +194,13 @@ fn done(model: &mut Model, source: Source) -> Vec<Effect> {
     start(model, jobs)
 }
 
-/// Lists the due feeds: each provider's reviews on the hosts of the registered repos, and each
+/// Lists the due feeds: configured providers' reviews on the hosts of registered repos, and each
 /// tracker's issues in its configured scopes. A provider with no host lists none.
 fn fetch(model: &mut Model) -> Vec<Effect> {
     let mut keys = Vec::new();
     for provider in Provider::ALL {
         let mut hosts: Vec<String> = (model.snapshot.forges.values())
+            .filter(|_| model.review_config.providers.contains(&provider))
             .filter(|forge| Provider::from_name(&forge.provider) == Some(provider))
             .filter_map(|forge| worktrunk::host(&forge.url).map(Into::into))
             .collect();
@@ -1687,8 +1688,71 @@ pub mod tests {
     }
 
     #[test]
+    fn unconfigured_review_providers_are_not_fetched() {
+        let mut model = Model::new((120, 40));
+        let effects = update(
+            &mut model,
+            Action::Loaded {
+                snapshot: Ok(snapshot()),
+                full: false,
+                log: Vec::new(),
+            },
+        );
+        assert!(
+            jobs(effects).is_empty(),
+            "registered GitHub repos do not opt in to reviews"
+        );
+        model.schedule.finish_all();
+        assert_eq!(jobs(press(&mut model, "R")), [Job::Refresh { full: true }]);
+    }
+
+    #[test]
+    fn configured_reviews_fetch_only_the_selected_provider_and_keep_issue_scopes() {
+        let config = crate::config::Config::parse(
+            "[reviews]\nproviders = ['gitlab', 'gitlab']\n[tracker.github]\nrepos = ['owner/api']",
+        )
+        .unwrap();
+        let mut model = Model::new((120, 40));
+        model.review_config = config.reviews;
+        model.tracker_config = config.tracker;
+        let mut snapshot = snapshot();
+        for name in ["lab", "other"] {
+            snapshot.forges.insert(
+                PathBuf::from(format!("/src/{name}")),
+                Forge {
+                    url: format!("https://gitlab.example.com/org/{name}"),
+                    provider: "gitlab".into(),
+                },
+            );
+        }
+        assert_eq!(
+            jobs(update(
+                &mut model,
+                Action::Loaded {
+                    snapshot: Ok(snapshot),
+                    full: false,
+                    log: Vec::new()
+                }
+            )),
+            [
+                Job::Fetch {
+                    feed: Feed::Reviews(Provider::GitLab),
+                    keys: vec!["gitlab.example.com".into()],
+                    force: false
+                },
+                Job::Fetch {
+                    feed: Feed::Issues(crate::issues::Tracker::GitHub),
+                    keys: vec!["owner/api".into()],
+                    force: false
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn listings_fetch_the_reviews_of_their_hosts() {
         let mut model = Model::new((120, 40));
+        model.review_config.providers = vec![Provider::GitHub];
         let loaded = |model: &mut Model| {
             jobs(update(
                 model,

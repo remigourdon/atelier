@@ -8,8 +8,17 @@ use crate::state::State;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Provider {
+    #[serde(rename = "github", alias = "GitHub")]
     GitHub,
+    #[serde(rename = "gitlab", alias = "GitLab")]
     GitLab,
+}
+
+/// `[reviews]`: only explicitly configured providers are fetched.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ReviewConfig {
+    pub providers: Vec<Provider>,
 }
 
 impl Provider {

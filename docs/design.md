@@ -55,6 +55,9 @@ anchor_pane = "editor"
 [tracker.github]               # and/or [tracker.jira] with `jql` and `url` (fallback $ATLASSIAN_URL / $JIRA_URL)
 repos = ["owner/name"]
 
+[reviews]                      # absent or empty: no review fetching; independent of [tracker]
+providers = ["gitlab", "github"] # hosts come from registered repos; requires glab and gh respectively
+
 [tracker]
 hide = { labels = ["wontfix"] }  # same conditions as a section, applied first; none: nothing hidden
 

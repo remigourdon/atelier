@@ -23,6 +23,7 @@ pub struct Config {
     /// The legacy spelling of `[carnets] root`.
     pub carnet_root: Option<String>,
     pub tracker: crate::issues::TrackerConfig,
+    pub reviews: crate::reviews::ReviewConfig,
 }
 
 /// Plain Unicode glyphs work in any font; Nerd Font icons need one installed.
