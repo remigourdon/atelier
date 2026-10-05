@@ -1429,7 +1429,7 @@ pub mod tests {
     }
 
     #[test]
-    fn browse_opens_a_worktrees_pr_over_its_branch() {
+    fn browse_opens_a_worktrees_review_over_its_branch() {
         let mut model = model();
         press(&mut model, "G");
         let tree = model.snapshot.work[0].tree_mut();
@@ -1437,11 +1437,11 @@ pub mod tests {
         tree.ci = Some(worktrunk::Ci {
             state: worktrunk::CiState::Running,
             stale: false,
-            branch: false,
-            pr: Some(worktrunk::Pr {
+            branch_workflow: false,
+            review: Some(worktrunk::CiReview {
                 number: Some(5),
                 url: Some("https://forge/api/pull/5".into()),
-                review: None,
+                decision: None,
             }),
         });
         assert_eq!(
@@ -1511,8 +1511,8 @@ pub mod tests {
         let ci = worktrunk::Ci {
             state: worktrunk::CiState::Failed,
             stale: false,
-            branch: false,
-            pr: None,
+            branch_workflow: false,
+            review: None,
         };
         let refresh = |model: &mut Model, ci: Option<&worktrunk::Ci>, full: bool| {
             let mut snapshot = snapshot();

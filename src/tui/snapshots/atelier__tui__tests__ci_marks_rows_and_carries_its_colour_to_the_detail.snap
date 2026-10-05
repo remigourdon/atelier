@@ -13,7 +13,7 @@ expression: terminal.backend().to_string()
 "│  ● api:ABC-1-login ◆ !               ││Upstream   none                                                               │"
 "│  ○ web:ABC-1-form                    ││Commit     abc1234 Commit ()                                                  │"
 "│○ api:main ◆ ↓3                       ││CI         ◆ failed · stale                                                   │"
-"│                                      ││PR         #27 changes requested                                              │"
+"│                                      ││Review     #27 changes requested                                              │"
 "│                                      ││                                                                              │"
 "│                                      ││Recent commits                                                                │"
 "│                                      ││abc1234 Add login (2 hours ago, R)                                            │"

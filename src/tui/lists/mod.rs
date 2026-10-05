@@ -128,6 +128,11 @@ fn pair(key: &str, value: impl Into<Line<'static>>) -> (String, Line<'static>) {
     (key.to_owned(), value.into())
 }
 
+/// A carnet's tickets and an issue's labels.
+fn tag_style(palette: &Palette) -> Style {
+    Style::new().fg(palette.info)
+}
+
 /// The mark of an item whose tab is open or closed, and its style.
 fn tab(open: bool, palette: &Palette) -> (&'static str, Style) {
     if open {

@@ -3,7 +3,7 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, close_tabs, kind, pair, paths, plan, tab_mark, tab_word};
+use super::{ListKind, close_tabs, kind, pair, paths, plan, tab_mark, tab_word, tag_style};
 use crate::finish::Scope;
 use crate::issues::{Issue, State};
 use crate::state::Repo;
@@ -117,10 +117,6 @@ fn blocked_style(palette: &Palette) -> Style {
     Style::new().fg(palette.error)
 }
 
-fn labels_style(palette: &Palette) -> Style {
-    Style::new().fg(palette.info)
-}
-
 impl ListKind for Issues {
     fn kind(&self) -> Kind {
         Kind::Issues
@@ -169,7 +165,7 @@ impl ListKind for Issues {
                     spans.push(Span::styled(" blocked", blocked_style(palette)));
                 }
                 for label in &issue.labels {
-                    spans.push(Span::styled(format!(" {label}"), labels_style(palette)));
+                    spans.push(Span::styled(format!(" {label}"), tag_style(palette)));
                 }
                 Line::from(spans)
             })
@@ -203,7 +199,7 @@ impl ListKind for Issues {
             ),
             pair(
                 "Labels",
-                Span::styled(issue.labels.join(", "), labels_style(palette)),
+                Span::styled(issue.labels.join(", "), tag_style(palette)),
             ),
             pair("Assignees", issue.assignees.join(", ")),
             pair("Updated", issue.updated_at.clone()),

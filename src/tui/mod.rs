@@ -328,22 +328,22 @@ mod tests {
 
     #[test]
     fn ci_marks_rows_and_carries_its_colour_to_the_detail() {
-        use crate::worktrunk::{Ci, CiState, Pr};
+        use crate::worktrunk::{Ci, CiReview, CiState, Decision};
         let mut model = loaded(120, 30);
         model.snapshot.work[0].tree_mut().ci = Some(Ci {
             state: CiState::Passed,
             stale: false,
-            branch: true,
-            pr: None,
+            branch_workflow: true,
+            review: None,
         });
         model.snapshot.work[1].tree_mut().ci = Some(Ci {
             state: CiState::Failed,
             stale: true,
-            branch: false,
-            pr: Some(Pr {
+            branch_workflow: false,
+            review: Some(CiReview {
                 number: Some(27),
                 url: Some("https://github.com/o/api/pull/27".into()),
-                review: Some("changes_requested".into()),
+                decision: Some(Decision::ChangesRequested),
             }),
         });
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();

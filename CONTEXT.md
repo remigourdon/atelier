@@ -13,6 +13,7 @@ Atelier organises git worktrees into zellij sessions, on top of worktrunk (`wt`)
 - **Tab** — the zellij tab opened for an item, recorded as session, tab id and anchor pane id.
 - **Anchor pane** — the pane named `editor` in the worktree layout; atelier finds a tab's pane by this name.
 - **Review** — an open GitHub pull request or GitLab merge request, either to review or authored by me.
+- **CI** — worktrunk's status of a worktree's branch: its checks (passed, running, failed), merge conflicts, or its review's decision (changes requested, approval pending); stale when the local head is not the one checked. A default branch has its own workflow's checks and no review.
 - **Issue** — a tracker item (GitHub or Jira) normalised to `state`, `labels` and `blocked`.
 - **State** — an issue's normalised progress: `todo`, `in_progress` or `done`.
 - **Section** — an ordered rule that places issues in an Issues sub-tab; first match wins.

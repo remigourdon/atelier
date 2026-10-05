@@ -6,13 +6,13 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::{ListKind, carnets, kind, pair, paths, plan, tab_detail, tab_mark};
-use crate::finish::{self, Scope};
+use crate::finish::{self, Scope, Signal};
 use crate::tui::app::{
     Action, Cmd, Effect, Job, Kind, List, MenuEntry, Modal, Model, Removal, Submit, Work, WorkKind,
 };
 use crate::tui::update::{confirm, note, run, update, workspace_menu};
 use crate::tui::view::{Palette, icon};
-use crate::worktrunk::{Ci, CiState, Forge, Pr, Worktree};
+use crate::worktrunk::{Ci, CiReview, CiState, Decision, Forge, Worktree};
 
 pub struct WorkList;
 
@@ -249,7 +249,8 @@ impl ListKind for WorkList {
                     }
                     // Finished: dimmed, with why.
                     if let Some(signal) = finish::signal(work) {
-                        spans.push(Span::raw(format!(" {}", glyphs.signal(signal))));
+                        spans.push(Span::raw(" "));
+                        spans.push(finished_mark(signal, palette));
                         spans = spans.into_iter().map(|span| span.style(dim)).collect();
                     }
                     Line::from(spans)
@@ -321,22 +322,17 @@ impl ListKind for WorkList {
                 if let Some(ci) = &tree.ci {
                     pairs.push(pair("CI", ci_detail(ci, palette)));
                     let forge = model.snapshot.forges.get(repo);
-                    if let Some(pr) = &ci.pr {
-                        pairs.push(pair("PR", pr_detail(pr, forge, palette)));
+                    if let Some(review) = &ci.review {
+                        pairs.push(pair("Review", review_detail(ci, review, forge, palette)));
                     }
                 }
                 if let Some(signal) = finish::signal(work) {
-                    pairs.push(pair(
-                        "Finished",
-                        Span::styled(
-                            format!(
-                                "{} {} (f to finish)",
-                                palette.glyphs.signal(signal),
-                                signal.label()
-                            ),
-                            Style::new().fg(palette.dim),
-                        ),
-                    ));
+                    let why = format!(" {} (f to finish)", signal.label());
+                    let line = vec![
+                        finished_mark(signal, palette),
+                        Span::styled(why, Style::new().fg(palette.dim)),
+                    ];
+                    pairs.push(pair("Finished", line));
                 }
                 pairs
             }
@@ -544,14 +540,14 @@ impl ListKind for WorkList {
         }
     }
 
-    /// The forge page of the worktree's branch.
+    /// The forge page of the worktree's review, else of its branch.
     fn url(&self, model: &Model, _list: List) -> Option<String> {
         match model.work_row()? {
             Row::Item(index) => {
                 let work = &model.snapshot.work[index];
                 let tree = work.tree()?;
-                if let Some(url) = (tree.ci.as_ref()).and_then(|ci| ci.pr.as_ref()?.url.clone()) {
-                    return Some(url);
+                if let Some(url) = tree.ci.as_ref().and_then(Ci::review_url) {
+                    return Some(url.to_owned());
                 }
                 let forge = model.snapshot.forges.get(work.repo()?)?;
                 Some(match &tree.branch {
@@ -593,11 +589,11 @@ fn ci_style(ci: &Ci, palette: &Palette) -> Style {
         CiState::Running => palette.info,
         CiState::Failed => palette.error,
         CiState::Conflicts | CiState::Error => palette.warn,
-        CiState::ChangesRequested => palette.changes,
-        CiState::Pending => palette.waiting,
+        CiState::ChangesRequested => palette.changes_requested,
+        CiState::ApprovalPending => palette.approval_pending,
     };
     let style = Style::new().fg(color);
-    if ci.stale || ci.pr.as_ref().is_some_and(Pr::draft) {
+    if ci.stale || ci.draft() {
         style.add_modifier(Modifier::DIM)
     } else {
         style
@@ -617,13 +613,13 @@ fn ci_mark(ci: &Ci, palette: &Palette) -> Span<'static> {
 /// The detail's CI: the row's mark, what it means, and why it may be dimmed.
 fn ci_detail(ci: &Ci, palette: &Palette) -> Line<'static> {
     let mut text = format!(" {}", ci.state.label());
-    if ci.branch {
+    if ci.branch_workflow {
         text.push_str(" (branch)");
     }
     if ci.stale {
         text.push_str(" · stale");
     }
-    if ci.pr.as_ref().is_some_and(Pr::draft) {
+    if ci.draft() {
         text.push_str(" · draft");
     }
     Line::from(vec![
@@ -632,28 +628,35 @@ fn ci_detail(ci: &Ci, palette: &Palette) -> Line<'static> {
     ])
 }
 
-/// The detail's PR: its reference and review, coloured as the CI mark would show it.
-fn pr_detail(pr: &Pr, forge: Option<&Forge>, palette: &Palette) -> Line<'static> {
-    let sigil = if forge.is_some_and(|forge| forge.provider == "gitlab") {
-        "!"
-    } else {
-        "#"
+/// The detail's review: its reference and decision, coloured as the CI mark shows it.
+fn review_detail(
+    ci: &Ci,
+    review: &CiReview,
+    forge: Option<&Forge>,
+    palette: &Palette,
+) -> Line<'static> {
+    let reference = match (review.number, forge) {
+        (Some(number), Some(forge)) => forge.review_reference(number),
+        (Some(number), None) => format!("#{number}"),
+        (None, _) => "open".into(),
     };
-    let mut spans = vec![Span::raw(match pr.number {
-        Some(number) => format!("{sigil}{number}"),
-        None => "open".into(),
-    })];
-    let review = match pr.review.as_deref() {
-        Some("changes_requested") => Some(("changes requested", palette.changes)),
-        Some("pending") => Some(("review pending", palette.waiting)),
-        Some("approved") => Some(("approved", palette.ok)),
-        Some("draft") => Some(("draft", palette.dim)),
-        _ => None,
-    };
-    if let Some((label, color)) = review {
-        spans.push(Span::styled(format!(" {label}"), Style::new().fg(color)));
+    let mut spans = vec![Span::raw(reference)];
+    if let Some(decision) = review.decision {
+        let style = match decision {
+            Decision::ChangesRequested => Style::new().fg(palette.changes_requested),
+            Decision::Pending => Style::new().fg(palette.approval_pending),
+            Decision::Draft => Style::new().fg(palette.dim),
+            // Approval leaves the CI's colour, as in worktrunk.
+            Decision::Approved => ci_style(ci, palette),
+        };
+        spans.push(Span::styled(format!(" {}", decision.label()), style));
     }
     Line::from(spans)
+}
+
+/// A finished worktree's mark: why it is finished.
+fn finished_mark(signal: Signal, palette: &Palette) -> Span<'static> {
+    Span::styled(palette.glyphs.signal(signal), Style::new().fg(palette.dim))
 }
 
 /// Runs a job on some paths, unless there are none.

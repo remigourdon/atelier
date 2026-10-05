@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, close_tabs, pair, tab_detail, tab_mark};
+use super::{ListKind, close_tabs, pair, tab_detail, tab_mark, tag_style};
 use crate::tui::app::{Action, Cmd, Effect, Job, Kind, List, Model, Submit, Work, WorkKind};
 use crate::tui::update::{run, update};
 use crate::tui::view::{Palette, icon};
@@ -54,10 +54,6 @@ impl Model {
     }
 }
 
-fn tickets_style(palette: &Palette) -> Style {
-    Style::new().fg(palette.info)
-}
-
 /// A closed carnet's mark.
 fn closed_mark(palette: &Palette) -> Span<'static> {
     Span::styled("closed", Style::new().fg(palette.warn))
@@ -78,7 +74,7 @@ pub fn detail(work: &Work, palette: &Palette) -> Vec<(String, Line<'static>)> {
         pair("Carnet", work.title()),
         pair("Path", work.path.display().to_string()),
         pair("Workspace", work.workspace.clone()),
-        pair("Tickets", Span::styled(tickets, tickets_style(palette))),
+        pair("Tickets", Span::styled(tickets, tag_style(palette))),
         pair("Summary", summary),
         pair("Tab", tab_detail(work.tab, palette)),
     ];
@@ -119,7 +115,7 @@ impl ListKind for Carnets {
                 if !tickets.is_empty() {
                     spans.push(Span::styled(
                         format!(" {}", tickets.join(",")),
-                        tickets_style(palette),
+                        tag_style(palette),
                     ));
                 }
                 if work.closed() {

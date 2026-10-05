@@ -29,10 +29,10 @@ pub struct Palette {
     pub error: Color,
     pub warn: Color,
     pub info: Color,
-    /// A review asked for: changes requested.
-    pub changes: Color,
-    /// A review awaited: a required one not given yet.
-    pub waiting: Color,
+    /// A review's reviewers requested changes.
+    pub changes_requested: Color,
+    /// A review's required approval is not given yet.
+    pub approval_pending: Color,
     pub glyphs: Glyphs,
 }
 
@@ -130,8 +130,8 @@ impl Palette {
             error: colors.red.into(),
             warn: colors.peach.into(),
             info: colors.blue.into(),
-            changes: colors.pink.into(),
-            waiting: colors.teal.into(),
+            changes_requested: colors.pink.into(),
+            approval_pending: colors.teal.into(),
         }
     }
 }
