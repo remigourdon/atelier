@@ -6,7 +6,7 @@ use color_eyre::eyre::{Result, WrapErr, bail};
 use serde::Deserialize;
 use toml_edit::{DocumentMut, Item, Table, value};
 
-use crate::hooks::Phase;
+use crate::hooks::{self, Phase};
 use crate::process::Runner;
 
 /// The key atelier's command sits under in each hook's named table.
@@ -187,6 +187,35 @@ pub fn list(runner: &dyn Runner, repo: &Path, full: bool) -> Result<Listing> {
         args.push("--full");
     }
     Listing::parse(&runner.output("wt", &args)?)
+}
+
+/// Switches `repo` to `target` (`[--create] <branch>`, or `pr:N`), creating the worktree when
+/// needed, and tells atelier's hooks the workspace and group it goes to.
+pub fn switch(
+    runner: &dyn Runner,
+    repo: &Path,
+    target: &[&str],
+    workspace: &str,
+    group: &str,
+) -> Result<()> {
+    let repo = repo.to_string_lossy();
+    let workspace = format!("{}={workspace}", hooks::WORKSPACE_VAR);
+    let group = format!("{}={group}", hooks::GROUP_VAR);
+    let mut args = vec![workspace.as_str(), &group, "wt", "-C", &repo, "switch"];
+    args.extend(target);
+    args.extend(["--no-cd", "--yes"]);
+    runner.output("env", &args).map(drop)
+}
+
+/// Removes the worktree of `target`, a branch or a path, discarding its changes when `force`.
+pub fn remove(runner: &dyn Runner, repo: &Path, target: &str, force: bool) -> Result<()> {
+    let repo = repo.to_string_lossy();
+    let mut args = vec!["-C", &repo, "remove", "--foreground", "--yes"];
+    if force {
+        args.push("--force");
+    }
+    args.push(target);
+    runner.output("wt", &args).map(drop)
 }
 
 impl Listing {

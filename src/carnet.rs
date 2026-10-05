@@ -85,7 +85,7 @@ pub fn create(
     let path = path.canonicalize()?;
     let made = (|| {
         std::fs::write(path.join("README.md"), format!("# {name}\n"))?;
-        runner.output("git", &["-C", &path.to_string_lossy(), "init", "--quiet"])?;
+        crate::git::init(runner, &path)?;
         state.add_item(&path, ItemKind::Carnet, None, &group, workspace)
     })();
     // A half-made folder would block retrying under the same name.

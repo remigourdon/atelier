@@ -8,7 +8,8 @@ use color_eyre::eyre::{Result, eyre};
 use serde::Deserialize;
 
 use crate::config::Config;
-use crate::process::{self, Runner};
+use crate::git;
+use crate::process::Runner;
 use crate::state::{State, Tab};
 
 pub const MAX_TAB_NAME: usize = 30;
@@ -195,20 +196,45 @@ pub fn current_session() -> Option<String> {
 }
 
 pub struct Zellij<'a> {
-    pub runner: &'a dyn Runner,
+    runner: &'a dyn Runner,
     /// The session we are running in, if any.
-    pub here: Option<String>,
-    pub layouts: Layouts,
-    pub anchor: String,
+    here: Option<String>,
+    layouts: Layouts,
+    anchor: String,
     /// Whether `reconcile` already ran: once per value, which lives for one job, hook or command.
-    pub reconciled: Cell<bool>,
+    reconciled: Cell<bool>,
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
     a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
 }
 
-impl Zellij<'_> {
+impl<'a> Zellij<'a> {
+    /// Zellij as seen from the current session, if any.
+    pub fn new(runner: &'a dyn Runner, config: &Config, layouts: Layouts) -> Self {
+        Self {
+            runner,
+            here: current_session(),
+            layouts,
+            anchor: config.anchor_pane().to_owned(),
+            reconciled: Cell::new(false),
+        }
+    }
+
+    /// The same, as seen from `here`.
+    #[cfg(test)]
+    pub fn in_session(self, here: Option<&str>) -> Self {
+        Self {
+            here: here.map(Into::into),
+            ..self
+        }
+    }
+
+    /// The session we are running in, if any.
+    pub fn here(&self) -> Option<&str> {
+        self.here.as_deref()
+    }
+
     fn action(&self, session: &str, args: &[&str]) -> Result<String> {
         let mut full = vec!["--session", session, "action"];
         full.extend_from_slice(args);
@@ -446,16 +472,18 @@ impl Zellij<'_> {
     /// The tab name for an item, counting it among the open tabs of its repo, workspace and group.
     fn name_for(&self, state: &State, path: &Path) -> Result<String> {
         let item = state.require_item(path)?;
-        let Some(repo_path) = &item.repo else {
-            let name = crate::state::dir_name(path);
-            return Ok(tab_name(&item.group, &name, "", true, false));
+        let repo_path = match &item.repo {
+            Some(repo) if !item.is_carnet() => repo,
+            _ => {
+                let name = crate::state::dir_name(path);
+                return Ok(tab_name(&item.group, &name, "", true, false));
+            }
         };
         let repo = state
             .repo_by_path(repo_path)?
             .ok_or_else(|| eyre!("unknown repo: {}", repo_path.display()))?;
         let siblings = self.open_siblings(state, &item)?;
-        let branch =
-            process::branch(self.runner, path).unwrap_or_else(|| crate::state::dir_name(path));
+        let branch = git::branch(self.runner, path).unwrap_or_else(|| crate::state::dir_name(path));
         Ok(tab_name(
             &item.group,
             &repo.name(),
@@ -466,7 +494,7 @@ impl Zellij<'_> {
     }
 
     fn open_siblings(&self, state: &State, item: &crate::state::Item) -> Result<Vec<PathBuf>> {
-        let Some(repo) = &item.repo else {
+        let Some(repo) = item.repo.as_ref().filter(|_| !item.is_carnet()) else {
             return Ok(Vec::new());
         };
         let mut siblings = Vec::new();
@@ -500,6 +528,15 @@ impl Zellij<'_> {
             )?;
         }
         Ok(())
+    }
+}
+
+/// Layout names for tests, which never write the built-in layouts.
+#[cfg(test)]
+pub fn layouts() -> Layouts {
+    Layouts {
+        session: "S".into(),
+        worktree: "W".into(),
     }
 }
 
@@ -594,16 +631,7 @@ mod tests {
     }
 
     fn zellij<'a>(runner: &'a Fake, here: Option<&str>) -> Zellij<'a> {
-        Zellij {
-            runner,
-            here: here.map(Into::into),
-            layouts: Layouts {
-                session: "S".into(),
-                worktree: "W".into(),
-            },
-            anchor: "editor".into(),
-            reconciled: Default::default(),
-        }
+        Zellij::new(runner, &Config::default(), layouts()).in_session(here)
     }
 
     const PANES: &str = r#"[{"id":0,"tab_id":4,"is_plugin":true,"title":"editor"},

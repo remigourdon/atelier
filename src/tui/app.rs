@@ -7,10 +7,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use tui_input::Input;
 
 use crate::issues::{self, Issue, TrackerConfig};
+pub use crate::items::{Removal, Snapshot, Work, WorkKind};
 use crate::process::Logged;
 use crate::reviews::{Provider, Review, Role};
 use crate::state::Repo;
-use crate::worktrunk::{self, Forge, Worktree};
+use crate::worktrunk;
 
 /// The side panels, top to bottom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -103,101 +104,6 @@ pub enum Screen {
     Full,
 }
 
-/// Everything loaded from the database, worktrunk and zellij.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct Snapshot {
-    /// The zellij session the TUI runs in.
-    pub here: Option<String>,
-    /// The current session first.
-    pub workspaces: Vec<String>,
-    pub repos: Vec<Repo>,
-    pub work: Vec<Work>,
-    /// Every recorded carnet, shown or not, so removing a workspace can name the ones it owns.
-    pub all_carnets: Vec<crate::state::Item>,
-    /// Each repo's forge web page, by repo path.
-    pub forges: HashMap<PathBuf, Forge>,
-}
-
-/// A worktree or a carnet, with what atelier records about it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Work {
-    pub path: PathBuf,
-    pub workspace: String,
-    pub group: String,
-    pub tab: bool,
-    pub kind: WorkKind,
-}
-
-/// What only a worktree has; a carnet is a folder and its README.
-#[derive(Debug, Clone, PartialEq)]
-pub enum WorkKind {
-    Worktree {
-        repo: PathBuf,
-        repo_name: String,
-        tree: Box<Worktree>,
-    },
-    Carnet,
-}
-
-impl Work {
-    pub fn path(&self) -> &PathBuf {
-        &self.path
-    }
-
-    pub fn is_carnet(&self) -> bool {
-        self.kind == WorkKind::Carnet
-    }
-
-    /// An ungrouped carnet, listed in the `Carnets` group.
-    pub fn in_carnets_group(&self) -> bool {
-        self.group.is_empty() && self.is_carnet()
-    }
-
-    /// A worktree's repo.
-    pub fn repo(&self) -> Option<&PathBuf> {
-        match &self.kind {
-            WorkKind::Worktree { repo, .. } => Some(repo),
-            WorkKind::Carnet => None,
-        }
-    }
-
-    /// A worktree's listing.
-    pub fn tree(&self) -> Option<&Worktree> {
-        match &self.kind {
-            WorkKind::Worktree { tree, .. } => Some(tree),
-            WorkKind::Carnet => None,
-        }
-    }
-
-    /// A worktree's listing, for tests that change it.
-    #[cfg(test)]
-    pub fn tree_mut(&mut self) -> &mut Worktree {
-        match &mut self.kind {
-            WorkKind::Worktree { tree, .. } => tree,
-            WorkKind::Carnet => panic!("a carnet has no worktree"),
-        }
-    }
-
-    /// A worktree's branch, else its directory name: detached, or a carnet's folder.
-    pub fn branch(&self) -> String {
-        (self.tree().and_then(|tree| tree.branch.clone()))
-            .unwrap_or_else(|| crate::state::dir_name(&self.path))
-    }
-
-    /// A worktree that is not its repo's main one, so it can be removed.
-    pub fn removable(&self) -> bool {
-        !self.tree().is_some_and(|tree| tree.main)
-    }
-
-    /// `repo:branch`, or a carnet's folder name.
-    pub fn title(&self) -> String {
-        match &self.kind {
-            WorkKind::Worktree { repo_name, .. } => format!("{repo_name}:{}", self.branch()),
-            WorkKind::Carnet => crate::state::dir_name(&self.path),
-        }
-    }
-}
-
 /// The end of the key of a workspace's `Carnets` group, which no group name can produce.
 const CARNETS_KEY: &str = "\0\0carnets";
 
@@ -213,21 +119,6 @@ pub enum Row {
         folded: bool,
     },
     Item(usize),
-}
-
-/// A removal: a worktree, removed through worktrunk, or a carnet, only forgotten.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Removal {
-    pub path: PathBuf,
-    pub worktree: Option<RemovedWorktree>,
-}
-
-/// A worktree to remove, and whether it has changes that will be discarded.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RemovedWorktree {
-    pub repo: PathBuf,
-    pub branch: Option<String>,
-    pub force: bool,
 }
 
 /// Background work, run off the UI thread; each reports back with actions.

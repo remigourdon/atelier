@@ -62,7 +62,7 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
 
 ## Step 2 — Items module
 
-- **Status:** todo
+- **Status:** done (#17)
 - **Branch:** `refactor-items-module`, from `refactor-small-fixes`
 - **Files:** new `src/items.rs` and `src/git.rs`; `src/tui/jobs.rs`, `src/tui/app.rs`, `src/hooks.rs`, `src/cli.rs`, `src/sync.rs`, `src/worktrunk.rs`, `src/zellij.rs`, `src/process.rs`, `src/carnet.rs`, `src/state.rs`
 
@@ -78,7 +78,8 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
    - `set_alias(repo, alias)`, `set_repo_workspace(repo, workspace)`, `forget_repo(repo)`
    - `add_workspace(name)`, `remove_workspace(name, carnets)`
    - `snapshot(full) -> (Snapshot, Vec<Logged>)`: today's `jobs::load` plus `sync::sync`. `sync.rs` folds into `items.rs`.
-   - for the hooks: `record(path, repo, branch, workspace, group) -> Tab` and `forget(path)`
+   - `create_carnet(name, workspace, group) -> PathBuf`
+   - for the hooks: `record(path, repo, branch, workspace, group) -> Option<Tab>` (`None` for a carnet's worktree) and `forget(path)`
    - Verbs over several paths keep today's behaviour: run every path, then join the errors.
 2. **Core types.** `Snapshot`, `Work`, `WorkKind`, `Removal` and `RemovedWorktree` move from `tui/app.rs` into `items.rs`, and `app.rs` re-exports them.
    - `Removal::of(&Work)` replaces the construction in `update.rs::remove`.
@@ -106,7 +107,7 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
      - `main_worktree` from `cli.rs`
      - `init` from `carnet.rs`
 6. **Zellij stops carrying the runner.**
-   - `Zellij::new(runner, &config)` replaces the four hand-built `Zellij { … }` values (`cli.rs`, `jobs.rs`, and the tests in `jobs.rs`, `zellij.rs` and `hooks.rs`).
+   - `Zellij::new(runner, &config, layouts)` replaces the four hand-built `Zellij { … }` values (`cli.rs`, `jobs.rs`, and the tests in `jobs.rs`, `zellij.rs` and `hooks.rs`).
    - Its fields become private, with `here()` as an accessor. That includes `reconciled`, added in step 1 as a public field that every literal sets.
    - Callers that ran other commands through `zellij.runner` use their own runner.
    - `name_for` and `open_siblings` ask `item.is_carnet()` instead of treating `item.repo == None` as "carnet".
@@ -133,7 +134,8 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
 
 - **Status:** todo
 - **Branch:** `refactor-carnet-record`, from `refactor-items-module`
-- **Files:** `src/carnet.rs`, `src/items.rs`, `src/state.rs`, `src/cli.rs`, `src/hooks.rs`, `src/tui/{app,update,view,jobs}.rs`, `src/git.rs`
+- **Files:** `src/carnet.rs`, `src/items.rs`, `src/state.rs`, `src/cli.rs`, `src/tui/{app,update,view,jobs}.rs`, `src/git.rs`
+- **Since step 2:** carnet operations are `Items` verbs (`create_carnet` is there already), the hooks' "a carnet is never a repo" check lives in `Items::record`, and git commands belong in `git.rs`.
 - **Spec:** the Carnets bullet and CLI scope in `docs/design.md`, and ADR 0001.
 
 1. **Read and write carnets in `carnet.rs`.**
@@ -144,16 +146,17 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
      - Without `tickets`, the key right after the date (`Names::group`) is the one ticket.
      - A README without front matter, or a missing README, reads as empty and gets a block when first edited.
    - **Edits:** `set_first_ticket(path, key)`, where an empty key removes the first ticket and keeps the rest, and `set_closed(path, bool)`.
-     - Each edit writes the README, then runs `git add README.md` and `git commit -m <message> -- README.md`.
+     - Each edit writes the README, then runs `git add README.md` and `git commit -m <message> -- README.md`, through new `git::add` and `git::commit` helpers.
      - Messages: `Link <key>`, `Unlink <key>`, `Close`, `Reopen`.
    - `create`:
      - Folder: `<date>-<name in kebab case>`, keeping a key typed at the start of the name.
      - README: `# <name>`, under front matter whose `tickets` holds the typed key, else the selected group when it is a ticket key (`Names` pattern) or a GitHub issue key (`repo#12`, `owner/repo#12`).
-     - Then `git init`, and a first commit, `Create carnet`, of the README.
+     - Then `git::init`, and a first commit, `Create carnet`, of the README.
+     - It still records the carnet's row in the workspace `Items::create_carnet` is given, so a new carnet does not wait for the scan to be placed.
    - `add` is deleted.
 2. **Items scans the root on each snapshot**, when carnets are enabled.
    - Each carnet found gets an `items` row, kind `carnet`: an existing row keeps its workspace, a new one goes to the default workspace. Its `group_key` is set to its first ticket, as a cache that tab names and grouping read.
-   - Carnet rows not found by the scan are deleted, with their tabs.
+   - Carnet rows not found by the scan are deleted, with their tabs. This replaces the carnet rule in `Items::sync` (forgotten when the folder is gone).
    - When carnets are disabled, carnet rows are left alone and none are listed.
 3. **Snapshot.**
    - `WorkKind::Carnet` carries `tickets`, `closed` and `summary`.
@@ -161,17 +164,17 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
    - `Snapshot.carnets` holds every carnet with its workspace and tab, for step 5. `Snapshot.all_carnets` is deleted.
    - Since step 1, a fast refresh keeps the loaded READMEs and commits, so a carnet's stay stale until the next full refresh. The scan already reads each README: when a carnet's README differs from the loaded one, `Action::Loaded` drops that carnet's README and commits.
 4. **Verbs.**
-   - `regroup` on a carnet calls `set_first_ticket` and renames its tab. Worktrees keep today's path.
+   - `regroup` on a carnet calls `set_first_ticket` and renames its tab. `Items::regroup` already renames a carnet's tab on its own; worktrees keep today's path.
    - New `close_carnet(path)`, which also closes its tab, and `reopen_carnet(path)`.
    - The TUI's `c` key (new `Cmd::CloseCarnet`) on a Work carnet row, or on a group header for its carnets, runs `Job::CloseCarnet(paths)`.
 5. **Workspace removal moves carnets.** It no longer forgets them:
    - `State::remove_workspace` moves the workspace's carnets to the default workspace. Worktrees still block it.
-   - Delete `--forget-carnets`, `State::workspace_carnets`, the `carnets` field of `Job::RemoveWorkspace`, and the carnet lines in the TUI confirmation.
+   - Delete `--forget-carnets`, `State::workspace_carnets`, the `carnets` field of `Job::RemoveWorkspace`, the `carnets` argument of `Items::remove_workspace` and `State::remove_workspace`, and the carnet lines in the TUI confirmation.
 6. **Linked work.** `Model::issue_work` also returns carnets whose `tickets` contain the issue key.
 7. **README view.** Strip the front matter before rendering. The carnet detail shows its tickets and summary.
 8. **CLI** (`atelier carnet …`):
    - `ls [--closed]` prints one line per carnet, newest first: `<folder name>\t<tickets, comma-separated>\t<summary>`.
-   - `search <text>` runs `rg --line-number --ignore-case --fixed-strings -- <text> <root>` interactively, so its output goes to the terminal. When `rg` is not on `PATH`, it fails with "carnet search needs ripgrep (rg) on PATH".
+   - `search <text>` runs `rg --line-number --ignore-case --fixed-strings -- <text> <root>` interactively, so its output goes to the terminal. When `rg` is not on `PATH`, it fails with "carnet search needs ripgrep (rg) on PATH". Put the `rg` arguments and that message in `carnet.rs`, so step 5's search reuses them.
    - `path [KEY]` prints the path of the newest open carnet whose `tickets` contain `KEY`.
      - Without `KEY`, it uses the group of the recorded item containing the current directory: the longest recorded path that is a prefix of the canonical current directory. Inside a carnet, that is the carnet itself.
      - With no match it prints nothing and exits non-zero. The message says which case applied: unknown directory, no group, or no open carnet for the key. The last also suggests `atelier carnet new`.
@@ -242,14 +245,14 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
 
 - **Status:** todo
 - **Branch:** `refactor-carnets-subtab`, from `refactor-list-modules`
-- **Files:** new `src/tui/lists/carnets.rs`; `src/tui/app.rs` (`List::Carnets`, `Panel::tabs`, keymap), `src/tui/jobs.rs`, `src/tui/view.rs`, `src/tui/update.rs`
+- **Files:** new `src/tui/lists/carnets.rs`; `src/tui/app.rs` (`List::Carnets`, `Panel::tabs`, keymap), `src/tui/jobs.rs`, `src/tui/view.rs`, `src/tui/update.rs`, `src/carnet.rs`
 - **Spec:** the panel 2 row and keys table in `docs/design.md`.
 
 1. **Panel 2 becomes `Work │ Carnets`.** The sub-tab exists only while carnets are enabled.
 2. **Rows:** every carnet in `Snapshot.carnets`, across all workspaces, newest first. Each row shows its date and name, its tickets, a closed marker, and its summary.
 3. **`/`** matches folder name, tickets and summary.
 4. **`s`** prompts for text and runs `Job::SearchCarnets(text)`.
-   - The job runs `rg --line-number --ignore-case --fixed-strings --no-heading -- <text> <root>` and groups the hits by carnet folder.
+   - The job runs `rg --line-number --ignore-case --fixed-strings --no-heading -- <text> <root>` and groups the hits by carnet folder. The search and the grouping are a function in `carnet.rs`, next to step 3's CLI search. `jobs::run` handles the job like `Job::Commits`, as a listing that reports an action, not through `execute`.
    - The sub-tab then lists only carnets with hits, and the main view shows the selected carnet's hit lines above its README.
    - `Esc` clears the search.
    - A missing `rg` goes to the command log with the same message as the CLI.
