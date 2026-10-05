@@ -76,7 +76,8 @@ impl Item {
 }
 
 /// The `items.kind` column.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ItemKind {
     Worktree,
     Carnet,
@@ -151,6 +152,15 @@ impl State {
             db: Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?,
             default_workspace: default_workspace.to_owned(),
         })
+    }
+
+    /// Opens the database read-only, else an empty one in memory when there is none yet, so
+    /// reading never creates it.
+    pub fn read(path: &Path, default_workspace: &str) -> Result<Self> {
+        match path.exists() {
+            true => Self::open_read_only(path, default_workspace),
+            false => Self::from_connection(Connection::open_in_memory()?, default_workspace),
+        }
     }
 
     /// Opens a database that `open` already migrated, as each TUI job does.

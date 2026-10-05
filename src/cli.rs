@@ -158,6 +158,23 @@ pub fn run() -> Result<()> {
         }
         Command::Hooks(command) => run_hooks(command),
         Command::Tui => crate::tui::run(Config::load()?),
+        Command::Context { path, key, json } => {
+            let config = Config::load()?;
+            // Read-only: describing a directory must not create or migrate the database.
+            let state = State::read(&state::db_path(), config.default_workspace())?;
+            let target = match &key {
+                Some(key) => Target::Key(key),
+                None => Target::Dir(&path),
+            };
+            let here = crate::zellij::current_session();
+            let context = context::describe(&state, &config, &System, here.as_deref(), target)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&context)?);
+            } else {
+                print!("{}", context::render(&context));
+            }
+            Ok(())
+        }
         Command::Hook { phase } => {
             // A hook must never abort worktrunk: report and succeed.
             if let Err(err) = run_hook(phase) {
@@ -240,20 +257,6 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
             state.require_workspace(&workspace)?;
             Zellij::new(&System, config, Layouts::resolve(config)?).open_session(&workspace)
         }
-        Command::Context { path, key, json } => {
-            let target = match &key {
-                Some(key) => Target::Key(key),
-                None => Target::Dir(&path),
-            };
-            let here = crate::zellij::current_session();
-            let context = context::describe(state, config, &System, here.as_deref(), target)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&context)?);
-            } else {
-                print!("{}", context::render(&context));
-            }
-            Ok(())
-        }
         Command::Carnet(command) => {
             let root = config.require_carnet_root()?;
             let names = crate::carnet::Names::new(config.ticket_pattern())?;
@@ -286,7 +289,11 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
             }
             Ok(())
         }
-        Command::Hooks(_) | Command::Shell(_) | Command::Hook { .. } | Command::Tui => {
+        Command::Hooks(_)
+        | Command::Shell(_)
+        | Command::Hook { .. }
+        | Command::Tui
+        | Command::Context { .. } => {
             unreachable!()
         }
     }

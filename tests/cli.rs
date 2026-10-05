@@ -207,6 +207,15 @@ fn shell_init_fish_wraps_wt() {
 }
 
 #[test]
+fn context_never_creates_the_database() {
+    let home = Home::new();
+    let json = home.ok(&["context", "--json"]);
+    let context: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(context["item"], serde_json::Value::Null);
+    assert!(!home.path("state/atelier").exists());
+}
+
+#[test]
 fn carnets_are_folders_under_the_configured_root() {
     let home = Home::new();
     assert!(
