@@ -25,12 +25,15 @@ pub struct Context {
 }
 
 impl Context {
+    /// Creates and migrates the database once; jobs then only connect to it.
     pub fn new(config: Config) -> Result<Self> {
+        let db = state::db_path();
+        State::open(&db, config.default_workspace())?;
         Ok(Self {
             layouts: Layouts::resolve(&config)?,
             ticket: config.ticket_regex()?,
             names: carnet::Names::new(config.ticket_pattern())?,
-            db: state::db_path(),
+            db,
             config,
         })
     }
@@ -41,11 +44,12 @@ impl Context {
             here: zellij::current_session(),
             layouts: self.layouts.clone(),
             anchor: self.config.anchor_pane().to_owned(),
+            reconciled: Default::default(),
         }
     }
 
     fn state(&self) -> Result<State> {
-        State::open(&self.db, self.config.default_workspace())
+        State::connect(&self.db, self.config.default_workspace())
     }
 }
 
@@ -70,7 +74,11 @@ pub fn run(context: &Context, job: Job) -> Action {
                     snapshot
                 })
                 .map_err(|err| err.to_string());
-            Action::Loaded { snapshot, log }
+            Action::Loaded {
+                snapshot,
+                full,
+                log,
+            }
         }
         Job::Commits(path) => {
             let lines = commits(&recorder, &path).unwrap_or_default();
@@ -575,6 +583,7 @@ mod tests {
                 worktree: "W".into(),
             },
             anchor: "editor".into(),
+            reconciled: Default::default(),
         }
     }
 

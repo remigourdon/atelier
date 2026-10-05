@@ -430,6 +430,8 @@ pub enum Action {
     Copy(String),
     Loaded {
         snapshot: Result<Snapshot, String>,
+        /// Whether it was a full refresh.
+        full: bool,
         log: Vec<Logged>,
     },
     Commits(PathBuf, Vec<String>),

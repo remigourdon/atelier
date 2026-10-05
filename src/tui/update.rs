@@ -1,6 +1,7 @@
 //! `update(model, action) -> effects`: every state change, with no I/O.
 
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -12,7 +13,7 @@ use tui_input::backend::crossterm::EventHandler;
 use super::app::{
     Action, Binding, Cmd, Due, Effect, FAST_REFRESH, FULL_REFRESH, Focus, Job, KEYMAP, List,
     MenuEntry, Modal, Model, On, Panel, Popup, PopupCmd, Removal, RemovedWorktree, Row, Screen,
-    Source, Submit, Work, WorkKind, lookup, popup_lookup,
+    Snapshot, Source, Submit, Work, WorkKind, lookup, popup_lookup,
 };
 use super::view::{areas, main_len, offset};
 use crate::issues::Issue;
@@ -57,17 +58,20 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
             }]);
             vec![Effect::Copy(text)]
         }
-        Action::Loaded { snapshot, log } => {
+        Action::Loaded {
+            snapshot,
+            full,
+            log,
+        } => {
             done(model, Source::Wt);
             model.push_log(log);
             match snapshot {
                 Ok(snapshot) => {
                     let keep = Keep::of(model);
-                    model.snapshot = snapshot;
+                    let old = std::mem::replace(&mut model.snapshot, snapshot);
                     model.loaded = true;
                     keep.restore(model);
-                    model.commits.clear();
-                    model.readmes.clear();
+                    drop_stale(model, &old, full);
                     let mut effects = commits(model);
                     effects.extend(fetch_reviews(model));
                     effects.extend(fetch_issues(model));
@@ -376,6 +380,31 @@ fn select_moved(model: &mut Model, list: List, index: usize) -> Vec<Effect> {
     commits(model)
 }
 
+/// Drops what a refresh made stale: everything on a full refresh, else what was loaded for
+/// items no longer listed, and the commits of worktrees whose head moved.
+fn drop_stale(model: &mut Model, old: &Snapshot, full: bool) {
+    if full {
+        model.commits.clear();
+        model.readmes.clear();
+        return;
+    }
+    let head = |work: &Work| work.tree().map(|tree| tree.short_sha.clone());
+    let heads: HashMap<&Path, Option<String>> = (model.snapshot.work.iter())
+        .map(|work| (work.path.as_path(), head(work)))
+        .collect();
+    let moved: HashSet<&Path> = (old.work.iter())
+        .filter(|work| {
+            heads
+                .get(work.path.as_path())
+                .is_some_and(|now| *now != head(work))
+        })
+        .map(|work| work.path.as_path())
+        .collect();
+    (model.commits)
+        .retain(|path, _| heads.contains_key(path.as_path()) && !moved.contains(path.as_path()));
+    (model.readmes).retain(|path, _| heads.contains_key(path.as_path()));
+}
+
 /// Fetches the selected item's recent commits, and a carnet's README, unless they are loaded.
 fn commits(model: &mut Model) -> Vec<Effect> {
     let mut effects = Vec::new();
@@ -620,10 +649,11 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
             };
             return focus_panel(model, Panel::ALL[next]);
         }
-        Cmd::Jump(number) => match Panel::ALL.get(number.wrapping_sub(1)) {
-            Some(&panel) => return focus_panel(model, panel),
-            None => return note(model, "that panel comes in a later phase"),
-        },
+        Cmd::Jump(number) => {
+            if let Some(&panel) = Panel::ALL.get(number.wrapping_sub(1)) {
+                return focus_panel(model, panel);
+            }
+        }
         Cmd::FocusMain => model.focus = Focus::Main,
         Cmd::ScrollDown => scroll(model, 1, 0),
         Cmd::ScrollUp => scroll(model, -1, 0),
@@ -1250,12 +1280,9 @@ fn mouse_event(model: &mut Model, mouse: MouseEvent) -> Vec<Effect> {
 
 #[cfg(test)]
 pub mod tests {
-    use std::path::PathBuf;
-
     use super::*;
     use crate::reviews::{Review, Role};
     use crate::state::Repo;
-    use crate::tui::app::{Snapshot, Work, WorkKind};
     use crate::worktrunk::{Forge, Worktree};
 
     pub fn work(repo: &str, branch: &str, group: &str, workspace: &str) -> Work {
@@ -1357,6 +1384,7 @@ pub mod tests {
             &mut model,
             Action::Loaded {
                 snapshot: Ok(snapshot()),
+                full: false,
                 log: Vec::new(),
             },
         );
@@ -1686,6 +1714,7 @@ pub mod tests {
             &mut model,
             Action::Loaded {
                 snapshot: Ok(snapshot),
+                full: false,
                 log: Vec::new(),
             },
         );
@@ -1693,6 +1722,62 @@ pub mod tests {
             model.targets()[0].path(),
             &PathBuf::from("/src/web.ABC-1-form")
         );
+    }
+
+    #[test]
+    fn fast_refreshes_keep_commits_whose_head_did_not_move() {
+        let mut model = with_carnets(model());
+        let loaded = |model: &Model| -> Vec<String> {
+            let mut paths: Vec<String> = (model.commits.keys().chain(model.readmes.keys()))
+                .map(|path| path.display().to_string())
+                .collect();
+            paths.sort();
+            paths
+        };
+        let refresh = |model: &mut Model, snapshot: Snapshot, full: bool| {
+            let log = Vec::new();
+            let snapshot = Ok(snapshot);
+            update(
+                model,
+                Action::Loaded {
+                    snapshot,
+                    full,
+                    log,
+                },
+            );
+        };
+        let fill = |model: &mut Model| {
+            for work in &model.snapshot.work {
+                model.commits.insert(work.path.clone(), Vec::new());
+            }
+            let carnet = PathBuf::from("/data/2026-10-02-ideas");
+            model.readmes.insert(carnet, None);
+        };
+        fill(&mut model);
+        let mut snapshot = model.snapshot.clone();
+        snapshot.work[1].tree_mut().short_sha = "def5678".into();
+        snapshot
+            .work
+            .retain(|work| work.path != Path::new("/src/web"));
+        snapshot
+            .work
+            .retain(|work| !work.path.ends_with("2026-09-20-old"));
+        refresh(&mut model, snapshot, false);
+        assert_eq!(
+            loaded(&model),
+            [
+                "/data/2026-10-01-ABC-1-logs",
+                "/data/2026-10-02-ideas",
+                "/data/2026-10-02-ideas",
+                "/src/api",
+                "/src/web.ABC-1-form",
+            ],
+            "the moved head and the unlisted items are dropped"
+        );
+        fill(&mut model);
+        let snapshot = model.snapshot.clone();
+        refresh(&mut model, snapshot, true);
+        assert!(loaded(&model).is_empty(), "a full refresh drops everything");
     }
 
     #[test]
@@ -1908,6 +1993,7 @@ pub mod tests {
                 model,
                 Action::Loaded {
                     snapshot: Ok(snapshot()),
+                    full: false,
                     log: Vec::new(),
                 },
             ))
