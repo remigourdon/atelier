@@ -58,7 +58,12 @@ impl ListKind for Repos {
             .collect()
     }
 
-    fn detail(&self, model: &Model, _list: List) -> Vec<(String, String)> {
+    fn detail(
+        &self,
+        model: &Model,
+        _palette: &Palette,
+        _list: List,
+    ) -> Vec<(String, Line<'static>)> {
         let Some(repo) = model.repo() else {
             return Vec::new();
         };

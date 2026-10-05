@@ -3,7 +3,7 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, close_tabs, pair};
+use super::{ListKind, close_tabs, pair, tab_mark};
 use crate::reviews::{Review, Role};
 use crate::state::Repo;
 use crate::tui::app::{Cmd, Effect, Feed, Job, Kind, List, Model, Source, Work};
@@ -74,6 +74,15 @@ impl Model {
     }
 }
 
+/// A review's status: a draft's warns.
+fn status(review: &Review, palette: &Palette) -> Span<'static> {
+    if review.draft {
+        Span::styled("draft", Style::new().fg(palette.warn))
+    } else {
+        Span::raw("open")
+    }
+}
+
 impl ListKind for Reviews {
     fn kind(&self) -> Kind {
         Kind::Reviews
@@ -106,10 +115,7 @@ impl ListKind for Reviews {
             .map(|review| {
                 let glyphs = &palette.glyphs;
                 let marker = match model.review_work(review) {
-                    Some(work) if work.tab => {
-                        Span::styled(format!("{} ", glyphs.open), Style::new().fg(palette.ok))
-                    }
-                    Some(_) => Span::styled(format!("{} ", glyphs.closed), dim),
+                    Some(work) => tab_mark(work.tab, palette),
                     None => Span::raw("  "),
                 };
                 let mut spans = vec![marker];
@@ -124,7 +130,8 @@ impl ListKind for Reviews {
                 ));
                 spans.push(Span::raw(review.title.as_str()));
                 if review.draft {
-                    spans.push(Span::styled(" draft", Style::new().fg(palette.warn)));
+                    spans.push(Span::raw(" "));
+                    spans.push(status(review, palette));
                 }
                 if list == List::ToReview {
                     spans.push(Span::styled(format!(" @{}", review.author), dim));
@@ -134,7 +141,12 @@ impl ListKind for Reviews {
             .collect()
     }
 
-    fn detail(&self, model: &Model, _list: List) -> Vec<(String, String)> {
+    fn detail(
+        &self,
+        model: &Model,
+        palette: &Palette,
+        _list: List,
+    ) -> Vec<(String, Line<'static>)> {
         let Some(review) = model.review() else {
             return Vec::new();
         };
@@ -154,16 +166,20 @@ impl ListKind for Reviews {
             pair("Title", review.title.clone()),
             pair("Author", review.author.clone()),
             pair("Branch", format!("{} → {}", review.branch, review.base)),
-            pair("Status", if review.draft { "draft" } else { "open" }.into()),
+            pair("Status", status(review, palette)),
             pair("Updated", review.updated_at.clone()),
             pair("URL", review.url.clone()),
             pair("Repo", repo),
             pair(
                 "Worktree",
-                model.review_work(review).map_or_else(
-                    || "none: Space checks it out".into(),
-                    |work| work.path().display().to_string(),
-                ),
+                model
+                    .review_work(review)
+                    .map_or(Line::from("none: Space checks it out"), |work| {
+                        Line::from(vec![
+                            tab_mark(work.tab, palette),
+                            Span::raw(work.path().display().to_string()),
+                        ])
+                    }),
             ),
         ]
     }

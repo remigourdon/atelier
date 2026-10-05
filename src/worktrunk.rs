@@ -188,6 +188,108 @@ pub struct Worktree {
     /// Its branch's configured upstream no longer exists, as after a merged review deleted it.
     /// `wt list` cannot tell this apart from never pushed: [`crate::git::gone_branches`] does.
     pub gone: bool,
+    /// Its branch's CI and review, when listed with `--full` and there is one to show.
+    pub ci: Option<Ci>,
+}
+
+/// A branch's CI and review status, as worktrunk's CI column reports it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ci {
+    pub state: CiState,
+    /// Local HEAD differs from the remote, so the status is of an older commit.
+    pub stale: bool,
+    /// The status is of the branch's own workflow: it has no open PR.
+    pub branch: bool,
+    pub pr: Option<Pr>,
+}
+
+/// What worktrunk's CI column shows, its "no CI" aside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CiState {
+    Passed,
+    Running,
+    Failed,
+    Conflicts,
+    /// The status could not be fetched.
+    Error,
+    ChangesRequested,
+    /// A required review is not given yet.
+    Pending,
+}
+
+impl CiState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Running => "running",
+            Self::Failed => "failed",
+            Self::Conflicts => "conflicts",
+            Self::Error => "error",
+            Self::ChangesRequested => "changes requested",
+            Self::Pending => "review pending",
+        }
+    }
+}
+
+/// A branch's open PR or MR.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pr {
+    pub number: Option<u64>,
+    pub url: Option<String>,
+    /// `changes_requested`, `pending`, `draft` or `approved`; `None` without a review signal.
+    pub review: Option<String>,
+}
+
+impl Pr {
+    pub fn draft(&self) -> bool {
+        self.review.as_deref() == Some("draft")
+    }
+}
+
+impl Ci {
+    /// worktrunk's CI column from an item's `checks` and `pr`, `Some(None)` being `null`:
+    /// both `null` is a fetch error, `pr.mergeable` false is conflicts, and changes requested
+    /// outranks running checks while a required review only recolors a passing or check-less
+    /// branch. `None` when there is nothing to show.
+    fn of(checks: Option<Option<raw::Checks>>, pr: Option<Option<raw::Pr>>) -> Option<Self> {
+        if let (Some(None), Some(None)) = (&checks, &pr) {
+            return Some(Self {
+                state: CiState::Error,
+                stale: false,
+                branch: false,
+                pr: None,
+            });
+        }
+        let checks = checks.flatten();
+        let pr = pr.flatten();
+        let status = checks.as_ref().and_then(|checks| checks.status.as_deref());
+        let review = pr.as_ref().and_then(|pr| pr.review.as_deref());
+        let state = if pr.as_ref().is_some_and(|pr| pr.mergeable == Some(false)) {
+            CiState::Conflicts
+        } else if status == Some("failed") {
+            CiState::Failed
+        } else if review == Some("changes_requested") {
+            CiState::ChangesRequested
+        } else if status == Some("running") {
+            CiState::Running
+        } else if review == Some("pending") {
+            CiState::Pending
+        } else if status == Some("passed") {
+            CiState::Passed
+        } else {
+            return None;
+        };
+        Some(Self {
+            state,
+            stale: checks.as_ref().is_some_and(|checks| checks.stale),
+            branch: checks.is_some_and(|checks| checks.source == "branch"),
+            pr: pr.map(|pr| Pr {
+                number: pr.number,
+                url: pr.url,
+                review: pr.review,
+            }),
+        })
+    }
 }
 
 /// Lists a repo's worktrees, pinning the JSON schema whatever the user's config says.
@@ -268,6 +370,7 @@ impl Listing {
                     on_default,
                     default_branch: default_branch.clone(),
                     gone: false,
+                    ci: Ci::of(item.checks, item.pr),
                 })
             })
             .collect();
@@ -330,6 +433,35 @@ mod raw {
         pub default_branch: Option<DefaultBranch>,
         #[serde(default)]
         pub display: Display,
+        /// `Some(None)` when `null`, which tells a fetch error apart from no CI.
+        #[serde(default, deserialize_with = "present")]
+        pub checks: Option<Option<Checks>>,
+        #[serde(default, deserialize_with = "present")]
+        pub pr: Option<Option<Pr>>,
+    }
+
+    /// A field that is there, even as `null`.
+    fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Option<T>>, D::Error> {
+        Ok(Some(Option::<T>::deserialize(deserializer)?))
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    pub struct Checks {
+        pub status: Option<String>,
+        pub source: String,
+        pub stale: bool,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    pub struct Pr {
+        pub number: Option<u64>,
+        pub url: Option<String>,
+        pub review: Option<String>,
+        pub mergeable: Option<bool>,
     }
 
     /// How a branch compares with the repo's default branch.
@@ -468,6 +600,73 @@ mod tests {
         assert!(integrated(r#""display":{"state":"integrated"}"#));
         assert!(integrated(r#""display":{"state":"empty"}"#));
         assert!(!integrated(r#""display":{"state":"ahead"}"#));
+    }
+
+    fn ci(fields: &str) -> Option<Ci> {
+        let json =
+            format!(r#"{{"items":[{{"branch":"b","worktree":{{"path":"/r.b"}}{fields}}}]}}"#);
+        Listing::parse(&json).unwrap().worktrees.remove(0).ci
+    }
+
+    fn state(fields: &str) -> Option<CiState> {
+        ci(fields).map(|ci| ci.state)
+    }
+
+    #[test]
+    fn ci_follows_worktrunks_column() {
+        assert_eq!(state(""), None, "not collected or never pushed");
+        assert_eq!(state(r#","pr":{"number":3}"#), None, "no CI");
+        assert_eq!(state(r#","checks":null,"pr":null"#), Some(CiState::Error));
+        let checks = |status: &str, pr: &str| {
+            state(&format!(
+                r#","checks":{{"status":{status},"source":"pr"}},"pr":{pr}"#
+            ))
+        };
+        assert_eq!(checks(r#""passed""#, "{}"), Some(CiState::Passed));
+        assert_eq!(checks(r#""running""#, "{}"), Some(CiState::Running));
+        assert_eq!(checks(r#""failed""#, "{}"), Some(CiState::Failed));
+        assert_eq!(
+            checks("null", r#"{"mergeable":false}"#),
+            Some(CiState::Conflicts)
+        );
+        assert_eq!(
+            checks(r#""running""#, r#"{"review":"changes_requested"}"#),
+            Some(CiState::ChangesRequested),
+            "outranks running"
+        );
+        assert_eq!(
+            checks(r#""failed""#, r#"{"review":"changes_requested"}"#),
+            Some(CiState::Failed)
+        );
+        assert_eq!(
+            checks(r#""passed""#, r#"{"review":"pending"}"#),
+            Some(CiState::Pending)
+        );
+        assert_eq!(
+            checks(r#""running""#, r#"{"review":"pending"}"#),
+            Some(CiState::Running),
+            "only recolors a passing branch"
+        );
+        assert_eq!(
+            state(r#","pr":{"review":"pending"}"#),
+            Some(CiState::Pending),
+            "or a check-less one"
+        );
+    }
+
+    #[test]
+    fn ci_keeps_the_pr_and_whether_it_is_stale_or_the_branchs() {
+        let review = ci(r#","checks":{"status":"passed","source":"pr","stale":true},
+            "pr":{"number":27,"url":"https://github.com/o/r/pull/27","review":"draft"}"#)
+        .unwrap();
+        assert!(review.stale && !review.branch);
+        let pr = review.pr.unwrap();
+        assert_eq!(pr.number, Some(27));
+        assert_eq!(pr.url.as_deref(), Some("https://github.com/o/r/pull/27"));
+        assert!(pr.draft());
+        let main = ci(r#","checks":{"status":"failed","source":"branch"}"#).unwrap();
+        assert!(main.branch && main.pr.is_none());
+        assert_eq!(main.state, CiState::Failed);
     }
 
     #[test]

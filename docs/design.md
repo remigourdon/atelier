@@ -122,7 +122,7 @@ The command log retains up to 500 entries in memory. `E` captures those entries 
 errors, oldest first, and never overwrite earlier files. The result's path or error is added to
 the command log. Exporting does not refresh items.
 
-Layout: below ~100 columns the main view is hidden (`+` shows it). On short terminals the focused side panel expands and the others collapse to their titles. Mouse: click to focus or select, wheel to scroll. The accent colour is Catppuccin mauve. Work rows show `↓N` when behind upstream, a spinner while `p` runs, and finished worktrees dimmed with `⊂` or `⊘`; `icons = "nerd"` swaps the row glyphs for Nerd Font icons.
+Layout: below ~100 columns the main view is hidden (`+` shows it). On short terminals the focused side panel expands and the others collapse to their titles. Mouse: click to focus or select, wheel to scroll. The accent colour is Catppuccin mauve. Work rows show worktrunk's CI column as a `◆` coloured by status (passed green, running blue, failed red, conflicts peach, changes requested pink, review pending teal, `⚠` when it could not be fetched, dimmed when stale or a draft, nothing without CI), `↓N` when behind upstream, a spinner while `p` runs, and finished worktrees dimmed with `⊂` or `⊘`; `icons = "nerd"` swaps the row glyphs for Nerd Font icons. CI comes from the full refresh's `wt list --full`, and a fast refresh keeps the last one found. The main view's detail carries each row's colours and marks, and spells the CI out with the PR and its review; `o` on a worktree with a PR opens the PR.
 
 ### Keys
 

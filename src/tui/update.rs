@@ -72,6 +72,9 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
                 Ok(snapshot) => {
                     let keep = Keep::of(model);
                     let old = std::mem::replace(&mut model.snapshot, snapshot);
+                    if !full {
+                        keep_ci(&mut model.snapshot, &old);
+                    }
                     model.loaded = true;
                     keep.restore(model);
                     let relist = drop_stale(model, &old, full);
@@ -298,6 +301,20 @@ fn drop_stale(model: &mut Model, old: &Snapshot, full: bool) -> Option<PathBuf> 
     kept.extend(relist.clone());
     model.commits.retain(|path, _| kept.contains(path));
     relist
+}
+
+/// A fast refresh lists no CI: each worktree keeps what the last full refresh found.
+fn keep_ci(snapshot: &mut Snapshot, old: &Snapshot) {
+    let found: HashMap<&Path, &worktrunk::Ci> = (old.work.iter())
+        .filter_map(|work| Some((work.path.as_path(), work.tree()?.ci.as_ref()?)))
+        .collect();
+    for work in &mut snapshot.work {
+        if let Some(&ci) = found.get(work.path.as_path())
+            && let WorkKind::Worktree { tree, .. } = &mut work.kind
+        {
+            tree.ci = Some(ci.clone());
+        }
+    }
 }
 
 /// The active list's selected item, else the Work list's.
@@ -1412,6 +1429,28 @@ pub mod tests {
     }
 
     #[test]
+    fn browse_opens_a_worktrees_pr_over_its_branch() {
+        let mut model = model();
+        press(&mut model, "G");
+        let tree = model.snapshot.work[0].tree_mut();
+        assert_eq!(tree.branch.as_deref(), Some("main"));
+        tree.ci = Some(worktrunk::Ci {
+            state: worktrunk::CiState::Running,
+            stale: false,
+            branch: false,
+            pr: Some(worktrunk::Pr {
+                number: Some(5),
+                url: Some("https://forge/api/pull/5".into()),
+                review: None,
+            }),
+        });
+        assert_eq!(
+            jobs(press(&mut model, "o")),
+            [Job::Browse("https://forge/api/pull/5".into())]
+        );
+    }
+
+    #[test]
     fn space_on_a_workspace_switches_or_attaches() {
         let mut model = model();
         press(&mut model, "1j");
@@ -1464,6 +1503,33 @@ pub mod tests {
             model.targets()[0].path(),
             &PathBuf::from("/src/web.ABC-1-form")
         );
+    }
+
+    #[test]
+    fn fast_refreshes_keep_the_last_full_refreshs_ci() {
+        let mut model = model();
+        let ci = worktrunk::Ci {
+            state: worktrunk::CiState::Failed,
+            stale: false,
+            branch: false,
+            pr: None,
+        };
+        let refresh = |model: &mut Model, ci: Option<&worktrunk::Ci>, full: bool| {
+            let mut snapshot = snapshot();
+            snapshot.work[1].tree_mut().ci = ci.cloned();
+            update(
+                model,
+                Action::Loaded {
+                    snapshot: Ok(snapshot),
+                    full,
+                    log: Vec::new(),
+                },
+            );
+            model.snapshot.work[1].tree().unwrap().ci.clone()
+        };
+        assert_eq!(refresh(&mut model, Some(&ci), true), Some(ci.clone()));
+        assert_eq!(refresh(&mut model, None, false), Some(ci), "kept");
+        assert_eq!(refresh(&mut model, None, true), None, "cleared");
     }
 
     #[test]

@@ -2,16 +2,17 @@
 
 use std::path::PathBuf;
 
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, carnets, kind, pair, paths, plan};
+use super::{ListKind, carnets, kind, pair, paths, plan, tab_detail, tab_mark};
 use crate::finish::{self, Scope};
 use crate::tui::app::{
     Action, Cmd, Effect, Job, Kind, List, MenuEntry, Modal, Model, Removal, Submit, Work, WorkKind,
 };
 use crate::tui::update::{confirm, note, run, update, workspace_menu};
 use crate::tui::view::{Palette, icon};
+use crate::worktrunk::{Ci, CiState, Forge, Pr, Worktree};
 
 pub struct WorkList;
 
@@ -222,10 +223,8 @@ impl ListKind for WorkList {
                     let marker = if model.schedule.is_pulling(work.path()) {
                         let frame = glyphs.spinner[model.frame % glyphs.spinner.len()];
                         Span::styled(format!("{frame} "), Style::new().fg(palette.info))
-                    } else if work.tab {
-                        Span::styled(format!("{} ", glyphs.open), Style::new().fg(palette.ok))
                     } else {
-                        Span::styled(format!("{} ", glyphs.closed), dim)
+                        tab_mark(work.tab, palette)
                     };
                     let mut spans = vec![Span::raw(indent), marker];
                     let glyph = if work.is_carnet() {
@@ -236,21 +235,17 @@ impl ListKind for WorkList {
                     spans.extend(icon(glyph, dim));
                     spans.push(Span::raw(work.title()));
                     let tree = work.tree();
-                    if let Some(tree) = tree.filter(|tree| !tree.symbols.is_empty()) {
-                        let status = if tree.dirty {
-                            Style::new().fg(palette.warn)
-                        } else {
-                            dim
-                        };
-                        spans.push(Span::styled(format!(" {}", tree.symbols), status));
+                    if let Some(ci) = tree.and_then(|tree| tree.ci.as_ref()) {
+                        spans.push(Span::raw(" "));
+                        spans.push(ci_mark(ci, palette));
                     }
-                    if let Some((_, behind)) =
-                        (tree.and_then(|tree| tree.upstream)).filter(|&(_, behind)| behind > 0)
-                    {
-                        spans.push(Span::styled(
-                            format!(" ↓{behind}"),
-                            Style::new().fg(palette.warn),
-                        ));
+                    if let Some(tree) = tree.filter(|tree| !tree.symbols.is_empty()) {
+                        spans.push(Span::raw(" "));
+                        spans.push(symbols(tree, palette));
+                    }
+                    if let Some(behind) = tree.and_then(|tree| behind(tree, palette)) {
+                        spans.push(Span::raw(" "));
+                        spans.push(behind);
                     }
                     // Finished: dimmed, with why.
                     if let Some(signal) = finish::signal(work) {
@@ -263,7 +258,12 @@ impl ListKind for WorkList {
             .collect()
     }
 
-    fn detail(&self, model: &Model, _list: List) -> Vec<(String, String)> {
+    fn detail(
+        &self,
+        model: &Model,
+        palette: &Palette,
+        _list: List,
+    ) -> Vec<(String, Line<'static>)> {
         match model.work_row() {
             Some(Row::Group { name, members, .. }) => {
                 let mut pairs = vec![pair("Group", group_name(&name).to_owned())];
@@ -275,11 +275,31 @@ impl ListKind for WorkList {
             }
             Some(Row::Item(index)) => {
                 let work = &model.snapshot.work[index];
-                let (repo_name, tree) = match &work.kind {
+                let (repo, repo_name, tree) = match &work.kind {
                     WorkKind::Worktree {
-                        repo_name, tree, ..
-                    } => (repo_name, tree),
-                    WorkKind::Carnet { .. } => return carnets::detail(work),
+                        repo,
+                        repo_name,
+                        tree,
+                    } => (repo, repo_name, tree),
+                    WorkKind::Carnet { .. } => return carnets::detail(work, palette),
+                };
+                let status_text = if tree.dirty {
+                    format!("dirty +{} -{}", tree.diff.0, tree.diff.1)
+                } else {
+                    "clean".into()
+                };
+                let mut status = Vec::new();
+                if !tree.symbols.is_empty() {
+                    status.extend([symbols(tree, palette), Span::raw(" ")]);
+                }
+                status.push(Span::styled(status_text, status_style(tree, palette)));
+                let upstream = match tree.upstream {
+                    Some((ahead, behind)) => {
+                        let behind = self::behind(tree, palette)
+                            .unwrap_or_else(|| Span::raw(format!("↓{behind}")));
+                        Line::from(vec![Span::raw(format!("↑{ahead} ")), behind])
+                    }
+                    None => Line::from("none"),
                 };
                 let mut pairs = vec![
                     pair("Repo", repo_name.clone()),
@@ -287,21 +307,9 @@ impl ListKind for WorkList {
                     pair("Path", tree.path.display().to_string()),
                     pair("Workspace", work.workspace.clone()),
                     pair("Group", work.group.clone()),
-                    pair("Tab", if work.tab { "open" } else { "closed" }.into()),
-                    pair(
-                        "Status",
-                        if tree.dirty {
-                            format!("dirty +{} -{}", tree.diff.0, tree.diff.1)
-                        } else {
-                            "clean".into()
-                        },
-                    ),
-                    pair(
-                        "Upstream",
-                        tree.upstream
-                            .map(|(ahead, behind)| format!("↑{ahead} ↓{behind}"))
-                            .unwrap_or_else(|| "none".into()),
-                    ),
+                    pair("Tab", tab_detail(work.tab, palette)),
+                    pair("Status", status),
+                    pair("Upstream", upstream),
                     pair(
                         "Commit",
                         format!(
@@ -310,10 +318,24 @@ impl ListKind for WorkList {
                         ),
                     ),
                 ];
+                if let Some(ci) = &tree.ci {
+                    pairs.push(pair("CI", ci_detail(ci, palette)));
+                    let forge = model.snapshot.forges.get(repo);
+                    if let Some(pr) = &ci.pr {
+                        pairs.push(pair("PR", pr_detail(pr, forge, palette)));
+                    }
+                }
                 if let Some(signal) = finish::signal(work) {
                     pairs.push(pair(
                         "Finished",
-                        format!("{} (f to finish)", signal.label()),
+                        Span::styled(
+                            format!(
+                                "{} {} (f to finish)",
+                                palette.glyphs.signal(signal),
+                                signal.label()
+                            ),
+                            Style::new().fg(palette.dim),
+                        ),
                     ));
                 }
                 pairs
@@ -527,8 +549,12 @@ impl ListKind for WorkList {
         match model.work_row()? {
             Row::Item(index) => {
                 let work = &model.snapshot.work[index];
+                let tree = work.tree()?;
+                if let Some(url) = (tree.ci.as_ref()).and_then(|ci| ci.pr.as_ref()?.url.clone()) {
+                    return Some(url);
+                }
                 let forge = model.snapshot.forges.get(work.repo()?)?;
-                Some(match &work.tree()?.branch {
+                Some(match &tree.branch {
                     Some(branch) => forge.branch_url(branch),
                     None => forge.url.clone(),
                 })
@@ -536,6 +562,98 @@ impl ListKind for WorkList {
             Row::Group { .. } => None,
         }
     }
+}
+
+/// worktrunk's status symbols, such as `!?↑`: warning when the tree is dirty.
+fn symbols(tree: &Worktree, palette: &Palette) -> Span<'static> {
+    Span::styled(tree.symbols.clone(), status_style(tree, palette))
+}
+
+fn status_style(tree: &Worktree, palette: &Palette) -> Style {
+    Style::new().fg(if tree.dirty {
+        palette.warn
+    } else {
+        palette.dim
+    })
+}
+
+/// `↓N` when the branch is behind its upstream.
+fn behind(tree: &Worktree, palette: &Palette) -> Option<Span<'static>> {
+    let (_, behind) = tree.upstream.filter(|&(_, behind)| behind > 0)?;
+    Some(Span::styled(
+        format!("↓{behind}"),
+        Style::new().fg(palette.warn),
+    ))
+}
+
+/// A CI status's colour, as worktrunk's: dimmed when stale or for a draft.
+fn ci_style(ci: &Ci, palette: &Palette) -> Style {
+    let color = match ci.state {
+        CiState::Passed => palette.ok,
+        CiState::Running => palette.info,
+        CiState::Failed => palette.error,
+        CiState::Conflicts | CiState::Error => palette.warn,
+        CiState::ChangesRequested => palette.changes,
+        CiState::Pending => palette.waiting,
+    };
+    let style = Style::new().fg(color);
+    if ci.stale || ci.pr.as_ref().is_some_and(Pr::draft) {
+        style.add_modifier(Modifier::DIM)
+    } else {
+        style
+    }
+}
+
+/// A row's CI mark, its colour the status.
+fn ci_mark(ci: &Ci, palette: &Palette) -> Span<'static> {
+    let glyph = if ci.state == CiState::Error {
+        palette.glyphs.ci_error
+    } else {
+        palette.glyphs.ci
+    };
+    Span::styled(glyph, ci_style(ci, palette))
+}
+
+/// The detail's CI: the row's mark, what it means, and why it may be dimmed.
+fn ci_detail(ci: &Ci, palette: &Palette) -> Line<'static> {
+    let mut text = format!(" {}", ci.state.label());
+    if ci.branch {
+        text.push_str(" (branch)");
+    }
+    if ci.stale {
+        text.push_str(" · stale");
+    }
+    if ci.pr.as_ref().is_some_and(Pr::draft) {
+        text.push_str(" · draft");
+    }
+    Line::from(vec![
+        ci_mark(ci, palette),
+        Span::styled(text, ci_style(ci, palette)),
+    ])
+}
+
+/// The detail's PR: its reference and review, coloured as the CI mark would show it.
+fn pr_detail(pr: &Pr, forge: Option<&Forge>, palette: &Palette) -> Line<'static> {
+    let sigil = if forge.is_some_and(|forge| forge.provider == "gitlab") {
+        "!"
+    } else {
+        "#"
+    };
+    let mut spans = vec![Span::raw(match pr.number {
+        Some(number) => format!("{sigil}{number}"),
+        None => "open".into(),
+    })];
+    let review = match pr.review.as_deref() {
+        Some("changes_requested") => Some(("changes requested", palette.changes)),
+        Some("pending") => Some(("review pending", palette.waiting)),
+        Some("approved") => Some(("approved", palette.ok)),
+        Some("draft") => Some(("draft", palette.dim)),
+        _ => None,
+    };
+    if let Some((label, color)) = review {
+        spans.push(Span::styled(format!(" {label}"), Style::new().fg(color)));
+    }
+    Line::from(spans)
 }
 
 /// Runs a job on some paths, unless there are none.
