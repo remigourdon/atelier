@@ -12,8 +12,8 @@ use tui_input::backend::crossterm::EventHandler;
 
 use super::app::{
     Action, Binding, Cmd, Due, Effect, FAST_REFRESH, FULL_REFRESH, Focus, Job, KEYMAP, List,
-    MenuEntry, Modal, Model, On, Panel, Popup, PopupCmd, Removal, RemovedWorktree, Row, Screen,
-    Snapshot, Source, Submit, Work, WorkKind, lookup, popup_lookup,
+    MenuEntry, Modal, Model, On, Panel, Popup, PopupCmd, Removal, Row, Screen, Snapshot, Source,
+    Submit, Work, WorkKind, lookup, popup_lookup,
 };
 use super::view::{areas, main_len, offset};
 use crate::issues::Issue;
@@ -1151,20 +1151,7 @@ fn remove(model: &mut Model) -> Vec<Effect> {
                 .into_iter()
                 .filter(|work| work.removable())
                 .collect();
-            let removals: Vec<Removal> = removable
-                .iter()
-                .map(|work| Removal {
-                    path: work.path.clone(),
-                    worktree: match &work.kind {
-                        WorkKind::Worktree { repo, tree, .. } => Some(RemovedWorktree {
-                            repo: repo.clone(),
-                            branch: tree.branch.clone(),
-                            force: tree.dirty,
-                        }),
-                        WorkKind::Carnet => None,
-                    },
-                })
-                .collect();
+            let removals: Vec<Removal> = removable.iter().map(|work| Removal::of(work)).collect();
             if removals.is_empty() {
                 return note(model, "main worktrees are never removed");
             }

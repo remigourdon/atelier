@@ -373,9 +373,9 @@ impl State {
     }
 
     /// Forgets a repo with its items and tabs.
-    pub fn remove_repo(&mut self, path: impl AsRef<Path>) -> Result<()> {
+    pub fn remove_repo(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = text(path.as_ref());
-        let tx = self.db.transaction()?;
+        let tx = self.db.unchecked_transaction()?;
         tx.execute(
             "DELETE FROM tabs WHERE path IN (SELECT path FROM items WHERE repo = ?)",
             [&path],
@@ -818,7 +818,7 @@ mod tests {
 
     #[test]
     fn removing_a_repo_forgets_its_items_and_tabs() {
-        let mut state = fresh();
+        let state = fresh();
         state.add_repo("/r", None, "default").unwrap();
         state
             .add_item(

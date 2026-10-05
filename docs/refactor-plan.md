@@ -78,7 +78,8 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
    - `set_alias(repo, alias)`, `set_repo_workspace(repo, workspace)`, `forget_repo(repo)`
    - `add_workspace(name)`, `remove_workspace(name, carnets)`
    - `snapshot(full) -> (Snapshot, Vec<Logged>)`: today's `jobs::load` plus `sync::sync`. `sync.rs` folds into `items.rs`.
-   - for the hooks: `record(path, repo, branch, workspace, group) -> Tab` and `forget(path)`
+   - `create_carnet(name, workspace, group) -> PathBuf`
+   - for the hooks: `record(path, repo, branch, workspace, group) -> Option<Tab>` (`None` for a carnet's worktree) and `forget(path)`
    - Verbs over several paths keep today's behaviour: run every path, then join the errors.
 2. **Core types.** `Snapshot`, `Work`, `WorkKind`, `Removal` and `RemovedWorktree` move from `tui/app.rs` into `items.rs`, and `app.rs` re-exports them.
    - `Removal::of(&Work)` replaces the construction in `update.rs::remove`.
@@ -106,7 +107,7 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
      - `main_worktree` from `cli.rs`
      - `init` from `carnet.rs`
 6. **Zellij stops carrying the runner.**
-   - `Zellij::new(runner, &config)` replaces the four hand-built `Zellij { … }` values (`cli.rs`, `jobs.rs`, and the tests in `jobs.rs`, `zellij.rs` and `hooks.rs`).
+   - `Zellij::new(runner, &config, layouts)` replaces the four hand-built `Zellij { … }` values (`cli.rs`, `jobs.rs`, and the tests in `jobs.rs`, `zellij.rs` and `hooks.rs`).
    - Its fields become private, with `here()` as an accessor. That includes `reconciled`, added in step 1 as a public field that every literal sets.
    - Callers that ran other commands through `zellij.runner` use their own runner.
    - `name_for` and `open_siblings` ask `item.is_carnet()` instead of treating `item.repo == None` as "carnet".
