@@ -109,6 +109,12 @@ Lazygit model: numbered side panels on the left, the main view on the right show
 
 The main view is a structured key/value detail for each kind, plus recent commits. A carnet shows its tickets, its summary and its rendered README without the front matter, read like the commits only for the selected carnet; an issue shows its linked work. Errors go to the command log, not toasts.
 
+The command log retains up to 500 entries in memory. `E` captures those entries and writes a new
+`command-log-<timestamp>-<pid>.log` under `$XDG_STATE_HOME/atelier/logs`, defaulting to
+`~/.local/state/atelier/logs`, on a background job. Exports include full commands and multiline
+errors, oldest first, and never overwrite earlier files. The result's path or error is added to
+the command log. Exporting does not refresh items.
+
 Layout: below ~100 columns the main view is hidden (`+` shows it). On short terminals the focused side panel expands and the others collapse to their titles. Mouse: click to focus or select, wheel to scroll. The accent colour is Catppuccin mauve. Work rows show `↓N` when behind upstream, a spinner while `p` runs, and finished worktrees dimmed with `⊂` or `⊘`; `icons = "nerd"` swaps the row glyphs for Nerd Font icons.
 
 ### Keys
@@ -132,6 +138,7 @@ Lazygit defaults. The keymap is one table in code that also feeds `?` and the hi
 | `o` · `y` `C-o` | open in browser · copy path/branch/URL via OSC 52 |
 | `/` | substring filter on the focused panel |
 | `R` · `?` · `+` `_` · `@` | refresh · actions menu · screen mode · toggle command log |
+| `E` | export the retained command log to a new file |
 | `Esc` · `q` `C-c` | back · quit |
 
 `Space`, `x`, `d` and `p` on a group header act on every item in the group. `?` lists the focused panel's actions, then the global ones.

@@ -699,6 +699,10 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
             }
         }
         Cmd::ToggleLog => model.show_log = !model.show_log,
+        Cmd::ExportLog => {
+            let job = Job::ExportLog(model.log.clone());
+            return vec![run(model, job)];
+        }
         Cmd::Back => {
             if in_main {
                 model.focus = Focus::Panel(model.panel);
@@ -1431,6 +1435,42 @@ pub mod tests {
         let snapshot = model.snapshot.clone();
         refresh(&mut model, snapshot, true);
         assert!(loaded(&model).is_empty(), "a full refresh drops everything");
+    }
+
+    #[test]
+    fn exporting_captures_the_log_without_refreshing_items() {
+        let mut model = model();
+        let entries = vec![Logged {
+            command: "git pull".into(),
+            error: Some("first line\nsecond line".into()),
+        }];
+        model.push_log(entries.clone());
+        model.show_log = false;
+        model.focus = Focus::Main;
+        let job = Job::ExportLog(entries.clone());
+        assert_eq!(press(&mut model, "E"), [Effect::Run(job.clone())]);
+        model.push_log([Logged {
+            command: "later command".into(),
+            error: None,
+        }]);
+        let saved = Logged {
+            command: "export command log to /state/atelier/logs/export.log".into(),
+            error: None,
+        };
+        assert_eq!(
+            update(
+                &mut model,
+                Action::Finished {
+                    job,
+                    log: vec![saved.clone()],
+                    error: None
+                }
+            ),
+            [],
+            "exporting changes nothing to refresh"
+        );
+        assert_eq!(model.log.last(), Some(&saved));
+        assert!(!model.schedule.loading().any(|_| true));
     }
 
     #[test]
