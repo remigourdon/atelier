@@ -444,7 +444,11 @@ fn render_hints(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect)
     }
 }
 
-/// The help's first word, so the hint bar fits.
+/// Short help for the hint bar, keeping tab closing distinct from carnet closing.
 fn short_help(help: &str) -> &str {
-    help.split(' ').next().unwrap_or(help)
+    if help == "close tab" {
+        help
+    } else {
+        help.split(' ').next().unwrap_or(help)
+    }
 }

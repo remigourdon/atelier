@@ -105,6 +105,15 @@ fn paths(works: &[&Work]) -> Vec<PathBuf> {
     works.iter().map(|work| work.path().clone()).collect()
 }
 
+/// Closes the given tabs, doing nothing for an empty selection.
+fn close_tabs(model: &mut Model, paths: Vec<PathBuf>) -> Vec<Effect> {
+    if paths.is_empty() {
+        Vec::new()
+    } else {
+        vec![run(model, Job::Close(paths))]
+    }
+}
+
 /// What the main view calls an item.
 fn kind(work: &Work) -> &'static str {
     if work.is_carnet() {

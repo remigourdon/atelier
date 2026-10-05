@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, pair};
+use super::{ListKind, close_tabs, pair};
 use crate::tui::app::{Action, Cmd, Effect, Job, Kind, List, Model, Submit, Work, WorkKind};
 use crate::tui::update::{run, update};
 use crate::tui::view::{Palette, icon};
@@ -158,9 +158,18 @@ impl ListKind for Carnets {
         }
     }
 
-    /// `c` closes an open carnet or reopens a closed one; `s` searches inside every carnet.
+    /// `x` closes the tab, `c` toggles the carnet lifecycle, and `s` searches every carnet.
     fn command(&self, model: &mut Model, _list: List, cmd: Cmd) -> Vec<Effect> {
         match cmd {
+            Cmd::Close => {
+                let paths = model
+                    .carnet()
+                    .filter(|work| work.tab)
+                    .map(|work| work.path.clone())
+                    .into_iter()
+                    .collect();
+                close_tabs(model, paths)
+            }
             Cmd::ToggleCarnet => {
                 let Some(work) = model.carnet() else {
                     return Vec::new();
