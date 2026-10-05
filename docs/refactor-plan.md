@@ -62,7 +62,7 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
 
 ## Step 2 — Items module
 
-- **Status:** todo
+- **Status:** done (#17)
 - **Branch:** `refactor-items-module`, from `refactor-small-fixes`
 - **Files:** new `src/items.rs` and `src/git.rs`; `src/tui/jobs.rs`, `src/tui/app.rs`, `src/hooks.rs`, `src/cli.rs`, `src/sync.rs`, `src/worktrunk.rs`, `src/zellij.rs`, `src/process.rs`, `src/carnet.rs`, `src/state.rs`
 
