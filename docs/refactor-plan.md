@@ -132,7 +132,7 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
 
 ## Step 3 — The carnet folder is the record
 
-- **Status:** todo
+- **Status:** done (#18)
 - **Branch:** `refactor-carnet-record`, from `refactor-items-module`
 - **Files:** `src/carnet.rs`, `src/items.rs`, `src/state.rs`, `src/cli.rs`, `src/tui/{app,update,view,jobs}.rs`, `src/git.rs`
 - **Since step 2:** carnet operations are `Items` verbs (`create_carnet` is there already), the hooks' "a carnet is never a repo" check lives in `Items::record`, and git commands belong in `git.rs`.
@@ -247,6 +247,12 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
 - **Branch:** `refactor-carnets-subtab`, from `refactor-list-modules`
 - **Files:** new `src/tui/lists/carnets.rs`; `src/tui/app.rs` (`List::Carnets`, `Panel::tabs`, keymap), `src/tui/jobs.rs`, `src/tui/view.rs`, `src/tui/update.rs`, `src/carnet.rs`
 - **Spec:** the panel 2 row and keys table in `docs/design.md`.
+- **Since step 3:**
+  - `Snapshot.carnets` is a `Vec<Work>`, already newest first. Read a carnet's `tickets`, `closed`, `summary` and `readme` from `WorkKind::Carnet`, or through `Work::tickets()` and `Work::closed()`.
+  - Closing and reopening is one verb, `Items::set_carnets_closed(paths, closed)`. Only `Job::CloseCarnet(paths)` exists; add the reopen job.
+  - `c` is bound to `Cmd::CloseCarnet` for Work, with `hint: NONE`, so it is not yet in the hint bar.
+  - `carnet::search_args`, `carnet::search`, `carnet::on_path` and `carnet::NO_RIPGREP` are the CLI's search. Step 5 adds `--no-heading` for its own search.
+  - `carnet::body(readme)` strips the front matter for rendering.
 
 1. **Panel 2 becomes `Work │ Carnets`.** The sub-tab exists only while carnets are enabled.
 2. **Rows:** every carnet in `Snapshot.carnets`, across all workspaces, newest first. Each row shows its date and name, its tickets, a closed marker, and its summary.
