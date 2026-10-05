@@ -1,18 +1,17 @@
 # Refactor plan
 
-A temporary working document: the architecture review of 2026-10-04 and the carnet redesign ([ADR 0001](adr/0001-carnet-folder-is-the-record.md)), split into steps. Each step is one session and one stacked pull request. The last step deletes this file.
+A temporary working document: the architecture review of 2026-10-04 and the carnet redesign ([ADR 0001](adr/0001-carnet-folder-is-the-record.md)), split into steps. Each step is one session and one stacked pull request. The stack collects into `record-refactor-plan` (PR #15), which merges into `main` last. The last step deletes this file, so it never reaches `main`.
 
 Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design.md](design.md), which already describes the carnet redesign. Where this plan and `design.md` disagree, `design.md` wins; fix this plan.
 
 ## Running a step
 
 1. Read `AGENTS.md`, `CONTEXT.md`, the step below, and the parts of `docs/design.md` it names. Take the first step whose status is `todo`.
-2. Branch from the previous step's branch, or from `main` once that step's PR is merged:
+2. Branch from the previous step's branch. If that step's PR is already merged into `record-refactor-plan`, branch from `record-refactor-plan` instead. Never branch from `main`.
    ```sh
    git fetch origin
    git switch -c <branch> origin/<base>
    ```
-   If the base was squash-merged after you branched, rebase with `git rebase --onto origin/main <old-base-branch>`.
 3. Implement the step. Behaviour not named in the step stays as it is. Keep `docs/design.md` in step with any behaviour that changes.
 4. Write tests at the interface of the module the step creates. When they cover what older helper-level tests covered, delete the old ones rather than keeping both.
 5. Run what CI runs, and fix everything it reports:
@@ -23,6 +22,12 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
 7. Commit: each message is one imperative subject line and nothing else. No body, no prefix, no trailers.
 8. Push and open the PR against the base branch: `gh pr create --base <base> --title "Refactor <n>: <title>"`. The description says what changed and why, and ends there, with no footer.
 9. Stop and report what was done, anything skipped, and anything for the next step.
+
+## Merging the stack
+
+- Merge the step PRs in order, each into its base branch, with a merge commit rather than a squash.
+- Delete each head branch once it's merged. GitHub then retargets the next step's PR to `record-refactor-plan`, and its commits still apply cleanly.
+- Once the step 6 PR, which deletes this file, is merged into `record-refactor-plan`, merge PR #15 into `main`. It can be squashed.
 
 ## Step 0 — Record the carnet redesign and this plan
 
