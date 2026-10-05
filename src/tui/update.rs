@@ -12,8 +12,8 @@ use tui_input::backend::crossterm::EventHandler;
 
 use super::app::{
     Action, Binding, Cmd, Due, Effect, FAST_REFRESH, FULL_REFRESH, Focus, Job, KEYMAP, List,
-    MenuEntry, Modal, Model, On, Panel, Popup, PopupCmd, Row, Screen, Snapshot, Source, Submit,
-    Work, WorkKind, lookup, popup_lookup,
+    MenuEntry, Modal, Model, On, Panel, Popup, PopupCmd, Row, Screen, Search, Snapshot, Source,
+    Submit, Work, WorkKind, lookup, popup_lookup,
 };
 use super::lists;
 use super::view::{areas, main_len, offset};
@@ -94,6 +94,18 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
             done(model, Source::Git);
             model.readmes.insert(path, readme);
             Vec::new()
+        }
+        Action::Searched { text, hits, log } => {
+            done(model, Source::Run);
+            model.push_log(log);
+            let Some(hits) = hits else {
+                return Vec::new();
+            };
+            let keep = Keep::of(model);
+            model.search = Some(Search { text, hits });
+            keep.restore(model);
+            model.scroll = (0, 0);
+            commits(model)
         }
         Action::Reviews {
             provider,
@@ -337,10 +349,12 @@ fn drop_stale(model: &mut Model, old: &Snapshot, full: bool) {
         return;
     }
     let head = |work: &Work| work.tree().map(|tree| tree.short_sha.clone());
-    let heads: HashMap<&Path, Option<String>> = (model.snapshot.work.iter())
+    // Closed carnets too, which the Carnets list shows.
+    let listed = || model.snapshot.work.iter().chain(&model.snapshot.carnets);
+    let heads: HashMap<&Path, Option<String>> = listed()
         .map(|work| (work.path.as_path(), head(work)))
         .collect();
-    let rewritten = (model.snapshot.work.iter()).filter(|work| match &work.kind {
+    let rewritten = listed().filter(|work| match &work.kind {
         WorkKind::Carnet { readme, .. } => {
             (model.readmes.get(&work.path)).is_some_and(|loaded| loaded != readme)
         }
@@ -361,11 +375,14 @@ fn drop_stale(model: &mut Model, old: &Snapshot, full: bool) {
         .retain(|path, _| heads.contains_key(path.as_path()) && !moved.contains(path.as_path()));
 }
 
-/// Fetches the selected item's recent commits, and a carnet's README, unless they are loaded.
+/// Fetches the selected item's recent commits, and a carnet's README, unless they are loaded:
+/// the active list's item, else the Work list's.
 fn commits(model: &mut Model) -> Vec<Effect> {
     let mut effects = Vec::new();
-    if let Some(Row::Item(index)) = model.work_row() {
-        let work = &model.snapshot.work[index];
+    let list = model.active();
+    let selected = (lists::of(list).item(model, list))
+        .or_else(|| lists::of(List::Work).item(model, List::Work));
+    if let Some(work) = selected {
         let (path, carnet) = (work.path.clone(), work.is_carnet());
         if carnet && !model.readmes.contains_key(&path) {
             effects.push(run(model, Job::Readme(path.clone())));
@@ -532,6 +549,11 @@ fn submit(model: &mut Model, then: Submit, value: &str) -> Vec<Effect> {
             alias: value.into(),
         },
         Submit::Workspace => Job::AddWorkspace(value.into()),
+        Submit::Search if value.is_empty() => {
+            model.search = None;
+            return Vec::new();
+        }
+        Submit::Search => Job::SearchCarnets(value.into()),
     };
     vec![run(model, job)]
 }
@@ -646,7 +668,7 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
         Cmd::Edit => return lists::of(list).edit(model, list),
         Cmd::Move => return lists::of(list).move_to(model, list),
         Cmd::Remove => return lists::of(list).remove(model, list),
-        Cmd::Close | Cmd::CloseCarnet | Cmd::Pull => {
+        Cmd::Close | Cmd::ToggleCarnet | Cmd::Pull | Cmd::Search => {
             return lists::of(list).command(model, list, cmd);
         }
         Cmd::Browse => {
@@ -724,7 +746,7 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
         Cmd::Back => {
             if in_main {
                 model.focus = Focus::Panel(model.panel);
-            } else if model.filters.remove(&list).is_some() {
+            } else if model.filters.remove(&list).is_some() || lists::of(list).back(model, list) {
                 select(model, list, 0);
                 return commits(model);
             }
@@ -899,6 +921,8 @@ pub mod tests {
         }
         model.snapshot.work.extend(open.clone());
         model.snapshot.carnets = open.into_iter().chain([closed]).collect();
+        // Newest first, as a snapshot lists them.
+        model.snapshot.carnets.sort_by(|a, b| b.path.cmp(&a.path));
         model
     }
 
@@ -1305,9 +1329,9 @@ pub mod tests {
         snapshot
             .work
             .retain(|work| work.path != Path::new("/src/web"));
-        snapshot
-            .work
-            .retain(|work| !work.path.ends_with("2026-09-20-old"));
+        for listed in [&mut snapshot.work, &mut snapshot.carnets] {
+            listed.retain(|work| !work.path.ends_with("2026-09-20-old"));
+        }
         refresh(&mut model, snapshot, false);
         assert_eq!(
             loaded(&model),
@@ -2128,5 +2152,93 @@ pub mod tests {
                 .command
                 .contains("carnets are never removed")
         );
+    }
+
+    fn carnet_titles(model: &Model) -> Vec<String> {
+        model
+            .carnet_rows()
+            .iter()
+            .map(|work| work.title())
+            .collect()
+    }
+
+    #[test]
+    fn the_carnets_sub_tab_lists_every_carnet_while_carnets_are_on() {
+        let mut model = model();
+        press(&mut model, "]");
+        assert_eq!(model.active(), List::Work, "no sub-tab without carnets");
+        let mut model = with_carnets(model);
+        press(&mut model, "]");
+        assert_eq!(model.active(), List::Carnets);
+        assert_eq!(
+            carnet_titles(&model),
+            [
+                "2026-10-02-ideas",
+                "2026-10-01-ABC-1-logs",
+                "2026-09-20-old",
+                "2026-08-01-done"
+            ]
+        );
+        press(&mut model, "/done\n");
+        assert_eq!(carnet_titles(&model), ["2026-08-01-done"]);
+    }
+
+    #[test]
+    fn space_on_a_closed_carnet_opens_it_and_leaves_it_closed() {
+        let mut model = with_carnets(model());
+        press(&mut model, "]G");
+        assert_eq!(
+            jobs(press(&mut model, " ")),
+            [Job::Open(vec!["/data/2026-08-01-done".into()])]
+        );
+    }
+
+    #[test]
+    fn c_closes_an_open_carnet_and_reopens_a_closed_one() {
+        let mut model = with_carnets(model());
+        press(&mut model, "]");
+        assert_eq!(
+            jobs(press(&mut model, "c")),
+            [Job::CloseCarnet(vec!["/data/2026-10-02-ideas".into()])]
+        );
+        press(&mut model, "G");
+        assert_eq!(
+            jobs(press(&mut model, "c")),
+            [Job::ReopenCarnet(vec!["/data/2026-08-01-done".into()])]
+        );
+    }
+
+    #[test]
+    fn s_searches_inside_carnets_and_esc_clears_the_search() {
+        let mut model = with_carnets(model());
+        assert!(jobs(press(&mut model, "s")).is_empty(), "Carnets only");
+        assert!(model.modal.is_none());
+        press(&mut model, "]s");
+        assert!(matches!(&model.modal, Some(Modal::Prompt { .. })));
+        assert_eq!(
+            jobs(press(&mut model, "bug\n")),
+            [Job::SearchCarnets("bug".into())]
+        );
+        let path = PathBuf::from("/data/2026-09-20-old");
+        let effects = update(
+            &mut model,
+            Action::Searched {
+                text: "bug".into(),
+                hits: Some([(path.clone(), vec!["README.md:3:a bug".into()])].into()),
+                log: Vec::new(),
+            },
+        );
+        assert_eq!(carnet_titles(&model), ["2026-09-20-old"]);
+        assert!(
+            effects.contains(&Effect::Run(Job::Readme(path))),
+            "{effects:?}"
+        );
+        assert_eq!(
+            model.carnet_hits(),
+            Some(&vec!["README.md:3:a bug".to_owned()])
+        );
+        press(&mut model, "\x1b");
+        assert_eq!(carnet_titles(&model).len(), 4);
+        assert!(model.search.is_none());
     }
 }

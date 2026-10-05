@@ -1,6 +1,7 @@
 //! Carnets: investigation folders `<root>/YYYY-MM-DD-<name>`, each its own git repo, recorded by
 //! the front matter of their README.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{Result, WrapErr, bail};
@@ -375,6 +376,49 @@ pub fn search(runner: &dyn Runner, root: &Path, text: &str) -> Result<()> {
     runner.interactive("rg", &search_args(text, &root))
 }
 
+/// Searches every carnet under `root` for `text` with `rg`, as the TUI does: each carnet with
+/// hits, and its hit lines as `<file>:<line>:<text>`.
+pub fn hits(
+    runner: &dyn Runner,
+    root: &Path,
+    text: &str,
+) -> Result<BTreeMap<PathBuf, Vec<String>>> {
+    if !on_path("rg") {
+        bail!(NO_RIPGREP);
+    }
+    // Canonical, as the scan lists carnets.
+    let root = root
+        .canonicalize()
+        .wrap_err_with(|| format!("{}", root.display()))?;
+    let root_arg = root.to_string_lossy();
+    let mut args = vec!["--no-heading"];
+    args.extend(search_args(text, &root_arg));
+    let output = match runner.output("rg", &args) {
+        Ok(output) => output,
+        // `rg` exits 1, with nothing on stderr, when nothing matches.
+        Err(err) if err.to_string().trim_end().ends_with("failed:") => String::new(),
+        Err(err) => return Err(err),
+    };
+    Ok(group_hits(&root, &output))
+}
+
+/// `rg --no-heading` output grouped by the carnet folder each hit is in.
+fn group_hits(root: &Path, output: &str) -> BTreeMap<PathBuf, Vec<String>> {
+    let prefix = format!("{}/", root.display());
+    let mut hits: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
+    for line in output.lines() {
+        let Some((folder, hit)) =
+            (line.strip_prefix(&prefix)).and_then(|rest| rest.split_once('/'))
+        else {
+            continue;
+        };
+        hits.entry(root.join(folder))
+            .or_default()
+            .push(hit.to_owned());
+    }
+    hits
+}
+
 #[cfg(test)]
 pub mod tests {
     use rusqlite::Connection;
@@ -673,5 +717,30 @@ pub mod tests {
         let found = newest_open(&carnets, "ORD-7").unwrap();
         assert_eq!(found.name, "ORD-7-b");
         assert!(newest_open(&carnets, "ORD-8").is_none());
+    }
+
+    #[test]
+    fn search_hits_group_by_carnet_folder() {
+        let output = "/data/2026-01-01-a/README.md:3:the bug\n\
+                      /data/2026-01-01-a/notes/log.txt:10:bug again\n\
+                      /data/2026-01-02-b/README.md:1:# Bug\n\
+                      /elsewhere/x:1:bug";
+        let hits = group_hits(Path::new("/data"), output);
+        assert_eq!(
+            hits.into_iter().collect::<Vec<_>>(),
+            [
+                (
+                    PathBuf::from("/data/2026-01-01-a"),
+                    vec![
+                        "README.md:3:the bug".to_owned(),
+                        "notes/log.txt:10:bug again".to_owned()
+                    ]
+                ),
+                (
+                    PathBuf::from("/data/2026-01-02-b"),
+                    vec!["README.md:1:# Bug".to_owned()]
+                ),
+            ]
+        );
     }
 }

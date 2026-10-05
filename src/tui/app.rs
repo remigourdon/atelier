@@ -7,6 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use tui_input::Input;
 
 use super::lists;
+pub use super::lists::carnets::Search;
 pub use super::lists::work::Row;
 use crate::issues::{self, Issue, TrackerConfig};
 pub use crate::items::{Removal, Snapshot, Work, WorkKind};
@@ -34,10 +35,12 @@ impl Panel {
         Panel::ALL.iter().position(|&p| p == self).unwrap() + 1
     }
 
-    /// Its sub-tabs, which `[` and `]` cycle through, given how many issue sections there are.
-    pub fn tabs(self, sections: usize) -> Vec<List> {
+    /// Its sub-tabs, which `[` and `]` cycle through, given how many issue sections there are
+    /// and whether carnets are enabled.
+    pub fn tabs(self, sections: usize, carnets: bool) -> Vec<List> {
         match self {
             Panel::Workspaces => vec![List::Workspaces, List::Repos],
+            Panel::Work if carnets => vec![List::Work, List::Carnets],
             Panel::Work => vec![List::Work],
             Panel::Reviews => vec![List::ToReview, List::Mine],
             Panel::Issues => (0..sections).map(List::Section).collect(),
@@ -51,6 +54,8 @@ pub enum List {
     Workspaces,
     Repos,
     Work,
+    /// Every carnet, closed ones included.
+    Carnets,
     ToReview,
     Mine,
     /// An Issues sub-tab, by its index in the tracker's sections.
@@ -64,6 +69,7 @@ pub enum Kind {
     Workspaces,
     Repos,
     Work,
+    Carnets,
     Reviews,
     Issues,
 }
@@ -110,6 +116,10 @@ pub enum Job {
     Remove(Vec<Removal>),
     /// Closes carnets and their tabs.
     CloseCarnet(Vec<PathBuf>),
+    /// Reopens closed carnets.
+    ReopenCarnet(Vec<PathBuf>),
+    /// Searches inside every carnet with `rg`.
+    SearchCarnets(String),
     /// Creates a carnet and opens its tab.
     NewCarnet {
         name: String,
@@ -243,6 +253,8 @@ pub enum Submit {
     Group(Vec<PathBuf>),
     Alias(PathBuf),
     Workspace,
+    /// The text to search the carnets for.
+    Search,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -294,6 +306,12 @@ pub enum Action {
     },
     Commits(PathBuf, Vec<String>),
     Readme(PathBuf, Option<String>),
+    /// A carnet search's hit lines by carnet, `None` when it failed.
+    Searched {
+        text: String,
+        hits: Option<BTreeMap<PathBuf, Vec<String>>>,
+        log: Vec<Logged>,
+    },
     /// A provider's reviews, replacing the ones listed before.
     Reviews {
         provider: Provider,
@@ -344,7 +362,8 @@ pub enum Cmd {
     Remove,
     Close,
     Pull,
-    CloseCarnet,
+    ToggleCarnet,
+    Search,
     Browse,
     CopyMenu,
     CopyPath,
@@ -397,13 +416,21 @@ const fn code(code: KeyCode) -> Key {
 }
 
 const WORK: &[Kind] = &[Kind::Work];
+const CARNETS: &[Kind] = &[Kind::Work, Kind::Carnets];
 const LOCAL: &[Kind] = &[Kind::Workspaces, Kind::Repos, Kind::Work];
-const TABBED: &[Kind] = &[Kind::Workspaces, Kind::Repos, Kind::Reviews, Kind::Issues];
+const TABBED: &[Kind] = &[
+    Kind::Workspaces,
+    Kind::Repos,
+    Kind::Carnets,
+    Kind::Reviews,
+    Kind::Issues,
+];
 const REMOTE: &[Kind] = &[Kind::Reviews, Kind::Issues];
 const ALL: &[Kind] = &[
     Kind::Workspaces,
     Kind::Repos,
     Kind::Work,
+    Kind::Carnets,
     Kind::Reviews,
     Kind::Issues,
 ];
@@ -421,7 +448,7 @@ pub const KEYMAP: &[Binding] = &[
     Binding { keys: &[ch('h'), code(KeyCode::Left), code(KeyCode::BackTab)], label: "h/←/S-Tab", cmd: Cmd::PrevPanel, help: "previous panel", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('l'), code(KeyCode::Right), code(KeyCode::Tab)], label: "l/→/Tab", cmd: Cmd::NextPanel, help: "next panel", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('1')], label: "1", cmd: Cmd::Jump(1), help: "Workspaces │ Repos", hint: NONE, on: On::Nav },
-    Binding { keys: &[ch('2')], label: "2", cmd: Cmd::Jump(2), help: "Work", hint: NONE, on: On::Nav },
+    Binding { keys: &[ch('2')], label: "2", cmd: Cmd::Jump(2), help: "Work │ Carnets", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('3')], label: "3", cmd: Cmd::Jump(3), help: "To review │ Mine", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('4')], label: "4", cmd: Cmd::Jump(4), help: "Issues", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('0')], label: "0", cmd: Cmd::FocusMain, help: "focus the main view", hint: NONE, on: On::Nav },
@@ -433,7 +460,7 @@ pub const KEYMAP: &[Binding] = &[
     Binding { keys: &[ch('L')], label: "L", cmd: Cmd::ScrollRight, help: "scroll the main view right", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('[')], label: "[", cmd: Cmd::PrevTab, help: "previous sub-tab", hint: NONE, on: On::Lists(TABBED) },
     Binding { keys: &[ch(']')], label: "]", cmd: Cmd::NextTab, help: "next sub-tab", hint: NONE, on: On::Lists(TABBED) },
-    Binding { keys: &[ch(' ')], label: "Space", cmd: Cmd::Activate, help: "open tab · check out review · start issue · switch workspace", hint: &[Kind::Workspaces, Kind::Work, Kind::Reviews, Kind::Issues], on: On::Lists(&[Kind::Workspaces, Kind::Work, Kind::Reviews, Kind::Issues]) },
+    Binding { keys: &[ch(' ')], label: "Space", cmd: Cmd::Activate, help: "open tab · check out review · start issue · switch workspace", hint: &[Kind::Workspaces, Kind::Work, Kind::Carnets, Kind::Reviews, Kind::Issues], on: On::Lists(&[Kind::Workspaces, Kind::Work, Kind::Carnets, Kind::Reviews, Kind::Issues]) },
     Binding { keys: &[code(KeyCode::Enter)], label: "Enter", cmd: Cmd::Enter, help: "fold group · focus the main view", hint: NONE, on: On::Lists(WORK) },
     Binding { keys: &[ch('-')], label: "-", cmd: Cmd::CollapseAll, help: "collapse all groups", hint: NONE, on: On::Lists(WORK) },
     Binding { keys: &[ch('=')], label: "=", cmd: Cmd::ExpandAll, help: "expand all groups", hint: NONE, on: On::Lists(WORK) },
@@ -442,7 +469,8 @@ pub const KEYMAP: &[Binding] = &[
     Binding { keys: &[ch('m')], label: "m", cmd: Cmd::Move, help: "move to workspace · set repo workspace", hint: &[Kind::Repos, Kind::Work], on: On::Lists(&[Kind::Repos, Kind::Work]) },
     Binding { keys: &[ch('d')], label: "d", cmd: Cmd::Remove, help: "remove", hint: LOCAL, on: On::Lists(LOCAL) },
     Binding { keys: &[ch('x')], label: "x", cmd: Cmd::Close, help: "close tab", hint: WORK, on: On::Lists(WORK) },
-    Binding { keys: &[ch('c')], label: "c", cmd: Cmd::CloseCarnet, help: "close carnet", hint: NONE, on: On::Lists(WORK) },
+    Binding { keys: &[ch('c')], label: "c", cmd: Cmd::ToggleCarnet, help: "close or reopen carnet", hint: CARNETS, on: On::Lists(CARNETS) },
+    Binding { keys: &[ch('s')], label: "s", cmd: Cmd::Search, help: "search inside carnets (rg)", hint: &[Kind::Carnets], on: On::Lists(&[Kind::Carnets]) },
     Binding { keys: &[ch('p')], label: "p", cmd: Cmd::Pull, help: "pull (git pull --ff-only)", hint: WORK, on: On::Lists(WORK) },
     Binding { keys: &[ch('o')], label: "o", cmd: Cmd::Browse, help: "browse (open in the browser)", hint: REMOTE, on: On::Lists(&[Kind::Repos, Kind::Work, Kind::Reviews, Kind::Issues]) },
     Binding { keys: &[ch('y')], label: "y", cmd: Cmd::CopyMenu, help: "copy path, branch or URL", hint: NONE, on: On::Lists(ALL) },
@@ -577,6 +605,8 @@ pub struct Model {
     pub issues_due: Due,
     /// Worktrees with a pull in flight, which show a spinner.
     pub pulling: HashSet<PathBuf>,
+    /// The carnet search narrowing the Carnets list, until `Esc`.
+    pub search: Option<Search>,
     /// The spinner's frame, advanced each tick.
     pub frame: usize,
     pub modal: Option<Modal>,
@@ -616,6 +646,7 @@ impl Model {
             issues: Vec::new(),
             issues_due: Due::Cached,
             pulling: HashSet::new(),
+            search: None,
             frame: 0,
             modal: None,
             pending_g: false,
@@ -642,7 +673,7 @@ impl Model {
         {
             sections += 1;
         }
-        panel.tabs(sections)
+        panel.tabs(sections, self.carnets)
     }
 
     /// Every list, sub-tabs included.

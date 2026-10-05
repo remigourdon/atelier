@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, kind, pair, paths};
+use super::{ListKind, carnets, kind, pair, paths};
 use crate::tui::app::{
     Action, Cmd, Effect, Job, Kind, List, MenuEntry, Modal, Model, Removal, Submit, Work, WorkKind,
 };
@@ -150,14 +150,6 @@ impl Model {
     }
 }
 
-/// The item selected in the Work list, when it is active and on an item row.
-pub fn selected(model: &Model) -> Option<&Work> {
-    match (model.active(), model.work_row()?) {
-        (List::Work, Row::Item(index)) => Some(&model.snapshot.work[index]),
-        _ => None,
-    }
-}
-
 /// How a group row is named; the `Carnets` group has no group name.
 pub fn group_name(name: &str) -> &str {
     if name.is_empty() { "Carnets" } else { name }
@@ -281,18 +273,7 @@ impl ListKind for WorkList {
                     WorkKind::Worktree {
                         repo_name, tree, ..
                     } => (repo_name, tree),
-                    WorkKind::Carnet {
-                        tickets, summary, ..
-                    } => {
-                        return vec![
-                            pair("Carnet", work.title()),
-                            pair("Path", work.path.display().to_string()),
-                            pair("Workspace", work.workspace.clone()),
-                            pair("Tickets", tickets.join(", ")),
-                            pair("Summary", summary.clone()),
-                            pair("Tab", if work.tab { "open" } else { "closed" }.into()),
-                        ];
-                    }
+                    WorkKind::Carnet { .. } => return carnets::detail(work),
                 };
                 vec![
                     pair("Repo", repo_name.clone()),
@@ -325,6 +306,14 @@ impl ListKind for WorkList {
                 ]
             }
             None => Vec::new(),
+        }
+    }
+
+    /// The item on the selected row.
+    fn item<'a>(&self, model: &'a Model, _list: List) -> Option<&'a Work> {
+        match model.work_row()? {
+            Row::Item(index) => Some(&model.snapshot.work[index]),
+            Row::Group { .. } => None,
         }
     }
 
@@ -473,7 +462,7 @@ impl ListKind for WorkList {
         let targets = model.targets().into_iter();
         let (targets, job): (Vec<_>, fn(_) -> _) = match cmd {
             Cmd::Close => (targets.filter(|work| work.tab).collect(), Job::Close),
-            Cmd::CloseCarnet => (
+            Cmd::ToggleCarnet => (
                 targets.filter(|work| work.is_carnet()).collect(),
                 Job::CloseCarnet,
             ),

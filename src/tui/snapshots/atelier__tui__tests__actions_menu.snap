@@ -1,5 +1,6 @@
 ---
 source: src/tui/mod.rs
+assertion_line: 286
 expression: "render(&model, 100, 30)"
 ---
 "╭[1] Workspaces │ Repos─────────╮╭ Main ───────────────────────────────────────────────────────────╮"
@@ -16,7 +17,7 @@ expression: "render(&model, 100, 30)"
 "│             │m      move to workspace · set repo workspace                         │             │"
 "│             │d      remove                                                         │             │"
 "│             │x      close tab                                                      │             │"
-"│             │c      close carnet                                                   │             │"
+"│             │c      close or reopen carnet                                         │             │"
 "│             │p      pull (git pull --ff-only)                                      │             │"
 "╰─────────────│o      browse (open in the browser)                                   │             │"
 "╭[3] To review│y      copy path, branch or URL                                       │             │"

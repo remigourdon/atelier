@@ -6,13 +6,13 @@ use color_eyre::eyre::{Report, Result, eyre};
 
 use super::app::{Action, Job};
 use crate::config::Config;
-use crate::git;
 use crate::issues::{self, Issue, TrackerConfig};
 use crate::items::Items;
 use crate::process::{Logged, Recorder, Runner, System};
 use crate::reviews::{self, Provider, Review, Role};
 use crate::state::{self, State};
 use crate::zellij::{Layouts, Zellij};
+use crate::{carnet, git};
 
 /// What every job needs, shared across them.
 pub struct Context {
@@ -78,6 +78,27 @@ pub fn run(context: &Context, job: Job) -> Action {
         Job::Readme(path) => {
             let readme = std::fs::read_to_string(path.join("README.md")).ok();
             Action::Readme(path, readme)
+        }
+        Job::SearchCarnets(text) => {
+            let hits = match context.config.carnet_root() {
+                Some(root) => carnet::hits(&recorder, &root, &text),
+                None => Err(eyre!("carnets are disabled")),
+            };
+            let mut log = recorder.take();
+            match &hits {
+                // `rg` finding nothing is no failure.
+                Ok(_) => log.iter_mut().for_each(|entry| entry.error = None),
+                Err(err) if log.is_empty() => log.push(Logged {
+                    command: "carnet search".into(),
+                    error: Some(err.to_string()),
+                }),
+                Err(_) => {}
+            }
+            Action::Searched {
+                text,
+                hits: hits.ok(),
+                log,
+            }
         }
         // Like refreshes, these run constantly: log only failures.
         Job::Reviews {
@@ -212,6 +233,7 @@ fn execute(context: &Context, state: &State, runner: &dyn Runner, job: Job) -> R
         Job::Refresh { .. }
         | Job::Commits(_)
         | Job::Readme(_)
+        | Job::SearchCarnets(_)
         | Job::Reviews { .. }
         | Job::Issues { .. } => {
             unreachable!("run handles these")
@@ -246,6 +268,7 @@ fn execute(context: &Context, state: &State, runner: &dyn Runner, job: Job) -> R
         }
         Job::Remove(removals) => items.remove(&removals),
         Job::CloseCarnet(paths) => items.set_carnets_closed(&paths, true),
+        Job::ReopenCarnet(paths) => items.set_carnets_closed(&paths, false),
         Job::Move { paths, workspace } => items.move_to(&paths, &workspace),
         Job::Regroup { paths, group } => items.regroup(&paths, &group),
         Job::SetAlias { repo, alias } => items.set_alias(&repo, &alias),
