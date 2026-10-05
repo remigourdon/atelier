@@ -1,10 +1,9 @@
 //! External commands, behind a trait so orchestration can be tested without them.
 
 use std::cell::RefCell;
-use std::path::Path;
 use std::process::{Command, Stdio};
 
-use color_eyre::eyre::{Result, bail};
+use color_eyre::eyre::Result;
 
 pub trait Runner {
     /// Runs a command to completion and returns its trimmed stdout, failing on a non-zero exit.
@@ -17,6 +16,28 @@ pub trait Runner {
     fn spawn(&self, program: &str, args: &[&str]) -> Result<()>;
 }
 
+/// A command that ran and exited unsuccessfully.
+#[derive(Debug)]
+pub struct Failed {
+    message: String,
+    /// `None` when a signal ended it.
+    code: Option<i32>,
+}
+
+impl std::fmt::Display for Failed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Failed {}
+
+/// Whether `err` is a command that exited with `code`.
+pub fn exited_with(err: &color_eyre::Report, code: i32) -> bool {
+    err.downcast_ref::<Failed>()
+        .is_some_and(|failed| failed.code == Some(code))
+}
+
 pub struct System;
 
 impl Runner for System {
@@ -26,11 +47,15 @@ impl Runner for System {
             .stdin(Stdio::null())
             .output()?;
         if !output.status.success() {
-            bail!(
-                "{program} {} failed: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
+            return Err(Failed {
+                message: format!(
+                    "{program} {} failed: {}",
+                    args.join(" "),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+                code: output.status.code(),
+            }
+            .into());
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     }
@@ -38,7 +63,11 @@ impl Runner for System {
     fn interactive(&self, program: &str, args: &[&str]) -> Result<()> {
         let status = Command::new(program).args(args).status()?;
         if !status.success() {
-            bail!("{program} {} failed", args.join(" "));
+            return Err(Failed {
+                message: format!("{program} {} failed", args.join(" ")),
+                code: status.code(),
+            }
+            .into());
         }
         Ok(())
     }
@@ -105,18 +134,6 @@ impl Runner for Recorder<'_> {
     }
 }
 
-/// The branch checked out at `path`, if any.
-pub fn branch(runner: &dyn Runner, path: &Path) -> Option<String> {
-    let path = path.to_string_lossy();
-    runner
-        .output(
-            "git",
-            &["-C", &path, "symbolic-ref", "--quiet", "--short", "HEAD"],
-        )
-        .ok()
-        .filter(|branch| !branch.is_empty())
-}
-
 #[cfg(test)]
 mod tests {
     use super::fake::Fake;
@@ -134,11 +151,23 @@ mod tests {
         assert_eq!(log[1].error.as_deref(), Some("git fail failed"));
         assert!(recorder.take().is_empty());
     }
+
+    #[test]
+    fn failures_keep_their_exit_code() {
+        let failed = System.output("sh", &["-c", "exit 1"]).unwrap_err();
+        assert!(exited_with(&failed, 1));
+        assert!(!exited_with(&failed, 2));
+        let recorder = Recorder::new(&System);
+        let failed = recorder.interactive("sh", &["-c", "exit 2"]).unwrap_err();
+        assert!(exited_with(&failed, 2), "through a recorder too");
+    }
 }
 
 #[cfg(test)]
 pub mod fake {
     use std::collections::VecDeque;
+
+    use color_eyre::eyre::bail;
 
     use super::*;
 

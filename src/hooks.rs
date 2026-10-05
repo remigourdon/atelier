@@ -4,13 +4,12 @@ use std::path::{Path, PathBuf};
 
 use clap::ValueEnum;
 use color_eyre::eyre::{Result, bail};
-use regex::Regex;
 use serde::Deserialize;
 
-use crate::config::group_from_name;
-use crate::process;
-use crate::state::{ItemKind, State, Tab};
-use crate::zellij::Zellij;
+use crate::git;
+use crate::items::Items;
+use crate::process::Runner;
+use crate::state::Tab;
 
 /// The worktrunk hooks atelier handles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -51,25 +50,24 @@ pub struct Payload {
 }
 
 /// The variables that carry [`Hints`] through worktrunk to the hook.
-pub const GROUP_HINT_VAR: &str = "ATELIER_GROUP_HINT";
+pub const GROUP_VAR: &str = "ATELIER_GROUP";
 pub const WORKSPACE_VAR: &str = "ATELIER_WORKSPACE";
 
 /// What the caller knows about a new worktree, passed through worktrunk in the environment.
 #[derive(Debug, Default)]
 pub struct Hints {
-    /// `ATELIER_GROUP_HINT`: a name to take the group from when the branch has no ticket key.
-    pub group: String,
+    /// `ATELIER_GROUP`: the worktree's group, as given.
+    pub group: Option<String>,
     /// `ATELIER_WORKSPACE`: the workspace a new worktree goes to, over the caller's session.
     pub workspace: Option<String>,
 }
 
 impl Hints {
     pub fn from_env() -> Self {
+        let var = |name| std::env::var(name).ok().filter(|value| !value.is_empty());
         Self {
-            group: std::env::var(GROUP_HINT_VAR).unwrap_or_default(),
-            workspace: std::env::var(WORKSPACE_VAR)
-                .ok()
-                .filter(|name| !name.is_empty()),
+            group: var(GROUP_VAR),
+            workspace: var(WORKSPACE_VAR),
         }
     }
 }
@@ -88,9 +86,8 @@ fn resolve(path: &Path) -> PathBuf {
 /// Records the worktree and opens its tab (pre-start, pre-switch), or closes and forgets it (post-remove).
 /// Returns the tab that was opened or focused.
 pub fn handle(
-    state: &State,
-    zellij: &Zellij,
-    ticket: &Regex,
+    items: &Items,
+    runner: &dyn Runner,
     phase: Phase,
     payload: &Payload,
     hints: &Hints,
@@ -102,64 +99,32 @@ pub fn handle(
         .unwrap_or_else(|| crate::state::dir_name(&path));
     match phase {
         Phase::PostRemove => {
-            zellij.close_tab(state, &path)?;
-            state.remove_item(&path)?;
+            items.forget(&path)?;
             return Ok(None);
         }
         Phase::PreSwitch => {
             // worktrunk reports the destination; a new worktree does not exist yet (pre-start
             // handles it), and before creation it may report the source's path.
-            if !path.exists()
-                || process::branch(zellij.runner, &path).as_deref() != Some(branch.as_str())
-            {
+            if !path.exists() || git::branch(runner, &path).as_deref() != Some(branch.as_str()) {
                 return Ok(None);
             }
         }
         Phase::PreStart => {}
     }
-    let Some(repo_path) = payload
+    let Some(repo) = payload
         .primary_worktree_path
         .as_ref()
         .or(payload.repo_path.as_ref())
     else {
         bail!("hook payload has neither primary_worktree_path nor repo_path");
     };
-    let repo_path = resolve(repo_path);
-    // A carnet is never a repo: worktrees made of it are not tracked.
-    if state.item(&repo_path)?.is_some_and(|item| item.is_carnet()) {
-        return Ok(None);
-    }
-    let known = |name: &&String| state.has_workspace(name).unwrap_or(false);
-    let here = (hints.workspace.iter().find(known))
-        .or(zellij.here.iter().find(known))
-        .cloned();
-    let repo = match state.repo_by_path(&repo_path)? {
-        Some(repo) => repo,
-        None => {
-            let workspace = here.as_deref().unwrap_or(state.default_workspace());
-            state.add_repo(&repo_path, None, workspace)?;
-            eprintln!(
-                "atelier: registered {} in {workspace}",
-                crate::state::dir_name(&repo_path)
-            );
-            state
-                .repo_by_path(&repo_path)?
-                .expect("the repo was just added")
-        }
-    };
-    let mut group = group_from_name(ticket, &branch);
-    if group.is_empty() {
-        group = group_from_name(ticket, &hints.group);
-    }
-    let workspace = here.unwrap_or(repo.default_workspace);
-    state.add_item(
+    items.record(
         &path,
-        ItemKind::Worktree,
-        Some(&repo_path),
-        &group,
-        &workspace,
-    )?;
-    zellij.open_tab(state, &path).map(Some)
+        &resolve(repo),
+        &branch,
+        hints.workspace.as_deref(),
+        hints.group.as_deref(),
+    )
 }
 
 #[cfg(test)]
@@ -169,7 +134,8 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::process::fake::Fake;
-    use crate::zellij::Layouts;
+    use crate::state::{ItemKind, State};
+    use crate::zellij::layouts;
 
     #[test]
     fn phases_use_worktrunk_names() {
@@ -239,25 +205,11 @@ mod tests {
             branch: &str,
             hints: &Hints,
         ) -> Option<Tab> {
-            let zellij = Zellij {
-                runner: fake,
-                here: here.map(Into::into),
-                layouts: Layouts {
-                    session: "S".into(),
-                    worktree: "W".into(),
-                },
-                anchor: "editor".into(),
-            };
-            let ticket = Config::default().ticket_regex().unwrap();
-            handle(
-                &self.state,
-                &zellij,
-                &ticket,
-                phase,
-                &self.payload(branch),
-                hints,
-            )
-            .unwrap()
+            let config = Config::default();
+            let items = Items::new(&self.state, fake, &config, layouts())
+                .unwrap()
+                .in_session(here);
+            handle(&items, fake, phase, &self.payload(branch), hints).unwrap()
         }
     }
 
@@ -328,7 +280,7 @@ mod tests {
         w.state.add_repo(w.path("repo"), None, "default").unwrap();
         let fake = w.fake();
         let hints = Hints {
-            group: "XYZ-9".into(),
+            group: Some("XYZ-9".into()),
             workspace: Some("w".into()),
         };
         let tab = w
@@ -347,13 +299,27 @@ mod tests {
         let w = world();
         let fake = w.fake();
         let hints = Hints {
-            group: String::new(),
+            group: None,
             workspace: Some("nope".into()),
         };
         let tab = w
             .run_with(&fake, Some("w"), Phase::PreStart, "x", &hints)
             .unwrap();
         assert_eq!(tab.session, "w");
+    }
+
+    #[test]
+    fn a_group_hint_is_kept_as_given() {
+        let w = world();
+        let fake = w.fake();
+        let hints = Hints {
+            group: Some("atelier#14".into()),
+            workspace: None,
+        };
+        w.run_with(&fake, Some("w"), Phase::PreStart, "ABC-1-x", &hints)
+            .unwrap();
+        let item = w.state.require_item(w.path("wt")).unwrap();
+        assert_eq!(item.group, "atelier#14", "over the branch's key");
     }
 
     #[test]

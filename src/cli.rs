@@ -1,18 +1,20 @@
 //! The command line.
 
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::engine::{ArgValueCandidates, CompletionCandidate};
 use color_eyre::eyre::{Result, WrapErr, bail};
 
 use crate::config::Config;
+use crate::git;
 use crate::hooks::{self, Phase};
-use crate::process::{Runner, System};
+use crate::items::Items;
+use crate::process::System;
 use crate::state::{self, State};
 use crate::worktrunk::{self, HooksConfig};
-use crate::zellij::{self, Layouts, Zellij};
+use crate::zellij::{Layouts, Zellij};
 
 /// A lazygit-style TUI and CLI that organise git worktrees into zellij sessions.
 #[derive(Parser)]
@@ -81,13 +83,10 @@ enum Command {
 enum Ws {
     /// Create a workspace.
     Add { name: String },
-    /// Remove an unused workspace.
+    /// Remove a workspace that owns no worktree; its carnets move to the default workspace.
     Rm {
         #[arg(add = ArgValueCandidates::new(complete_workspaces))]
         name: String,
-        /// Forget the carnets it owns; their folders stay on disk.
-        #[arg(long)]
-        forget_carnets: bool,
     },
     /// List workspaces.
     Ls,
@@ -95,20 +94,26 @@ enum Ws {
 
 #[derive(Subcommand)]
 enum Carnet {
-    /// Create a carnet `<root>/YYYY-MM-DD-[KEY-]<name>`: a git repo with a README.
+    /// Create a carnet `<root>/YYYY-MM-DD-<name>`: a git repo with a README.
     New {
         name: String,
         /// Its workspace (default: the current session's, else the default workspace).
         #[arg(short, long, add = ArgValueCandidates::new(complete_workspaces))]
         workspace: Option<String>,
     },
-    /// Record a dated git repo directly under the root as a carnet.
-    Add {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Its workspace (default: the current session's, else the default workspace).
-        #[arg(short, long, add = ArgValueCandidates::new(complete_workspaces))]
-        workspace: Option<String>,
+    /// List open carnets, newest first: folder, tickets and summary.
+    Ls {
+        /// Include closed carnets.
+        #[arg(long)]
+        closed: bool,
+    },
+    /// Search every carnet for a text with ripgrep.
+    Search { text: String },
+    /// Print the path of the newest open carnet with a ticket.
+    Path {
+        /// The ticket key (default: the group of the worktree or carnet holding the current
+        /// directory).
+        key: Option<String>,
     },
 }
 
@@ -154,34 +159,20 @@ pub fn run() -> Result<()> {
         }
         command => {
             let config = Config::load()?;
-            let mut state = State::open(&state::db_path(), config.default_workspace())?;
-            run_state(command, &config, &mut state)
+            let state = State::open(&state::db_path(), config.default_workspace())?;
+            run_state(command, &config, &state)
         }
     }
 }
 
-fn zellij_for<'a>(config: &Config, runner: &'a dyn Runner) -> Result<Zellij<'a>> {
-    Ok(Zellij {
-        runner,
-        here: zellij::current_session(),
-        layouts: Layouts::resolve(config)?,
-        anchor: config.anchor_pane().to_owned(),
-    })
+fn items<'a>(state: &'a State, config: &'a Config) -> Result<Items<'a>> {
+    Items::new(state, &System, config, Layouts::resolve(config)?)
 }
 
-fn run_state(command: Command, config: &Config, state: &mut State) -> Result<()> {
+fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
     match command {
         Command::Ws(Ws::Add { name }) => state.add_workspace(&name),
-        Command::Ws(Ws::Rm {
-            name,
-            forget_carnets,
-        }) => {
-            let forget = match forget_carnets {
-                true => state.workspace_carnets(&name)?,
-                false => Vec::new(),
-            };
-            state.remove_workspace(&name, &forget)
-        }
+        Command::Ws(Ws::Rm { name }) => items(state, config)?.remove_workspace(&name),
         Command::Ws(Ws::Ls) => {
             for name in state.workspaces()? {
                 println!("{name}");
@@ -193,7 +184,7 @@ fn run_state(command: Command, config: &Config, state: &mut State) -> Result<()>
             alias,
             workspace,
         } => {
-            let root = main_worktree(&System, &path)?;
+            let root = git::main_worktree(&System, &path)?;
             let workspace = workspace
                 .as_deref()
                 .unwrap_or(state.default_workspace())
@@ -210,12 +201,21 @@ fn run_state(command: Command, config: &Config, state: &mut State) -> Result<()>
             if alias.is_none() && workspace.is_none() {
                 bail!("provide --alias, --workspace, or both");
             }
-            state.update_repo(&repo, alias.as_deref(), workspace.as_deref())
+            let path = state.repo(&repo)?.path;
+            let items = items(state, config)?;
+            items.update_repo(&path, alias.as_deref(), workspace.as_deref())?;
+            // The alias is saved either way: a tab whose session is gone gets the new name
+            // when reopened.
+            if alias.is_some()
+                && let Err(err) = items.rename_repo_tabs(&path)
+            {
+                eprintln!("atelier: could not rename the tabs: {err:#}");
+            }
+            Ok(())
         }
         Command::Rm { repo } => {
             let path = state.repo(&repo)?.path;
-            zellij_for(config, &System)?.close_repo_tabs(state, &path)?;
-            state.remove_repo(&path)
+            items(state, config)?.forget_repo(&path)
         }
         Command::Ls => {
             for repo in state.repos()? {
@@ -230,23 +230,41 @@ fn run_state(command: Command, config: &Config, state: &mut State) -> Result<()>
         }
         Command::Open { workspace } => {
             state.require_workspace(&workspace)?;
-            zellij_for(config, &System)?.open_session(&workspace)
+            Zellij::new(&System, config, Layouts::resolve(config)?).open_session(&workspace)
         }
         Command::Carnet(command) => {
             let root = config.require_carnet_root()?;
             let names = crate::carnet::Names::new(config.ticket_pattern())?;
             match command {
                 Carnet::New { name, workspace } => {
-                    let workspace = item_workspace(state, workspace)?;
-                    let path = crate::carnet::create(
-                        state, &System, &names, &root, &name, &workspace, "",
-                    )?;
+                    let items = items(state, config)?;
+                    // The workspace given, which must exist, else the current session's when
+                    // it is one, else the default workspace.
+                    if let Some(workspace) = &workspace {
+                        state.require_workspace(workspace)?;
+                    }
+                    let workspace =
+                        items.workspace(workspace.as_deref(), state.default_workspace());
+                    let path = items.create_carnet(&name, &workspace, "")?;
                     println!("created {} in {workspace}", path.display());
                 }
-                Carnet::Add { path, workspace } => {
-                    let workspace = item_workspace(state, workspace)?;
-                    let path = crate::carnet::add(state, &names, &root, &path, &workspace)?;
-                    println!("recorded {} in {workspace}", path.display());
+                Carnet::Ls { closed } => {
+                    for carnet in crate::carnet::scan(&root, &names)? {
+                        if closed || !carnet.closed {
+                            println!(
+                                "{}\t{}\t{}",
+                                state::dir_name(&carnet.path),
+                                carnet.tickets.join(","),
+                                carnet.summary
+                            );
+                        }
+                    }
+                }
+                Carnet::Search { text } => crate::carnet::search(&System, &root, &text)?,
+                Carnet::Path { key } => {
+                    let dir = std::env::current_dir()?;
+                    let path = crate::carnet::path_for(state, &names, &root, key.as_deref(), &dir)?;
+                    println!("{}", path.display());
                 }
             }
             Ok(())
@@ -257,33 +275,6 @@ fn run_state(command: Command, config: &Config, state: &mut State) -> Result<()>
     }
 }
 
-/// The workspace a new item goes to: the one given, else the current session's when it is a
-/// workspace, else the default one.
-fn item_workspace(state: &State, workspace: Option<String>) -> Result<String> {
-    if let Some(workspace) = workspace {
-        state.require_workspace(&workspace)?;
-        return Ok(workspace);
-    }
-    let here = zellij::current_session().filter(|name| state.has_workspace(name).unwrap_or(false));
-    Ok(here.unwrap_or_else(|| state.default_workspace().to_owned()))
-}
-
-/// The main worktree of the repository containing `path`.
-fn main_worktree(runner: &dyn Runner, path: &Path) -> Result<PathBuf> {
-    let path = path.to_string_lossy();
-    let listing = runner
-        .output("git", &["-C", &path, "worktree", "list", "--porcelain"])
-        .wrap_err_with(|| format!("{path} is not in a git repository"))?;
-    let Some(main) = listing
-        .lines()
-        .next()
-        .and_then(|line| line.strip_prefix("worktree "))
-    else {
-        bail!("git worktree list printed nothing for {path}");
-    };
-    Ok(std::fs::canonicalize(main)?)
-}
-
 fn run_hook(phase: Phase) -> Result<()> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
@@ -291,15 +282,8 @@ fn run_hook(phase: Phase) -> Result<()> {
         serde_json::from_str(&input).wrap_err("reading the worktrunk hook context")?;
     let config = Config::load()?;
     let state = State::open(&state::db_path(), config.default_workspace())?;
-    let zellij = zellij_for(&config, &System)?;
-    let tab = hooks::handle(
-        &state,
-        &zellij,
-        &config.ticket_regex()?,
-        phase,
-        &payload,
-        &hooks::Hints::from_env(),
-    )?;
+    let items = items(&state, &config)?;
+    let tab = hooks::handle(&items, &System, phase, &payload, &hooks::Hints::from_env())?;
     if let (Some(tab), Some(target)) = (tab, std::env::var_os("ATELIER_HOOK_TARGET")) {
         std::fs::write(target, format!("{}\n", tab.session))?;
     }
@@ -388,20 +372,6 @@ fn complete_repos() -> Vec<CompletionCandidate> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::fake::Fake;
-
-    #[test]
-    fn main_worktree_is_the_first_listed() {
-        let dir = tempfile::tempdir().unwrap();
-        let listing = format!(
-            "worktree {}\nHEAD abc\n\nworktree /elsewhere\n",
-            dir.path().display()
-        );
-        let fake = Fake::default().always("git -C .", Some(&listing));
-        let main = main_worktree(&fake, Path::new(".")).unwrap();
-        assert_eq!(main, dir.path().canonicalize().unwrap());
-        assert!(main_worktree(&Fake::default().always("git", None), Path::new(".")).is_err());
-    }
 
     #[test]
     fn cli_definition_is_valid() {

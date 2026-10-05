@@ -6,11 +6,15 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use tui_input::Input;
 
+use super::lists;
+pub use super::lists::carnets::Search;
+pub use super::lists::work::Row;
+use super::schedule::Schedule;
+use crate::carnet::Stamp;
 use crate::issues::{self, Issue, TrackerConfig};
+pub use crate::items::{Removal, Snapshot, Work, WorkKind};
 use crate::process::Logged;
-use crate::reviews::{Provider, Review, Role};
-use crate::state::Repo;
-use crate::worktrunk::{self, Forge, Worktree};
+use crate::reviews::{Provider, Review};
 
 /// The side panels, top to bottom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -33,10 +37,12 @@ impl Panel {
         Panel::ALL.iter().position(|&p| p == self).unwrap() + 1
     }
 
-    /// Its sub-tabs, which `[` and `]` cycle through, given how many issue sections there are.
-    pub fn tabs(self, sections: usize) -> Vec<List> {
+    /// Its sub-tabs, which `[` and `]` cycle through, given how many issue sections there are
+    /// and whether carnets are enabled.
+    pub fn tabs(self, sections: usize, carnets: bool) -> Vec<List> {
         match self {
             Panel::Workspaces => vec![List::Workspaces, List::Repos],
+            Panel::Work if carnets => vec![List::Work, List::Carnets],
             Panel::Work => vec![List::Work],
             Panel::Reviews => vec![List::ToReview, List::Mine],
             Panel::Issues => (0..sections).map(List::Section).collect(),
@@ -50,6 +56,8 @@ pub enum List {
     Workspaces,
     Repos,
     Work,
+    /// Every carnet, closed ones included.
+    Carnets,
     ToReview,
     Mine,
     /// An Issues sub-tab, by its index in the tracker's sections.
@@ -63,28 +71,14 @@ pub enum Kind {
     Workspaces,
     Repos,
     Work,
+    Carnets,
     Reviews,
     Issues,
 }
 
 impl List {
     pub fn kind(self) -> Kind {
-        match self {
-            List::Workspaces => Kind::Workspaces,
-            List::Repos => Kind::Repos,
-            List::Work => Kind::Work,
-            List::ToReview | List::Mine => Kind::Reviews,
-            List::Section(_) => Kind::Issues,
-        }
-    }
-
-    /// The reviews it lists, for the Reviews panel's sub-tabs.
-    pub fn role(self) -> Option<Role> {
-        match self {
-            List::ToReview => Some(Role::ToReview),
-            List::Mine => Some(Role::Mine),
-            _ => None,
-        }
+        lists::of(self).kind()
     }
 }
 
@@ -101,133 +95,6 @@ pub enum Screen {
     Normal,
     Half,
     Full,
-}
-
-/// Everything loaded from the database, worktrunk and zellij.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct Snapshot {
-    /// The zellij session the TUI runs in.
-    pub here: Option<String>,
-    /// The current session first.
-    pub workspaces: Vec<String>,
-    pub repos: Vec<Repo>,
-    pub work: Vec<Work>,
-    /// Every recorded carnet, shown or not, so removing a workspace can name the ones it owns.
-    pub all_carnets: Vec<crate::state::Item>,
-    /// Each repo's forge web page, by repo path.
-    pub forges: HashMap<PathBuf, Forge>,
-}
-
-/// A worktree or a carnet, with what atelier records about it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Work {
-    pub path: PathBuf,
-    pub workspace: String,
-    pub group: String,
-    pub tab: bool,
-    pub kind: WorkKind,
-}
-
-/// What only a worktree has; a carnet is a folder and its README.
-#[derive(Debug, Clone, PartialEq)]
-pub enum WorkKind {
-    Worktree {
-        repo: PathBuf,
-        repo_name: String,
-        tree: Box<Worktree>,
-    },
-    Carnet,
-}
-
-impl Work {
-    pub fn path(&self) -> &PathBuf {
-        &self.path
-    }
-
-    pub fn is_carnet(&self) -> bool {
-        self.kind == WorkKind::Carnet
-    }
-
-    /// An ungrouped carnet, listed in the `Carnets` group.
-    pub fn in_carnets_group(&self) -> bool {
-        self.group.is_empty() && self.is_carnet()
-    }
-
-    /// A worktree's repo.
-    pub fn repo(&self) -> Option<&PathBuf> {
-        match &self.kind {
-            WorkKind::Worktree { repo, .. } => Some(repo),
-            WorkKind::Carnet => None,
-        }
-    }
-
-    /// A worktree's listing.
-    pub fn tree(&self) -> Option<&Worktree> {
-        match &self.kind {
-            WorkKind::Worktree { tree, .. } => Some(tree),
-            WorkKind::Carnet => None,
-        }
-    }
-
-    /// A worktree's listing, for tests that change it.
-    #[cfg(test)]
-    pub fn tree_mut(&mut self) -> &mut Worktree {
-        match &mut self.kind {
-            WorkKind::Worktree { tree, .. } => tree,
-            WorkKind::Carnet => panic!("a carnet has no worktree"),
-        }
-    }
-
-    /// A worktree's branch, else its directory name: detached, or a carnet's folder.
-    pub fn branch(&self) -> String {
-        (self.tree().and_then(|tree| tree.branch.clone()))
-            .unwrap_or_else(|| crate::state::dir_name(&self.path))
-    }
-
-    /// A worktree that is not its repo's main one, so it can be removed.
-    pub fn removable(&self) -> bool {
-        !self.tree().is_some_and(|tree| tree.main)
-    }
-
-    /// `repo:branch`, or a carnet's folder name.
-    pub fn title(&self) -> String {
-        match &self.kind {
-            WorkKind::Worktree { repo_name, .. } => format!("{repo_name}:{}", self.branch()),
-            WorkKind::Carnet => crate::state::dir_name(&self.path),
-        }
-    }
-}
-
-/// The end of the key of a workspace's `Carnets` group, which no group name can produce.
-const CARNETS_KEY: &str = "\0\0carnets";
-
-/// A row of the Work panel.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Row {
-    /// A group header; `members` index `Snapshot::work`. The `Carnets` group, of ungrouped
-    /// carnets, has an empty `name`.
-    Group {
-        key: String,
-        name: String,
-        members: Vec<usize>,
-        folded: bool,
-    },
-    Item(usize),
-}
-
-/// A removal: a worktree, removed through worktrunk, or a carnet, only forgotten.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Removal {
-    pub path: PathBuf,
-    pub worktree: Option<RemovedWorktree>,
-}
-
-/// A worktree to remove, and whether it has changes that will be discarded.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RemovedWorktree {
-    pub repo: PathBuf,
-    pub branch: Option<String>,
-    pub force: bool,
 }
 
 /// Background work, run off the UI thread; each reports back with actions.
@@ -249,6 +116,12 @@ pub enum Job {
         group: String,
     },
     Remove(Vec<Removal>),
+    /// Closes carnets and their tabs.
+    CloseCarnet(Vec<PathBuf>),
+    /// Reopens closed carnets.
+    ReopenCarnet(Vec<PathBuf>),
+    /// Searches inside every carnet with `rg`.
+    SearchCarnets(String),
     /// Creates a carnet and opens its tab.
     NewCarnet {
         name: String,
@@ -273,17 +146,14 @@ pub enum Job {
     },
     Forget(PathBuf),
     AddWorkspace(String),
-    /// Removes a workspace, forgetting the carnets its confirmation listed.
-    RemoveWorkspace {
-        name: String,
-        carnets: Vec<PathBuf>,
-    },
+    /// Removes a workspace; its carnets move to the default workspace.
+    RemoveWorkspace(String),
     SwitchWorkspace(String),
     Browse(String),
-    /// Lists my reviews on each host, from the cache unless `force`.
-    Reviews {
-        provider: Provider,
-        hosts: Vec<String>,
+    /// Lists a feed in each of its keys, hosts or scopes, from the cache unless `force`.
+    Fetch {
+        feed: Feed,
+        keys: Vec<String>,
         force: bool,
     },
     /// Checks out a review's branch with `wt switch pr:N` or `mr:N` in its registered repo and
@@ -292,12 +162,6 @@ pub enum Job {
         repo: PathBuf,
         workspace: String,
         review: Box<Review>,
-    },
-    /// Lists a tracker's issues in each scope, from the cache unless `force`.
-    Issues {
-        tracker: issues::Tracker,
-        scopes: Vec<String>,
-        force: bool,
     },
     /// Creates a worktree on `branch` for an issue, in the issue's group.
     Start {
@@ -308,22 +172,51 @@ pub enum Job {
     },
 }
 
-/// Whether the next worktree listing also lists reviews or issues, and whether from the cache.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Due {
-    No,
-    Cached,
-    /// Past the cache, as `R` asks.
-    Fresh,
+/// A remote listing: a provider's reviews or a tracker's issues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Feed {
+    Reviews(Provider),
+    Issues(issues::Tracker),
 }
 
-/// What the hint bar shows as loading: worktree, commit, review and issue listings, or actions.
+impl Feed {
+    pub const ALL: [Feed; 4] = [
+        Feed::Reviews(Provider::GitHub),
+        Feed::Reviews(Provider::GitLab),
+        Feed::Issues(issues::Tracker::GitHub),
+        Feed::Issues(issues::Tracker::Jira),
+    ];
+
+    /// The CLI it is listed through.
+    pub fn cli(self) -> &'static str {
+        match self {
+            Feed::Reviews(provider) => provider.cli(),
+            Feed::Issues(tracker) => tracker.cli(),
+        }
+    }
+
+    /// How the command log names its listing.
+    pub fn what(self) -> String {
+        match self {
+            Feed::Reviews(provider) => format!("{} reviews", provider.cli()),
+            Feed::Issues(tracker) => format!("{} issues", tracker.cli()),
+        }
+    }
+}
+
+/// A feed's listing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Rows {
+    Reviews(Vec<Review>),
+    Issues(Vec<Issue>),
+}
+
+/// What the hint bar shows as loading: worktree, commit and feed listings, or actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Source {
     Wt,
     Git,
-    Reviews(Provider),
-    Issues(issues::Tracker),
+    Feed(Feed),
     Run,
 }
 
@@ -332,8 +225,7 @@ impl Source {
         match self {
             Source::Wt => "wt",
             Source::Git => "git",
-            Source::Reviews(provider) => provider.cli(),
-            Source::Issues(tracker) => tracker.cli(),
+            Source::Feed(feed) => feed.cli(),
             Source::Run => "run",
         }
     }
@@ -345,10 +237,14 @@ impl Job {
         match self {
             Job::Refresh { .. } => Source::Wt,
             Job::Commits(_) | Job::Readme(_) => Source::Git,
-            Job::Reviews { provider, .. } => Source::Reviews(*provider),
-            Job::Issues { tracker, .. } => Source::Issues(*tracker),
+            Job::Fetch { feed, .. } => Source::Feed(*feed),
             _ => Source::Run,
         }
+    }
+
+    /// Whether it changes items, workspaces, repos or tabs, so a refresh shows it once done.
+    pub fn changes_items(&self) -> bool {
+        !matches!(self, Job::Browse(_) | Job::SwitchWorkspace(_))
     }
 }
 
@@ -385,6 +281,8 @@ pub enum Submit {
     Group(Vec<PathBuf>),
     Alias(PathBuf),
     Workspace,
+    /// The text to search the carnets for.
+    Search,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -430,20 +328,22 @@ pub enum Action {
     Copy(String),
     Loaded {
         snapshot: Result<Snapshot, String>,
+        /// Whether it was a full refresh.
+        full: bool,
         log: Vec<Logged>,
     },
     Commits(PathBuf, Vec<String>),
-    Readme(PathBuf, Option<String>),
-    /// A provider's reviews, replacing the ones listed before.
-    Reviews {
-        provider: Provider,
-        reviews: Result<Vec<Review>, String>,
+    Readme(Readme),
+    /// A carnet search's hit lines by carnet, `None` when it failed.
+    Searched {
+        text: String,
+        hits: Option<BTreeMap<PathBuf, Vec<String>>>,
         log: Vec<Logged>,
     },
-    /// A tracker's issues, replacing the ones listed before.
-    Issues {
-        tracker: issues::Tracker,
-        issues: Result<Vec<Issue>, String>,
+    /// A feed's rows, replacing the ones it listed before.
+    Fetched {
+        feed: Feed,
+        rows: Result<Rows, String>,
         log: Vec<Logged>,
     },
     Finished {
@@ -484,6 +384,8 @@ pub enum Cmd {
     Remove,
     Close,
     Pull,
+    ToggleCarnet,
+    Search,
     Browse,
     CopyMenu,
     CopyPath,
@@ -536,13 +438,21 @@ const fn code(code: KeyCode) -> Key {
 }
 
 const WORK: &[Kind] = &[Kind::Work];
+const CARNETS: &[Kind] = &[Kind::Work, Kind::Carnets];
 const LOCAL: &[Kind] = &[Kind::Workspaces, Kind::Repos, Kind::Work];
-const TABBED: &[Kind] = &[Kind::Workspaces, Kind::Repos, Kind::Reviews, Kind::Issues];
+const TABBED: &[Kind] = &[
+    Kind::Workspaces,
+    Kind::Repos,
+    Kind::Carnets,
+    Kind::Reviews,
+    Kind::Issues,
+];
 const REMOTE: &[Kind] = &[Kind::Reviews, Kind::Issues];
 const ALL: &[Kind] = &[
     Kind::Workspaces,
     Kind::Repos,
     Kind::Work,
+    Kind::Carnets,
     Kind::Reviews,
     Kind::Issues,
 ];
@@ -560,7 +470,7 @@ pub const KEYMAP: &[Binding] = &[
     Binding { keys: &[ch('h'), code(KeyCode::Left), code(KeyCode::BackTab)], label: "h/←/S-Tab", cmd: Cmd::PrevPanel, help: "previous panel", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('l'), code(KeyCode::Right), code(KeyCode::Tab)], label: "l/→/Tab", cmd: Cmd::NextPanel, help: "next panel", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('1')], label: "1", cmd: Cmd::Jump(1), help: "Workspaces │ Repos", hint: NONE, on: On::Nav },
-    Binding { keys: &[ch('2')], label: "2", cmd: Cmd::Jump(2), help: "Work", hint: NONE, on: On::Nav },
+    Binding { keys: &[ch('2')], label: "2", cmd: Cmd::Jump(2), help: "Work │ Carnets", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('3')], label: "3", cmd: Cmd::Jump(3), help: "To review │ Mine", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('4')], label: "4", cmd: Cmd::Jump(4), help: "Issues", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('0')], label: "0", cmd: Cmd::FocusMain, help: "focus the main view", hint: NONE, on: On::Nav },
@@ -572,7 +482,7 @@ pub const KEYMAP: &[Binding] = &[
     Binding { keys: &[ch('L')], label: "L", cmd: Cmd::ScrollRight, help: "scroll the main view right", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('[')], label: "[", cmd: Cmd::PrevTab, help: "previous sub-tab", hint: NONE, on: On::Lists(TABBED) },
     Binding { keys: &[ch(']')], label: "]", cmd: Cmd::NextTab, help: "next sub-tab", hint: NONE, on: On::Lists(TABBED) },
-    Binding { keys: &[ch(' ')], label: "Space", cmd: Cmd::Activate, help: "open tab · check out review · start issue · switch workspace", hint: &[Kind::Workspaces, Kind::Work, Kind::Reviews, Kind::Issues], on: On::Lists(&[Kind::Workspaces, Kind::Work, Kind::Reviews, Kind::Issues]) },
+    Binding { keys: &[ch(' ')], label: "Space", cmd: Cmd::Activate, help: "open tab · check out review · start issue · switch workspace", hint: &[Kind::Workspaces, Kind::Work, Kind::Carnets, Kind::Reviews, Kind::Issues], on: On::Lists(&[Kind::Workspaces, Kind::Work, Kind::Carnets, Kind::Reviews, Kind::Issues]) },
     Binding { keys: &[code(KeyCode::Enter)], label: "Enter", cmd: Cmd::Enter, help: "fold group · focus the main view", hint: NONE, on: On::Lists(WORK) },
     Binding { keys: &[ch('-')], label: "-", cmd: Cmd::CollapseAll, help: "collapse all groups", hint: NONE, on: On::Lists(WORK) },
     Binding { keys: &[ch('=')], label: "=", cmd: Cmd::ExpandAll, help: "expand all groups", hint: NONE, on: On::Lists(WORK) },
@@ -581,6 +491,8 @@ pub const KEYMAP: &[Binding] = &[
     Binding { keys: &[ch('m')], label: "m", cmd: Cmd::Move, help: "move to workspace · set repo workspace", hint: &[Kind::Repos, Kind::Work], on: On::Lists(&[Kind::Repos, Kind::Work]) },
     Binding { keys: &[ch('d')], label: "d", cmd: Cmd::Remove, help: "remove", hint: LOCAL, on: On::Lists(LOCAL) },
     Binding { keys: &[ch('x')], label: "x", cmd: Cmd::Close, help: "close tab", hint: WORK, on: On::Lists(WORK) },
+    Binding { keys: &[ch('c')], label: "c", cmd: Cmd::ToggleCarnet, help: "close or reopen carnet", hint: CARNETS, on: On::Lists(CARNETS) },
+    Binding { keys: &[ch('s')], label: "s", cmd: Cmd::Search, help: "search inside carnets (rg)", hint: &[Kind::Carnets], on: On::Lists(&[Kind::Carnets]) },
     Binding { keys: &[ch('p')], label: "p", cmd: Cmd::Pull, help: "pull (git pull --ff-only)", hint: WORK, on: On::Lists(WORK) },
     Binding { keys: &[ch('o')], label: "o", cmd: Cmd::Browse, help: "browse (open in the browser)", hint: REMOTE, on: On::Lists(&[Kind::Repos, Kind::Work, Kind::Reviews, Kind::Issues]) },
     Binding { keys: &[ch('y')], label: "y", cmd: Cmd::CopyMenu, help: "copy path, branch or URL", hint: NONE, on: On::Lists(ALL) },
@@ -674,10 +586,17 @@ pub fn popup_hints(popup: Popup) -> String {
         .join(" · ")
 }
 
-/// Seconds between refreshes: a fast one once idle, a full one regardless.
-pub const FAST_REFRESH: u32 = 10;
-pub const FULL_REFRESH: u32 = 300;
 const LOG_LIMIT: usize = 500;
+
+/// A carnet's README as a job read it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Readme {
+    pub path: PathBuf,
+    /// Taken before reading, so a README written meanwhile reads again at the next refresh.
+    pub stamp: Option<Stamp>,
+    /// `None` when the carnet has none.
+    pub text: Option<String>,
+}
 
 pub struct Model {
     pub snapshot: Snapshot,
@@ -700,31 +619,25 @@ pub struct Model {
     pub screen: Screen,
     pub show_log: bool,
     pub log: Vec<Logged>,
-    /// Jobs in flight by source.
-    pub loading: BTreeMap<Source, usize>,
+    /// What is loading, and when to refresh.
+    pub schedule: Schedule,
     pub commits: HashMap<PathBuf, Vec<String>>,
-    /// Carnets' READMEs, read once selected; `None` when a carnet has none.
-    pub readmes: HashMap<PathBuf, Option<String>>,
+    /// The selected carnet's README, the only one kept, shown until read again.
+    pub readme: Option<Readme>,
     /// Both providers' reviews in both roles, most recently updated first.
     pub reviews: Vec<Review>,
-    pub reviews_due: Due,
     /// Where issues come from and their sections.
     pub tracker_config: TrackerConfig,
     /// Every tracker's issues, each source in its own order.
     pub issues: Vec<Issue>,
-    pub issues_due: Due,
-    /// Worktrees with a pull in flight, which show a spinner.
-    pub pulling: HashSet<PathBuf>,
+    /// The carnet search narrowing the Carnets list, until `Esc`.
+    pub search: Option<Search>,
     /// The spinner's frame, advanced each tick.
     pub frame: usize,
     pub modal: Option<Modal>,
     /// The first `g` of `gg`.
     pub pending_g: bool,
     pub size: (u16, u16),
-    /// Seconds since the last input, the last refresh and the last full refresh.
-    pub idle: u32,
-    pub since_refresh: u32,
-    pub since_full: u32,
 }
 
 impl Model {
@@ -744,29 +657,23 @@ impl Model {
             screen: Screen::Normal,
             show_log: true,
             log: Vec::new(),
-            loading: BTreeMap::new(),
+            schedule: Schedule::default(),
             commits: HashMap::new(),
-            readmes: HashMap::new(),
+            readme: None,
             reviews: Vec::new(),
-            // At startup, so the panels fill.
-            reviews_due: Due::Cached,
             tracker_config: TrackerConfig::default(),
             issues: Vec::new(),
-            issues_due: Due::Cached,
-            pulling: HashSet::new(),
+            search: None,
             frame: 0,
             modal: None,
             pending_g: false,
             size,
-            idle: 0,
-            since_refresh: 0,
-            since_full: 0,
         }
     }
 
     /// Whether something on screen moves on each tick.
     pub fn animating(&self) -> bool {
-        !self.pulling.is_empty()
+        self.schedule.animating()
     }
 
     /// A panel's sub-tabs. Issues have one per section, then Other while it lists any.
@@ -780,7 +687,7 @@ impl Model {
         {
             sections += 1;
         }
-        panel.tabs(sections)
+        panel.tabs(sections, self.carnets)
     }
 
     /// Every list, sub-tabs included.
@@ -800,14 +707,7 @@ impl Model {
     }
 
     pub fn title(&self, list: List) -> &str {
-        match list {
-            List::Workspaces => "Workspaces",
-            List::Repos => "Repos",
-            List::Work => "Work",
-            List::ToReview => "To review",
-            List::Mine => "Mine",
-            List::Section(index) => self.tracker_config.title(index),
-        }
+        lists::of(list).title(self, list)
     }
 
     /// The list keys act on: the focused panel's, or the last one's from the main view.
@@ -829,7 +729,7 @@ impl Model {
         self.log.drain(..excess);
     }
 
-    fn matches(&self, list: List, fields: &[&str]) -> bool {
+    pub(super) fn matches(&self, list: List, fields: &[&str]) -> bool {
         let filter = self.filter(list).to_lowercase();
         filter.is_empty()
             || fields
@@ -837,242 +737,7 @@ impl Model {
                 .any(|field| field.to_lowercase().contains(&filter))
     }
 
-    pub fn workspaces(&self) -> Vec<&String> {
-        self.snapshot
-            .workspaces
-            .iter()
-            .filter(|name| self.matches(List::Workspaces, &[name]))
-            .collect()
-    }
-
-    pub fn repos(&self) -> Vec<&Repo> {
-        self.snapshot
-            .repos
-            .iter()
-            .filter(|repo| self.matches(List::Repos, &[&repo.name(), &repo.path.to_string_lossy()]))
-            .collect()
-    }
-
-    /// A list's reviews, narrowed by its filter.
-    pub fn reviews(&self, list: List) -> Vec<&Review> {
-        self.reviews
-            .iter()
-            .filter(|review| {
-                Some(review.role) == list.role()
-                    && self.matches(
-                        list,
-                        &[
-                            &review.title,
-                            &review.project,
-                            &review.author,
-                            &review.branch,
-                            &review.provider.reference(review.number),
-                        ],
-                    )
-            })
-            .collect()
-    }
-
-    /// The selected review, when a review list is active.
-    pub fn review(&self) -> Option<&Review> {
-        let list = self.active();
-        self.reviews(list).get(self.index(list)).copied()
-    }
-
-    /// The registered repo whose forge web page is `project_url`.
-    pub fn project_repo(&self, project_url: &str) -> Option<&Repo> {
-        let path = self.snapshot.forges.iter().find_map(|(path, forge)| {
-            worktrunk::same_project(&forge.url, project_url).then_some(path)
-        })?;
-        self.snapshot.repos.iter().find(|repo| repo.path == *path)
-    }
-
-    /// The registered repo's name for a review's project, else the project's path.
-    pub fn review_project(&self, review: &Review) -> String {
-        self.project_repo(&review.project_url)
-            .map_or_else(|| review.project.clone(), Repo::name)
-    }
-
-    /// The worktree that has a review's branch checked out.
-    pub fn review_work(&self, review: &Review) -> Option<&Work> {
-        let repo = self.project_repo(&review.project_url)?;
-        self.snapshot.work.iter().find(|work| {
-            work.repo() == Some(&repo.path)
-                && (work.tree()).and_then(|tree| tree.branch.as_deref())
-                    == Some(review.branch.as_str())
-        })
-    }
-
-    /// A section's issues, narrowed by its filter.
-    pub fn issues(&self, list: List) -> Vec<&Issue> {
-        let List::Section(index) = list else {
-            return Vec::new();
-        };
-        self.issues
-            .iter()
-            .filter(|issue| {
-                self.tracker_config.section(issue) == Some(index)
-                    && self.matches(
-                        list,
-                        &[
-                            &issue.key,
-                            &issue.title,
-                            &issue.project,
-                            &issue.labels.join(" "),
-                            &issue.assignees.join(" "),
-                        ],
-                    )
-            })
-            .collect()
-    }
-
-    /// The selected issue, when a section is active.
-    pub fn issue(&self) -> Option<&Issue> {
-        let list = self.active();
-        self.issues(list).get(self.index(list)).copied()
-    }
-
-    /// An issue's linked work: the worktrees in its group, which is its key.
-    pub fn issue_work(&self, issue: &Issue) -> Vec<&Work> {
-        (self.snapshot.work.iter())
-            .filter(|work| work.group == issue.key)
-            .collect()
-    }
-
-    /// The workspace whose work panel 2 shows: the one selected in panel 1.
-    pub fn workspace(&self) -> Option<&str> {
-        let names = self.workspaces();
-        names
-            .get(self.index(List::Workspaces))
-            .or(names.first())
-            .map(|name| name.as_str())
-            .or(self.snapshot.here.as_deref())
-    }
-
-    pub fn repo(&self) -> Option<&Repo> {
-        self.repos().get(self.index(List::Repos)).copied()
-    }
-
-    /// Whether a group row is folded; the `Carnets` group starts folded.
-    pub fn is_folded(&self, key: &str) -> bool {
-        self.folded.contains(key) != key.ends_with(CARNETS_KEY)
-    }
-
-    pub fn set_folded(&mut self, key: &str, folded: bool) {
-        if folded == key.ends_with(CARNETS_KEY) {
-            self.folded.remove(key);
-        } else {
-            self.folded.insert(key.to_owned());
-        }
-    }
-
-    /// Panel 2's rows: named groups, foldable, then ungrouped worktrees, then the ungrouped
-    /// carnets in a `Carnets` group. Worktrees come before carnets, which are newest first.
-    pub fn work_rows(&self) -> Vec<Row> {
-        let Some(workspace) = self.workspace() else {
-            return Vec::new();
-        };
-        let work = &self.snapshot.work;
-        let filtering = !self.filter(List::Work).is_empty();
-        let mut members: Vec<usize> = (0..work.len())
-            .filter(|&index| {
-                let work = &work[index];
-                work.workspace == workspace
-                    && self.matches(
-                        List::Work,
-                        &[&work.title(), &work.group, &work.path.to_string_lossy()],
-                    )
-            })
-            .collect();
-        // Named groups, then ungrouped worktrees, then ungrouped carnets.
-        let section = |work: &Work| {
-            (
-                work.group.is_empty(),
-                work.in_carnets_group(),
-                work.group.clone(),
-            )
-        };
-        members.sort_by(|&a, &b| {
-            let (a, b) = (&work[a], &work[b]);
-            section(a)
-                .cmp(&section(b))
-                .then_with(|| match (&a.kind, &b.kind) {
-                    (
-                        WorkKind::Worktree {
-                            repo_name: x,
-                            tree: tx,
-                            ..
-                        },
-                        WorkKind::Worktree {
-                            repo_name: y,
-                            tree: ty,
-                            ..
-                        },
-                    ) => (x, !tx.main, a.branch()).cmp(&(y, !ty.main, b.branch())),
-                    (WorkKind::Worktree { .. }, WorkKind::Carnet) => std::cmp::Ordering::Less,
-                    (WorkKind::Carnet, WorkKind::Worktree { .. }) => std::cmp::Ordering::Greater,
-                    (WorkKind::Carnet, WorkKind::Carnet) => {
-                        b.path.file_name().cmp(&a.path.file_name())
-                    }
-                })
-        });
-        let mut lines = Vec::new();
-        let mut index = 0;
-        while index < members.len() {
-            let first = &work[members[index]];
-            let carnets = first.in_carnets_group();
-            let end = members[index..]
-                .iter()
-                .position(|&other| section(&work[other]) != section(first))
-                .map_or(members.len(), |offset| index + offset);
-            let slice = &members[index..end];
-            if first.group.is_empty() && !carnets {
-                lines.extend(slice.iter().map(|&member| Row::Item(member)));
-            } else {
-                let key = if carnets {
-                    format!("{workspace}{CARNETS_KEY}")
-                } else {
-                    format!("{workspace}\0{}", first.group)
-                };
-                let folded = !filtering && self.is_folded(&key);
-                lines.push(Row::Group {
-                    key,
-                    name: first.group.clone(),
-                    members: slice.to_vec(),
-                    folded,
-                });
-                if !folded {
-                    lines.extend(slice.iter().map(|&member| Row::Item(member)));
-                }
-            }
-            index = end;
-        }
-        lines
-    }
-
-    pub fn work_row(&self) -> Option<Row> {
-        self.work_rows().into_iter().nth(self.index(List::Work))
-    }
-
-    /// The selected worktree, or every worktree of the selected group.
-    pub fn targets(&self) -> Vec<&Work> {
-        match self.work_row() {
-            Some(Row::Item(index)) => vec![&self.snapshot.work[index]],
-            Some(Row::Group { members, .. }) => members
-                .iter()
-                .map(|&index| &self.snapshot.work[index])
-                .collect(),
-            None => Vec::new(),
-        }
-    }
-
     pub fn len(&self, list: List) -> usize {
-        match list {
-            List::Workspaces => self.workspaces().len(),
-            List::Repos => self.repos().len(),
-            List::Work => self.work_rows().len(),
-            List::ToReview | List::Mine => self.reviews(list).len(),
-            List::Section(_) => self.issues(list).len(),
-        }
+        lists::of(list).len(self, list)
     }
 }

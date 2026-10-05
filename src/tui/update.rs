@@ -1,6 +1,7 @@
 //! `update(model, action) -> effects`: every state change, with no I/O.
 
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -10,32 +11,35 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use super::app::{
-    Action, Binding, Cmd, Due, Effect, FAST_REFRESH, FULL_REFRESH, Focus, Job, KEYMAP, List,
-    MenuEntry, Modal, Model, On, Panel, Popup, PopupCmd, Removal, RemovedWorktree, Row, Screen,
-    Source, Submit, Work, WorkKind, lookup, popup_lookup,
+    Action, Binding, Cmd, Effect, Feed, Focus, Job, KEYMAP, List, MenuEntry, Modal, Model, On,
+    Panel, Popup, PopupCmd, Row, Rows, Screen, Search, Snapshot, Source, Submit, Work, WorkKind,
+    lookup, popup_lookup,
 };
+use super::lists;
 use super::view::{areas, main_len, offset};
-use crate::issues::Issue;
 use crate::process::Logged;
 use crate::reviews::Provider;
-use crate::state::Repo;
 use crate::worktrunk;
 
 pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
     match action {
         Action::Key(key) => {
-            model.idle = 0;
+            model.schedule.input();
             key_press(model, key)
         }
         Action::Mouse(mouse) => {
-            model.idle = 0;
+            model.schedule.input();
             mouse_event(model, mouse)
         }
         Action::Resize(width, height) => {
             model.size = (width, height);
             Vec::new()
         }
-        Action::Tick => tick(model),
+        Action::Tick => {
+            model.frame = model.frame.wrapping_add(1);
+            let jobs = model.schedule.tick();
+            start(model, jobs)
+        }
         Action::Cmd(cmd) => command(model, cmd),
         Action::Run(job) => vec![run(model, job)],
         Action::Ask {
@@ -57,93 +61,85 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
             }]);
             vec![Effect::Copy(text)]
         }
-        Action::Loaded { snapshot, log } => {
-            done(model, Source::Wt);
+        Action::Loaded {
+            snapshot,
+            full,
+            log,
+        } => {
+            let mut effects = done(model, Source::Wt);
             model.push_log(log);
             match snapshot {
                 Ok(snapshot) => {
                     let keep = Keep::of(model);
-                    model.snapshot = snapshot;
+                    let old = std::mem::replace(&mut model.snapshot, snapshot);
                     model.loaded = true;
                     keep.restore(model);
-                    model.commits.clear();
-                    model.readmes.clear();
-                    let mut effects = commits(model);
-                    effects.extend(fetch_reviews(model));
-                    effects.extend(fetch_issues(model));
-                    effects
+                    let relist = drop_stale(model, &old, full);
+                    effects.extend(commits(model));
+                    effects.extend(relist.map(|path| run(model, Job::Commits(path))));
+                    effects.extend(fetch(model));
                 }
-                Err(error) => {
-                    model.push_log([Logged {
-                        command: "refresh".into(),
-                        error: Some(error),
-                    }]);
-                    Vec::new()
-                }
+                Err(error) => model.push_log([Logged {
+                    command: "refresh".into(),
+                    error: Some(error),
+                }]),
             }
+            effects
         }
         Action::Commits(path, lines) => {
-            done(model, Source::Git);
             model.commits.insert(path, lines);
-            Vec::new()
+            done(model, Source::Git)
         }
-        Action::Readme(path, readme) => {
-            done(model, Source::Git);
-            model.readmes.insert(path, readme);
-            Vec::new()
+        Action::Readme(readme) => {
+            // A read for a carnet since left is dropped, so it does not replace the selected one's.
+            if selected(model).is_some_and(|work| work.path == readme.path) {
+                model.readme = Some(readme);
+            }
+            done(model, Source::Git)
         }
-        Action::Reviews {
-            provider,
-            reviews,
-            log,
-        } => {
-            done(model, Source::Reviews(provider));
+        Action::Searched { text, hits, log } => {
+            let mut effects = done(model, Source::Run);
             model.push_log(log);
-            match reviews {
-                Ok(reviews) => {
+            if let Some(hits) = hits {
+                let keep = Keep::of(model);
+                model.search = Some(Search { text, hits });
+                keep.restore(model);
+                model.scroll = (0, 0);
+                effects.extend(commits(model));
+            }
+            effects
+        }
+        Action::Fetched { feed, rows, log } => {
+            let effects = done(model, Source::Feed(feed));
+            model.push_log(log);
+            match rows {
+                Ok(rows) => {
                     let keep = Keep::of(model);
-                    model.reviews.retain(|review| review.provider != provider);
-                    model.reviews.extend(reviews);
-                    model
-                        .reviews
-                        .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                    match rows {
+                        Rows::Reviews(reviews) => {
+                            (model.reviews).retain(|review| Feed::Reviews(review.provider) != feed);
+                            model.reviews.extend(reviews);
+                            (model.reviews).sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                        }
+                        Rows::Issues(issues) => {
+                            (model.issues).retain(|issue| Feed::Issues(issue.tracker) != feed);
+                            model.issues.extend(issues);
+                            model.issues.sort_by_key(|issue| issue.tracker);
+                        }
+                    }
                     keep.restore(model);
                 }
                 Err(error) => model.push_log([Logged {
-                    command: format!("{} reviews", provider.cli()),
+                    command: feed.what(),
                     error: Some(error),
                 }]),
             }
-            Vec::new()
-        }
-        Action::Issues {
-            tracker,
-            issues,
-            log,
-        } => {
-            done(model, Source::Issues(tracker));
-            model.push_log(log);
-            match issues {
-                Ok(issues) => {
-                    let keep = Keep::of(model);
-                    model.issues.retain(|issue| issue.tracker != tracker);
-                    model.issues.extend(issues);
-                    model.issues.sort_by_key(|issue| issue.tracker);
-                    keep.restore(model);
-                }
-                Err(error) => model.push_log([Logged {
-                    command: format!("{} issues", tracker.cli()),
-                    error: Some(error),
-                }]),
-            }
-            Vec::new()
+            effects
         }
         Action::Finished { job, log, error } => {
-            done(model, job.source());
+            let mut effects = done(model, job.source());
             if let Job::Pull(paths) = &job {
-                for path in paths {
-                    model.pulling.remove(path);
-                }
+                model.schedule.pulled(paths);
             }
             let logged_error = log.iter().rev().find_map(|entry| entry.error.clone());
             model.push_log(log);
@@ -155,39 +151,35 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
                     error: Some(error),
                 }]);
             }
-            vec![run(model, Job::Refresh { full: false })]
+            if job.changes_items() {
+                let jobs = model.schedule.changed();
+                effects.extend(start(model, jobs));
+            }
+            effects
         }
     }
 }
 
 /// Starts a job, showing its loading indicator.
-fn run(model: &mut Model, job: Job) -> Effect {
-    *model.loading.entry(job.source()).or_default() += 1;
-    if let Job::Pull(paths) = &job {
-        model.pulling.extend(paths.iter().cloned());
-    }
-    if let Job::Refresh { full } = job {
-        model.since_refresh = 0;
-        if full {
-            model.since_full = 0;
-            for due in [&mut model.reviews_due, &mut model.issues_due] {
-                if *due == Due::No {
-                    *due = Due::Cached;
-                }
-            }
-        }
-    }
+pub(super) fn run(model: &mut Model, job: Job) -> Effect {
+    model.schedule.started(&job);
     Effect::Run(job)
 }
 
-/// Lists each provider's reviews on the hosts of the registered repos, once a listing that
-/// asked for them has found those hosts.
-fn fetch_reviews(model: &mut Model) -> Vec<Effect> {
-    let due = std::mem::replace(&mut model.reviews_due, Due::No);
-    if due == Due::No {
-        return Vec::new();
-    }
-    let mut jobs = Vec::new();
+fn start(model: &mut Model, jobs: Vec<Job>) -> Vec<Effect> {
+    jobs.into_iter().map(|job| run(model, job)).collect()
+}
+
+/// A job of `source` finished: starts the refresh it held back.
+fn done(model: &mut Model, source: Source) -> Vec<Effect> {
+    let jobs = model.schedule.finished(source);
+    start(model, jobs)
+}
+
+/// Lists the due feeds: each provider's reviews on the hosts of the registered repos, and each
+/// tracker's issues in its configured scopes. A provider with no host lists none.
+fn fetch(model: &mut Model) -> Vec<Effect> {
+    let mut keys = Vec::new();
     for provider in Provider::ALL {
         let mut hosts: Vec<String> = (model.snapshot.forges.values())
             .filter(|forge| Provider::from_name(&forge.provider) == Some(provider))
@@ -197,157 +189,42 @@ fn fetch_reviews(model: &mut Model) -> Vec<Effect> {
         hosts.dedup();
         if hosts.is_empty() {
             model.reviews.retain(|review| review.provider != provider);
-        } else {
-            jobs.push(Job::Reviews {
-                provider,
-                hosts,
-                force: due == Due::Fresh,
-            });
         }
+        keys.push((Feed::Reviews(provider), hosts));
     }
-    let (effects, due) = run_due(model, due, jobs);
-    model.reviews_due = due;
-    effects
+    let scopes = model.tracker_config.scopes().into_iter();
+    keys.extend(scopes.map(|(tracker, scopes)| (Feed::Issues(tracker), scopes)));
+    let jobs = model.schedule.loaded(keys);
+    start(model, jobs)
 }
 
-/// Lists each tracker's issues in its configured scopes, once a listing asked for them.
-fn fetch_issues(model: &mut Model) -> Vec<Effect> {
-    let due = std::mem::replace(&mut model.issues_due, Due::No);
-    if due == Due::No {
-        return Vec::new();
-    }
-    let jobs = (model.tracker_config.scopes().into_iter())
-        .map(|(tracker, scopes)| Job::Issues {
-            tracker,
-            scopes,
-            force: due == Due::Fresh,
-        })
-        .collect();
-    let (effects, due) = run_due(model, due, jobs);
-    model.issues_due = due;
-    effects
-}
-
-/// Starts the due listings whose source is idle, and returns what is still due: a source still
-/// listing gets its turn at the next listing, so `R` is not lost.
-fn run_due(model: &mut Model, due: Due, jobs: Vec<Job>) -> (Vec<Effect>, Due) {
-    let mut effects = Vec::new();
-    let mut busy = false;
-    for job in jobs {
-        if model.loading.contains_key(&job.source()) {
-            busy = true;
-        } else {
-            effects.push(run(model, job));
-        }
-    }
-    (effects, if busy { due } else { Due::No })
-}
-
-fn done(model: &mut Model, source: Source) {
-    if let Some(count) = model.loading.get_mut(&source) {
-        *count -= 1;
-        if *count == 0 {
-            model.loading.remove(&source);
-        }
-    }
-}
-
-fn tick(model: &mut Model) -> Vec<Effect> {
-    model.frame = model.frame.wrapping_add(1);
-    model.idle += 1;
-    model.since_refresh += 1;
-    model.since_full += 1;
-    if model.loading.contains_key(&Source::Wt) {
-        return Vec::new();
-    }
-    if model.since_full >= FULL_REFRESH {
-        vec![run(model, Job::Refresh { full: true })]
-    } else if model.idle >= FAST_REFRESH && model.since_refresh >= FAST_REFRESH {
-        vec![run(model, Job::Refresh { full: false })]
-    } else {
-        Vec::new()
-    }
-}
-
-/// Selections, kept by identity across a refresh.
-struct Keep {
-    workspace: Option<String>,
-    repo: Option<std::path::PathBuf>,
-    line: Option<LineKey>,
-    /// Each review list's and section's selection, by [`listed_ids`].
-    listed: Vec<(List, String)>,
-}
-
-#[derive(PartialEq)]
-enum LineKey {
-    Group(String),
-    Item(std::path::PathBuf),
-}
+/// Each list's selection, kept by its row's identity across a refresh.
+struct Keep(Vec<(List, String)>);
 
 impl Keep {
     fn of(model: &Model) -> Self {
-        Self {
-            workspace: model.workspace().map(Into::into),
-            repo: model.repo().map(|repo| repo.path.clone()),
-            line: model.work_row().map(|line| line_key(model, &line)),
-            listed: (model.lists().into_iter())
-                .filter_map(|list| {
-                    let id = listed_ids(model, list).into_iter().nth(model.index(list))?;
-                    Some((list, id))
-                })
-                .collect(),
-        }
+        let selected = (model.lists().into_iter())
+            .filter_map(|list| {
+                let id = lists::of(list)
+                    .ids(model, list)
+                    .into_iter()
+                    .nth(model.index(list))?;
+                Some((list, id))
+            })
+            .collect();
+        Self(selected)
     }
 
+    /// Selects each kept row where it is now. Lists restore in panel order, so Work's rows are
+    /// those of the workspace already restored.
     fn restore(self, model: &mut Model) {
-        let workspace = self
-            .workspace
-            .and_then(|name| model.workspaces().iter().position(|other| **other == name));
-        model
-            .selected
-            .insert(List::Workspaces, workspace.unwrap_or(0));
-        let repo = self
-            .repo
-            .and_then(|path| model.repos().iter().position(|repo| repo.path == path));
-        model.selected.insert(List::Repos, repo.unwrap_or(0));
-        let line = self.line.and_then(|key| {
-            model
-                .work_rows()
-                .iter()
-                .position(|line| line_key(model, line) == key)
-        });
-        let line = line.unwrap_or(model.index(List::Work));
-        model.selected.insert(List::Work, line);
-        for (list, id) in self.listed {
-            if let Some(index) = listed_ids(model, list)
-                .iter()
-                .position(|other| *other == id)
-            {
+        for (list, id) in self.0 {
+            let ids = lists::of(list).ids(model, list);
+            if let Some(index) = ids.iter().position(|other| *other == id) {
                 model.selected.insert(list, index);
             }
         }
         clamp_all(model);
-    }
-}
-
-/// What identifies a list's review or issue rows across refreshes: a review's URL, an issue's
-/// key, which unlike its URL is never empty.
-fn listed_ids(model: &Model, list: List) -> Vec<String> {
-    match list {
-        List::ToReview | List::Mine => (model.reviews(list).iter())
-            .map(|review| review.url.clone())
-            .collect(),
-        List::Section(_) => (model.issues(list).iter())
-            .map(|issue| issue.key.clone())
-            .collect(),
-        List::Workspaces | List::Repos | List::Work => Vec::new(),
-    }
-}
-
-fn line_key(model: &Model, line: &Row) -> LineKey {
-    match line {
-        Row::Group { key, .. } => LineKey::Group(key.clone()),
-        Row::Item(index) => LineKey::Item(model.snapshot.work[*index].path().clone()),
     }
 }
 
@@ -376,18 +253,58 @@ fn select_moved(model: &mut Model, list: List, index: usize) -> Vec<Effect> {
     commits(model)
 }
 
-/// Fetches the selected item's recent commits, and a carnet's README, unless they are loaded.
+/// Drops the commits a refresh made stale: every one on a full refresh, else those of items
+/// no longer listed, of worktrees whose head moved, and of carnets, whose head the snapshot
+/// does not know. The selected carnet's stay on screen until listed again: returns its path.
+fn drop_stale(model: &mut Model, old: &Snapshot, full: bool) -> Option<PathBuf> {
+    if full {
+        model.commits.clear();
+        return None;
+    }
+    let heads: HashMap<&Path, &str> = (old.work.iter())
+        .filter_map(|work| Some((work.path.as_path(), work.tree()?.short_sha.as_str())))
+        .collect();
+    let unmoved = |work: &Work| {
+        (work.tree()).is_some_and(|tree| {
+            heads.get(work.path.as_path()).copied() == Some(tree.short_sha.as_str())
+        })
+    };
+    let mut kept: HashSet<PathBuf> = (model.snapshot.work.iter())
+        .filter(|work| unmoved(work))
+        .map(|work| work.path.clone())
+        .collect();
+    let relist = (selected(model))
+        .filter(|work| work.is_carnet() && model.commits.contains_key(&work.path))
+        .map(|work| work.path.clone());
+    kept.extend(relist.clone());
+    model.commits.retain(|path, _| kept.contains(path));
+    relist
+}
+
+/// The active list's selected item, else the Work list's.
+fn selected(model: &Model) -> Option<&Work> {
+    let list = model.active();
+    (lists::of(list).item(model, list)).or_else(|| lists::of(List::Work).item(model, List::Work))
+}
+
+/// Fetches the selected item's recent commits unless they are loaded, and a carnet's README
+/// unless the one loaded is its current one.
 fn commits(model: &mut Model) -> Vec<Effect> {
+    let Some(work) = selected(model) else {
+        return Vec::new();
+    };
+    let path = work.path.clone();
+    let stale_readme = match &work.kind {
+        WorkKind::Carnet { readme: stamp, .. } => (model.readme.as_ref())
+            .is_none_or(|readme| readme.path != path || readme.stamp != *stamp),
+        WorkKind::Worktree { .. } => false,
+    };
     let mut effects = Vec::new();
-    if let Some(Row::Item(index)) = model.work_row() {
-        let work = &model.snapshot.work[index];
-        let (path, carnet) = (work.path.clone(), work.is_carnet());
-        if carnet && !model.readmes.contains_key(&path) {
-            effects.push(run(model, Job::Readme(path.clone())));
-        }
-        if !model.commits.contains_key(&path) {
-            effects.push(run(model, Job::Commits(path)));
-        }
+    if stale_readme {
+        effects.push(run(model, Job::Readme(path.clone())));
+    }
+    if !model.commits.contains_key(&path) {
+        effects.push(run(model, Job::Commits(path)));
     }
     effects
 }
@@ -547,11 +464,16 @@ fn submit(model: &mut Model, then: Submit, value: &str) -> Vec<Effect> {
             alias: value.into(),
         },
         Submit::Workspace => Job::AddWorkspace(value.into()),
+        Submit::Search if value.is_empty() => {
+            model.search = None;
+            return Vec::new();
+        }
+        Submit::Search => Job::SearchCarnets(value.into()),
     };
     vec![run(model, job)]
 }
 
-fn note(model: &mut Model, message: &str) -> Vec<Effect> {
+pub(super) fn note(model: &mut Model, message: &str) -> Vec<Effect> {
     model.push_log([Logged {
         command: message.into(),
         error: None,
@@ -620,10 +542,11 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
             };
             return focus_panel(model, Panel::ALL[next]);
         }
-        Cmd::Jump(number) => match Panel::ALL.get(number.wrapping_sub(1)) {
-            Some(&panel) => return focus_panel(model, panel),
-            None => return note(model, "that panel comes in a later phase"),
-        },
+        Cmd::Jump(number) => {
+            if let Some(&panel) = Panel::ALL.get(number.wrapping_sub(1)) {
+                return focus_panel(model, panel);
+            }
+        }
         Cmd::FocusMain => model.focus = Focus::Main,
         Cmd::ScrollDown => scroll(model, 1, 0),
         Cmd::ScrollUp => scroll(model, -1, 0),
@@ -642,14 +565,12 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
             model.sub.insert(model.panel, tabs[next]);
             model.scroll = (0, 0);
         }
-        Cmd::Activate => return activate(model),
-        Cmd::Enter => match model.work_row() {
-            // Not the row's `folded`: a filter shows every group unfolded.
-            Some(Row::Group { key, .. }) if list == List::Work => {
-                model.set_folded(&key, !model.is_folded(&key));
+        Cmd::Activate => return lists::of(list).activate(model, list),
+        Cmd::Enter => {
+            if !lists::of(list).enter(model, list) {
+                model.focus = Focus::Main;
             }
-            _ => model.focus = Focus::Main,
-        },
+        }
         Cmd::CollapseAll | Cmd::ExpandAll => {
             for row in model.work_rows() {
                 if let Row::Group { key, .. } = row {
@@ -658,32 +579,15 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
             }
             clamp_all(model);
         }
-        Cmd::New => return new(model),
-        Cmd::Edit => return edit(model),
-        Cmd::Move => return move_to(model),
-        Cmd::Remove => return remove(model),
-        Cmd::Close => {
-            let open: Vec<_> = work_targets(model)
-                .into_iter()
-                .filter(|work| work.tab)
-                .collect();
-            let paths = paths(&open);
-            if !paths.is_empty() {
-                return vec![run(model, Job::Close(paths))];
-            }
-        }
-        Cmd::Pull => {
-            let trees: Vec<_> = work_targets(model)
-                .into_iter()
-                .filter(|work| work.tree().is_some())
-                .collect();
-            let paths = paths(&trees);
-            if !paths.is_empty() {
-                return vec![run(model, Job::Pull(paths))];
-            }
+        Cmd::New => return lists::of(list).create(model, list),
+        Cmd::Edit => return lists::of(list).edit(model, list),
+        Cmd::Move => return lists::of(list).move_to(model, list),
+        Cmd::Remove => return lists::of(list).remove(model, list),
+        Cmd::Close | Cmd::ToggleCarnet | Cmd::Pull | Cmd::Search => {
+            return lists::of(list).command(model, list, cmd);
         }
         Cmd::Browse => {
-            return match url(model) {
+            return match lists::of(list).url(model, list) {
                 Some(url) => vec![run(model, Job::Browse(url))],
                 None => note(model, "no forge URL for this selection"),
             };
@@ -691,9 +595,9 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
         Cmd::CopyMenu => {
             let mut entries = Vec::new();
             for (key, label, value) in [
-                ("p", "path", copy_path(model)),
-                ("b", "branch", branch(model)),
-                ("u", "URL", url(model)),
+                ("p", "path", lists::of(list).copy_path(model, list)),
+                ("b", "branch", lists::of(list).branch(model, list)),
+                ("u", "URL", lists::of(list).url(model, list)),
             ] {
                 if let Some(value) = value {
                     entries.push(MenuEntry {
@@ -712,16 +616,16 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
             }
         }
         Cmd::CopyPath => {
-            if let Some(path) = copy_path(model).or_else(|| url(model)) {
+            let kind = lists::of(list);
+            if let Some(path) = (kind.copy_path(model, list)).or_else(|| kind.url(model, list)) {
                 return update(model, Action::Copy(path));
             }
         }
         Cmd::Filter if !in_main => model.filtering = Some(list),
         Cmd::Filter => {}
         Cmd::Refresh => {
-            model.reviews_due = Due::Fresh;
-            model.issues_due = Due::Fresh;
-            return vec![run(model, Job::Refresh { full: true })];
+            let jobs = model.schedule.refresh(true);
+            return start(model, jobs);
         }
         Cmd::Menu => {
             let here = |binding: &&Binding| matches!(binding.on, On::Lists(lists) if lists.contains(&list.kind()));
@@ -756,7 +660,7 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
         Cmd::Back => {
             if in_main {
                 model.focus = Focus::Panel(model.panel);
-            } else if model.filters.remove(&list).is_some() {
+            } else if model.filters.remove(&list).is_some() || lists::of(list).back(model, list) {
                 select(model, list, 0);
                 return commits(model);
             }
@@ -768,246 +672,12 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
     Vec::new()
 }
 
-fn paths(works: &[&Work]) -> Vec<PathBuf> {
-    works.iter().map(|work| work.path().clone()).collect()
-}
-
 /// The whole terminal, for laying out outside a draw.
 fn screen(model: &Model) -> Rect {
     Rect::new(0, 0, model.size.0, model.size.1)
 }
 
-/// The worktrees the Work panel's selection covers, or none from another panel.
-fn work_targets(model: &Model) -> Vec<&Work> {
-    if model.active() == List::Work {
-        model.targets()
-    } else {
-        Vec::new()
-    }
-}
-
-fn activate(model: &mut Model) -> Vec<Effect> {
-    match model.active() {
-        List::Workspaces => {
-            let Some(name) = model.workspace().map(str::to_owned) else {
-                return Vec::new();
-            };
-            if model.snapshot.here.is_some() {
-                vec![run(model, Job::SwitchWorkspace(name))]
-            } else {
-                vec![Effect::Attach(name)]
-            }
-        }
-        List::Repos => Vec::new(),
-        List::Work => {
-            let paths = paths(&model.targets());
-            if paths.is_empty() {
-                Vec::new()
-            } else {
-                vec![run(model, Job::Open(paths))]
-            }
-        }
-        List::ToReview | List::Mine => {
-            let Some(review) = model.review() else {
-                return Vec::new();
-            };
-            let Some(repo) = model.project_repo(&review.project_url) else {
-                let message = format!(
-                    "{} is not registered: add a clone with `atelier add <path>`",
-                    review.project
-                );
-                return note(model, &message);
-            };
-            let job = Job::Checkout {
-                repo: repo.path.clone(),
-                workspace: repo.default_workspace.clone(),
-                review: Box::new(review.clone()),
-            };
-            vec![run(model, job)]
-        }
-        List::Section(_) => {
-            let Some(issue) = model.issue().cloned() else {
-                return Vec::new();
-            };
-            let paths = paths(&model.issue_work(&issue));
-            if paths.is_empty() {
-                ask_start(model, issue)
-            } else {
-                vec![run(model, Job::Open(paths))]
-            }
-        }
-    }
-}
-
-/// Asks which repo an issue's worktree goes in, then for its branch. The menu suggests the
-/// repos of its linked work, then its own repo on GitHub, but never picks one: a tracker-only
-/// repo holds issues whose work happens elsewhere. It goes to the workspace of the linked work
-/// in that repo, else of any linked work, else the repo's default one.
-fn ask_start(model: &mut Model, issue: Issue) -> Vec<Effect> {
-    let linked = model.issue_work(&issue);
-    let workspace = |repo: &Repo| {
-        let work = (linked.iter().find(|work| work.repo() == Some(&repo.path))).or(linked.first());
-        work.map_or(repo.default_workspace.clone(), |work| {
-            work.workspace.clone()
-        })
-    };
-    let own = (issue.project_url.as_deref()).and_then(|url| model.project_repo(url));
-    let mut repos: Vec<&Repo> = model.snapshot.repos.iter().collect();
-    repos.sort_by_key(|repo| {
-        let suggested = (linked.iter()).any(|work| work.repo() == Some(&repo.path));
-        let own = own.is_some_and(|own| own.path == repo.path);
-        (!suggested, !own)
-    });
-    let entries: Vec<MenuEntry> = (repos.into_iter().enumerate())
-        .map(|(index, repo)| MenuEntry {
-            key: (index + 1).to_string(),
-            label: repo.name(),
-            action: Action::Ask {
-                title: format!("New worktree of {} for {}: branch", repo.name(), issue.key),
-                initial: issue.branch(),
-                then: Submit::Start {
-                    repo: repo.path.clone(),
-                    workspace: workspace(repo),
-                    issue: Box::new(issue.clone()),
-                },
-            },
-        })
-        .collect();
-    if entries.is_empty() {
-        return note(
-            model,
-            "no repos yet: register one with `atelier add <path>`",
-        );
-    }
-    model.modal = Some(Modal::Menu {
-        title: format!("New worktree for {} in", issue.key),
-        entries,
-        selected: 0,
-    });
-    Vec::new()
-}
-
-fn new(model: &mut Model) -> Vec<Effect> {
-    match model.active() {
-        List::Workspaces => update(
-            model,
-            Action::Ask {
-                title: "New workspace".into(),
-                initial: String::new(),
-                then: Submit::Workspace,
-            },
-        ),
-        List::Repos => note(model, "register repos with `atelier add <path>`"),
-        List::ToReview | List::Mine => Vec::new(),
-        List::Section(_) => match model.issue().cloned() {
-            Some(issue) => ask_start(model, issue),
-            None => Vec::new(),
-        },
-        List::Work => {
-            let Some(workspace) = model.workspace().map(str::to_owned) else {
-                return Vec::new();
-            };
-            let group = match model.work_row() {
-                Some(Row::Group { name, .. }) => name,
-                Some(Row::Item(index)) => model.snapshot.work[index].group.clone(),
-                None => String::new(),
-            };
-            let ask = |repo: std::path::PathBuf, name: String| Action::Ask {
-                title: format!("New worktree of {name}: branch"),
-                initial: String::new(),
-                then: Submit::Branch {
-                    repo,
-                    workspace: workspace.clone(),
-                    group: group.clone(),
-                },
-            };
-            // The selected worktree's repo, else every repo.
-            let selected = (model.targets().first()).and_then(|work| match &work.kind {
-                WorkKind::Worktree {
-                    repo, repo_name, ..
-                } => Some((repo.clone(), repo_name.clone())),
-                WorkKind::Carnet => None,
-            });
-            let mut entries: Vec<MenuEntry> = match selected {
-                Some((repo, name)) if !model.carnets => return update(model, ask(repo, name)),
-                Some((repo, name)) => vec![MenuEntry {
-                    key: "1".into(),
-                    label: format!("worktree of {name}"),
-                    action: ask(repo, name),
-                }],
-                None => (model.snapshot.repos.iter().enumerate())
-                    .map(|(index, repo)| MenuEntry {
-                        key: (index + 1).to_string(),
-                        label: if model.carnets {
-                            format!("worktree of {}", repo.name())
-                        } else {
-                            repo.name()
-                        },
-                        action: ask(repo.path.clone(), repo.name()),
-                    })
-                    .collect(),
-            };
-            if model.carnets {
-                entries.push(MenuEntry {
-                    key: "c".into(),
-                    label: "carnet".into(),
-                    action: Action::Ask {
-                        title: "New carnet: name".into(),
-                        initial: String::new(),
-                        then: Submit::Carnet { workspace, group },
-                    },
-                });
-            }
-            if entries.is_empty() {
-                return note(
-                    model,
-                    "no repos yet: register one with `atelier add <path>`",
-                );
-            }
-            let title = if model.carnets {
-                "New"
-            } else {
-                "New worktree in"
-            };
-            model.modal = Some(Modal::Menu {
-                title: title.into(),
-                entries,
-                selected: 0,
-            });
-            Vec::new()
-        }
-    }
-}
-
-fn edit(model: &mut Model) -> Vec<Effect> {
-    let action = match model.active() {
-        List::Workspaces | List::ToReview | List::Mine | List::Section(_) => return Vec::new(),
-        List::Repos => {
-            let Some(repo) = model.repo() else {
-                return Vec::new();
-            };
-            Action::Ask {
-                title: format!("Alias of {} (empty clears it)", repo.path.display()),
-                initial: repo.alias.clone().unwrap_or_default(),
-                then: Submit::Alias(repo.path.clone()),
-            }
-        }
-        List::Work => {
-            let targets = model.targets();
-            let Some(first) = targets.first() else {
-                return Vec::new();
-            };
-            Action::Ask {
-                title: format!("Group of {} item(s)", targets.len()),
-                initial: first.group.clone(),
-                then: Submit::Group(paths(&targets)),
-            }
-        }
-    };
-    update(model, action)
-}
-
-fn workspace_menu(
+pub(super) fn workspace_menu(
     model: &mut Model,
     title: String,
     current: &str,
@@ -1036,167 +706,14 @@ fn workspace_menu(
     Vec::new()
 }
 
-fn move_to(model: &mut Model) -> Vec<Effect> {
-    match model.active() {
-        List::Workspaces | List::ToReview | List::Mine | List::Section(_) => Vec::new(),
-        List::Repos => {
-            let Some(repo) = model.repo().cloned() else {
-                return Vec::new();
-            };
-            workspace_menu(
-                model,
-                format!("Default workspace of {}", repo.name()),
-                &repo.default_workspace,
-                |workspace| Job::SetRepoWorkspace {
-                    repo: repo.path.clone(),
-                    workspace,
-                },
-            )
-        }
-        List::Work => {
-            let targets = model.targets();
-            let Some(first) = targets.first() else {
-                return Vec::new();
-            };
-            let current = first.workspace.clone();
-            let paths = paths(&targets);
-            workspace_menu(
-                model,
-                format!("Move {} item(s) to", paths.len()),
-                &current,
-                |workspace| Job::Move {
-                    paths: paths.clone(),
-                    workspace,
-                },
-            )
-        }
-    }
-}
-
-fn confirm(model: &mut Model, title: String, lines: Vec<String>, job: Job) -> Vec<Effect> {
+pub(super) fn confirm(
+    model: &mut Model,
+    title: String,
+    lines: Vec<String>,
+    job: Job,
+) -> Vec<Effect> {
     model.modal = Some(Modal::Confirm { title, lines, job });
     Vec::new()
-}
-
-fn remove(model: &mut Model) -> Vec<Effect> {
-    match model.active() {
-        List::ToReview | List::Mine | List::Section(_) => Vec::new(),
-        List::Workspaces => {
-            let Some(name) = model.workspace().map(str::to_owned) else {
-                return Vec::new();
-            };
-            let mut lines = vec![format!("Remove the workspace {name}?")];
-            let carnets: Vec<PathBuf> = (model.snapshot.all_carnets.iter())
-                .filter(|carnet| carnet.workspace == name)
-                .map(|carnet| carnet.path.clone())
-                .collect();
-            if !carnets.is_empty() {
-                lines.push("Its carnets will be forgotten; their folders stay on disk:".into());
-                lines.extend(carnets.iter().map(|path| format!("  {}", path.display())));
-            }
-            confirm(
-                model,
-                "Remove workspace".into(),
-                lines,
-                Job::RemoveWorkspace { name, carnets },
-            )
-        }
-        List::Repos => {
-            let Some(repo) = model.repo().cloned() else {
-                return Vec::new();
-            };
-            confirm(
-                model,
-                "Forget repo".into(),
-                vec![
-                    format!("Forget {} and close its tabs?", repo.name()),
-                    "Its worktrees stay on disk.".into(),
-                ],
-                Job::Forget(repo.path),
-            )
-        }
-        List::Work => {
-            let targets = model.targets();
-            let removable: Vec<_> = targets
-                .into_iter()
-                .filter(|work| work.removable())
-                .collect();
-            let removals: Vec<Removal> = removable
-                .iter()
-                .map(|work| Removal {
-                    path: work.path.clone(),
-                    worktree: match &work.kind {
-                        WorkKind::Worktree { repo, tree, .. } => Some(RemovedWorktree {
-                            repo: repo.clone(),
-                            branch: tree.branch.clone(),
-                            force: tree.dirty,
-                        }),
-                        WorkKind::Carnet => None,
-                    },
-                })
-                .collect();
-            if removals.is_empty() {
-                return note(model, "main worktrees are never removed");
-            }
-            let mut lines = vec!["Remove these?".to_owned()];
-            for work in &removable {
-                let note = match work.tree() {
-                    None => "  (forgotten: its folder stays on disk)",
-                    Some(tree) if tree.dirty => "  (uncommitted changes will be lost)",
-                    Some(_) => "",
-                };
-                lines.push(format!("  {}{note}", work.title()));
-            }
-            confirm(model, "Remove".into(), lines, Job::Remove(removals))
-        }
-    }
-}
-
-fn copy_path(model: &Model) -> Option<String> {
-    match model.active() {
-        List::Workspaces => model.workspace().map(Into::into),
-        List::Repos => model.repo().map(|repo| repo.path.display().to_string()),
-        List::Work => match model.work_row()? {
-            Row::Item(index) => Some(model.snapshot.work[index].path().display().to_string()),
-            Row::Group { name, .. } => Some(name).filter(|name| !name.is_empty()),
-        },
-        List::ToReview | List::Mine | List::Section(_) => None,
-    }
-}
-
-fn branch(model: &Model) -> Option<String> {
-    match model.active() {
-        List::Work => match model.work_row()? {
-            Row::Item(index) => (model.snapshot.work[index].tree())?.branch.clone(),
-            Row::Group { .. } => None,
-        },
-        List::ToReview | List::Mine => model.review().map(|review| review.branch.clone()),
-        List::Workspaces | List::Repos | List::Section(_) => None,
-    }
-}
-
-/// The forge page of the selected repo, review, or worktree's branch.
-fn url(model: &Model) -> Option<String> {
-    let forges = &model.snapshot.forges;
-    match model.active() {
-        List::Repos => forges
-            .get(&model.repo()?.path)
-            .map(|forge| forge.url.clone()),
-        List::Work => match model.work_row()? {
-            Row::Item(index) => {
-                let work = &model.snapshot.work[index];
-                let forge = forges.get(work.repo()?)?;
-                Some(match &work.tree()?.branch {
-                    Some(branch) => forge.branch_url(branch),
-                    None => forge.url.clone(),
-                })
-            }
-            Row::Group { .. } => None,
-        },
-        List::ToReview | List::Mine => model.review().map(|review| review.url.clone()),
-        List::Section(_) => model.issue()?.url.clone(),
-        List::Workspaces => None,
-    }
 }
 
 fn mouse_event(model: &mut Model, mouse: MouseEvent) -> Vec<Effect> {
@@ -1250,12 +767,11 @@ fn mouse_event(model: &mut Model, mouse: MouseEvent) -> Vec<Effect> {
 
 #[cfg(test)]
 pub mod tests {
-    use std::path::PathBuf;
-
+    use super::super::app::Readme;
     use super::*;
+    use crate::carnet::Stamp;
     use crate::reviews::{Review, Role};
     use crate::state::Repo;
-    use crate::tui::app::{Snapshot, Work, WorkKind};
     use crate::worktrunk::{Forge, Worktree};
 
     pub fn work(repo: &str, branch: &str, group: &str, workspace: &str) -> Work {
@@ -1285,41 +801,42 @@ pub mod tests {
         }
     }
 
+    /// A carnet whose one ticket, if any, is `group`.
     pub fn carnet(name: &str, group: &str, workspace: &str) -> Work {
         Work {
             path: PathBuf::from(format!("/data/{name}")),
             workspace: workspace.into(),
             group: group.into(),
             tab: false,
-            kind: WorkKind::Carnet,
+            kind: WorkKind::Carnet {
+                tickets: Some(group.to_owned())
+                    .filter(|group| !group.is_empty())
+                    .into_iter()
+                    .collect(),
+                closed: false,
+                summary: String::new(),
+                readme: None,
+            },
         }
     }
 
-    /// With carnets enabled, one in the ABC-1 group and two ungrouped, and one in `side`.
+    /// With carnets enabled, one in the ABC-1 group and two ungrouped, open, and one closed in
+    /// `side`.
     pub fn with_carnets(mut model: Model) -> Model {
         model.carnets = true;
-        model.snapshot.work.extend([
+        let open = [
             carnet("2026-10-01-ABC-1-logs", "ABC-1", "default"),
             carnet("2026-09-20-old", "", "default"),
             carnet("2026-10-02-ideas", "", "default"),
-        ]);
-        model.snapshot.all_carnets = (model.snapshot.work.iter())
-            .filter(|work| work.is_carnet())
-            .map(|work| crate::state::Item {
-                path: work.path.clone(),
-                kind: crate::state::ItemKind::Carnet,
-                repo: None,
-                group: work.group.clone(),
-                workspace: work.workspace.clone(),
-            })
-            .chain([crate::state::Item {
-                path: "/data/2026-08-01-hidden".into(),
-                kind: crate::state::ItemKind::Carnet,
-                repo: None,
-                group: String::new(),
-                workspace: "side".into(),
-            }])
-            .collect();
+        ];
+        let mut closed = carnet("2026-08-01-done", "", "side");
+        if let WorkKind::Carnet { closed, .. } = &mut closed.kind {
+            *closed = true;
+        }
+        model.snapshot.work.extend(open.clone());
+        model.snapshot.carnets = open.into_iter().chain([closed]).collect();
+        // Newest first, as a snapshot lists them.
+        model.snapshot.carnets.sort_by(|a, b| b.path.cmp(&a.path));
         model
     }
 
@@ -1339,7 +856,7 @@ pub mod tests {
                 work("web", "ABC-1-form", "ABC-1", "default"),
                 work("web", "main", "", "side"),
             ],
-            all_carnets: Vec::new(),
+            carnets: Vec::new(),
             forges: [(
                 PathBuf::from("/src/api"),
                 Forge {
@@ -1357,10 +874,11 @@ pub mod tests {
             &mut model,
             Action::Loaded {
                 snapshot: Ok(snapshot()),
+                full: false,
                 log: Vec::new(),
             },
         );
-        model.loading.clear();
+        model.schedule.finish_all();
         model
     }
 
@@ -1495,10 +1013,7 @@ pub mod tests {
             panic!("{jobs:?}");
         };
         assert_eq!(removals.len(), 2);
-        assert!(
-            removals[0].worktree.as_ref().unwrap().force
-                && !removals[1].worktree.as_ref().unwrap().force
-        );
+        assert!(removals[0].force && !removals[1].force);
         press(&mut model, "G");
         press(&mut model, "d");
         assert!(model.modal.is_none());
@@ -1516,10 +1031,7 @@ pub mod tests {
         press(&mut model, "jd");
         assert_eq!(
             jobs(press(&mut model, "y")),
-            [Job::RemoveWorkspace {
-                name: "side".into(),
-                carnets: Vec::new()
-            }]
+            [Job::RemoveWorkspace("side".into())]
         );
         press(&mut model, "]d");
         assert_eq!(
@@ -1569,7 +1081,7 @@ pub mod tests {
                 group: "ABC-1".into(),
             }]
         );
-        assert!(model.loading.contains_key(&Source::Run));
+        assert!(model.schedule.is_loading(Source::Run));
     }
 
     #[test]
@@ -1686,6 +1198,7 @@ pub mod tests {
             &mut model,
             Action::Loaded {
                 snapshot: Ok(snapshot),
+                full: false,
                 log: Vec::new(),
             },
         );
@@ -1693,6 +1206,54 @@ pub mod tests {
             model.targets()[0].path(),
             &PathBuf::from("/src/web.ABC-1-form")
         );
+    }
+
+    #[test]
+    fn fast_refreshes_keep_commits_whose_head_did_not_move() {
+        let mut model = with_carnets(model());
+        let loaded = |model: &Model| -> Vec<String> {
+            let mut paths: Vec<String> = (model.commits.keys())
+                .map(|path| path.display().to_string())
+                .collect();
+            paths.sort();
+            paths
+        };
+        let refresh = |model: &mut Model, snapshot: Snapshot, full: bool| {
+            let log = Vec::new();
+            let snapshot = Ok(snapshot);
+            update(
+                model,
+                Action::Loaded {
+                    snapshot,
+                    full,
+                    log,
+                },
+            );
+        };
+        let fill = |model: &mut Model| {
+            for work in &model.snapshot.work {
+                model.commits.insert(work.path.clone(), Vec::new());
+            }
+        };
+        fill(&mut model);
+        let mut snapshot = model.snapshot.clone();
+        snapshot.work[1].tree_mut().short_sha = "def5678".into();
+        snapshot
+            .work
+            .retain(|work| work.path != Path::new("/src/web"));
+        for listed in [&mut snapshot.work, &mut snapshot.carnets] {
+            listed.retain(|work| !work.path.ends_with("2026-09-20-old"));
+        }
+        refresh(&mut model, snapshot, false);
+        assert_eq!(
+            loaded(&model),
+            ["/src/api", "/src/web.ABC-1-form"],
+            "the moved head, the unlisted items and the unselected carnets are dropped"
+        );
+        fill(&mut model);
+        let snapshot = model.snapshot.clone();
+        refresh(&mut model, snapshot, true);
+        assert!(loaded(&model).is_empty(), "a full refresh drops everything");
     }
 
     #[test]
@@ -1712,14 +1273,42 @@ pub mod tests {
         );
         assert_eq!(effects, [Effect::Run(Job::Refresh { full: false })]);
         assert_eq!(model.log.len(), 1);
-        assert_eq!(model.loading.keys().collect::<Vec<_>>(), [&Source::Wt]);
+        assert_eq!(model.schedule.loading().collect::<Vec<_>>(), [Source::Wt]);
+        press(&mut model, "x");
+        let finished = |job| Action::Finished {
+            job,
+            log: Vec::new(),
+            error: None,
+        };
+        let close = finished(Job::Close(vec!["/src/api".into()]));
+        assert!(
+            update(&mut model, close).is_empty(),
+            "the refresh in flight holds the next one back"
+        );
+        assert_eq!(
+            update(
+                &mut model,
+                finished(Job::Browse("https://forge/api".into()))
+            ),
+            [],
+            "browsing changes nothing to refresh"
+        );
+        let effects = update(
+            &mut model,
+            Action::Loaded {
+                snapshot: Ok(snapshot()),
+                full: false,
+                log: Vec::new(),
+            },
+        );
+        assert_eq!(effects, [Effect::Run(Job::Refresh { full: false })]);
     }
 
     #[test]
     fn pulling_rows_spin_until_their_job_finishes() {
         let mut model = model();
         press(&mut model, " ");
-        model.loading.clear();
+        model.schedule.finish_all();
         assert!(!model.animating());
         let jobs = jobs(press(&mut model, "p"));
         let paths = vec![
@@ -1727,7 +1316,7 @@ pub mod tests {
             PathBuf::from("/src/web.ABC-1-form"),
         ];
         assert_eq!(jobs, [Job::Pull(paths.clone())]);
-        assert!(paths.iter().all(|path| model.pulling.contains(path)));
+        assert!(paths.iter().all(|path| model.schedule.is_pulling(path)));
         assert!(model.animating());
         let frame = model.frame;
         update(&mut model, Action::Tick);
@@ -1740,27 +1329,7 @@ pub mod tests {
                 error: None,
             },
         );
-        assert!(model.pulling.is_empty());
-    }
-
-    #[test]
-    fn timers_refresh_fast_when_idle_and_fully_every_five_minutes() {
-        let mut model = model();
-        for _ in 0..FAST_REFRESH - 1 {
-            assert!(update(&mut model, Action::Tick).is_empty());
-        }
-        assert_eq!(
-            update(&mut model, Action::Tick),
-            [Effect::Run(Job::Refresh { full: false })]
-        );
-        assert!(update(&mut model, Action::Tick).is_empty(), "one in flight");
-        model.loading.clear();
-        model.since_full = FULL_REFRESH - 1;
-        press(&mut model, "j");
-        assert_eq!(
-            jobs(update(&mut model, Action::Tick)),
-            [Job::Refresh { full: true }]
-        );
+        assert!(!model.animating());
     }
 
     #[test]
@@ -1856,7 +1425,7 @@ pub mod tests {
         press(&mut model, "\n");
         assert!(model.modal.is_none());
         assert!(
-            model.loading.contains_key(&Source::Run),
+            model.schedule.is_loading(Source::Run),
             "Space opened the group"
         );
     }
@@ -1883,13 +1452,13 @@ pub mod tests {
     pub fn with_reviews(mut model: Model) -> Model {
         update(
             &mut model,
-            Action::Reviews {
-                provider: Provider::GitHub,
-                reviews: Ok(vec![
+            Action::Fetched {
+                feed: Feed::Reviews(Provider::GitHub),
+                rows: Ok(Rows::Reviews(vec![
                     review(Provider::GitHub, Role::ToReview, 1, "https://forge/other"),
                     review(Provider::GitHub, Role::ToReview, 2, "https://forge/api"),
                     review(Provider::GitHub, Role::Mine, 3, "https://forge/api"),
-                ]),
+                ])),
                 log: Vec::new(),
             },
         );
@@ -1901,48 +1470,30 @@ pub mod tests {
     }
 
     #[test]
-    fn listings_that_ask_for_reviews_fetch_them_per_provider() {
+    fn listings_fetch_the_reviews_of_their_hosts() {
         let mut model = Model::new((120, 40));
         let loaded = |model: &mut Model| {
             jobs(update(
                 model,
                 Action::Loaded {
                     snapshot: Ok(snapshot()),
+                    full: false,
                     log: Vec::new(),
                 },
             ))
         };
-        let first = Job::Reviews {
-            provider: Provider::GitHub,
-            hosts: vec!["forge".into()],
+        let first = Job::Fetch {
+            feed: Feed::Reviews(Provider::GitHub),
+            keys: vec!["forge".into()],
             force: false,
         };
-        assert_eq!(
-            loaded(&mut model),
-            std::slice::from_ref(&first),
-            "startup lists them"
-        );
-        model.loading.clear();
+        assert_eq!(loaded(&mut model), [first], "startup lists them");
+        model.schedule.finish_all();
         assert!(loaded(&mut model).is_empty(), "a fast refresh does not");
         press(&mut model, "R");
-        model.loading.clear();
-        let [Job::Reviews { force: true, .. }] = loaded(&mut model)[..] else {
+        model.schedule.finish_all();
+        let [Job::Fetch { force: true, .. }] = loaded(&mut model)[..] else {
             panic!("R lists them past the cache");
-        };
-        model.loading.clear();
-        model.since_full = FULL_REFRESH;
-        update(&mut model, Action::Tick);
-        model.loading.clear();
-        assert_eq!(loaded(&mut model), [first], "so does the full refresh");
-        press(&mut model, "R");
-        assert!(
-            loaded(&mut model).is_empty(),
-            "the full refresh is still listing reviews"
-        );
-        assert_eq!(model.reviews_due, Due::Fresh, "R waits for it");
-        model.loading.clear();
-        let [Job::Reviews { force: true, .. }] = loaded(&mut model)[..] else {
-            panic!("then R lists them past the cache");
         };
     }
 
@@ -1959,9 +1510,9 @@ pub mod tests {
         let gitlab = review(Provider::GitLab, Role::ToReview, 9, "https://lab/x");
         update(
             &mut model,
-            Action::Reviews {
-                provider: Provider::GitLab,
-                reviews: Ok(vec![gitlab]),
+            Action::Fetched {
+                feed: Feed::Reviews(Provider::GitLab),
+                rows: Ok(Rows::Reviews(vec![gitlab])),
                 log: Vec::new(),
             },
         );
@@ -1969,9 +1520,9 @@ pub mod tests {
         assert_eq!(model.review().unwrap().number, 1, "still selected");
         update(
             &mut model,
-            Action::Reviews {
-                provider: Provider::GitHub,
-                reviews: Err("offline".into()),
+            Action::Fetched {
+                feed: Feed::Reviews(Provider::GitHub),
+                rows: Err("offline".into()),
                 log: Vec::new(),
             },
         );
@@ -2071,24 +1622,24 @@ pub mod tests {
         jira.project_url = None;
         update(
             &mut model,
-            Action::Issues {
-                tracker: crate::issues::Tracker::GitHub,
-                issues: Ok(vec![
+            Action::Fetched {
+                feed: Feed::Issues(crate::issues::Tracker::GitHub),
+                rows: Ok(Rows::Issues(vec![
                     issue("api#1", &["ready-for-agent"], false),
                     issue("api#2", &["needs-triage"], false),
                     issue("api#3", &["ready-for-agent"], true),
                     issue("api#4", &[], false),
                     issue("api#5", &["wontfix"], false),
                     issue("api#6", &["enhancement"], false),
-                ]),
+                ])),
                 log: Vec::new(),
             },
         );
         update(
             &mut model,
-            Action::Issues {
-                tracker: crate::issues::Tracker::Jira,
-                issues: Ok(vec![jira]),
+            Action::Fetched {
+                feed: Feed::Issues(crate::issues::Tracker::Jira),
+                rows: Ok(Rows::Issues(vec![jira])),
                 log: Vec::new(),
             },
         );
@@ -2141,13 +1692,13 @@ pub mod tests {
         assert_eq!(model.title(model.active()), "Other");
         update(
             &mut model,
-            Action::Issues {
-                tracker: crate::issues::Tracker::GitHub,
-                issues: Ok(vec![crate::issues::tests::issue(
+            Action::Fetched {
+                feed: Feed::Issues(crate::issues::Tracker::GitHub),
+                rows: Ok(Rows::Issues(vec![crate::issues::tests::issue(
                     "api#1",
                     &["ready-for-agent"],
                     false,
-                )]),
+                )])),
                 log: Vec::new(),
             },
         );
@@ -2361,50 +1912,161 @@ pub mod tests {
     }
 
     #[test]
-    fn selecting_a_carnet_reads_its_readme_once() {
+    fn a_carnets_readme_is_read_when_selected_and_again_once_written() {
         let mut model = with_carnets(model());
         press(&mut model, "G\n");
-        let effects = press(&mut model, "j");
         let path = PathBuf::from("/data/2026-10-02-ideas");
+        let any_reads = |effects: &[Effect]| {
+            (effects.iter())
+                .filter(|effect| matches!(effect, Effect::Run(Job::Readme(_))))
+                .count()
+        };
+        let reads = |effects: &[Effect]| {
+            (effects.iter())
+                .filter(|effect| matches!(effect, Effect::Run(Job::Readme(read)) if *read == path))
+                .count()
+        };
+        let effects = press(&mut model, "j");
         assert!(
             effects.contains(&Effect::Run(Job::Readme(path.clone()))),
             "{effects:?}"
         );
-        update(&mut model, Action::Readme(path, Some("# ideas".into())));
-        let effects = press(&mut model, "jk");
-        assert!(
-            !effects.iter().any(|effect| matches!(effect, Effect::Run(Job::Readme(path)) if path.ends_with("2026-10-02-ideas"))),
-            "{effects:?}"
+        let readme = |text: &str, len| Readme {
+            path: path.clone(),
+            stamp: Some(Stamp {
+                len,
+                modified: None,
+            }),
+            text: Some(text.into()),
+        };
+        let refresh = |model: &mut Model, len| {
+            let mut snapshot = model.snapshot.clone();
+            let listed = snapshot.work.iter_mut().chain(&mut snapshot.carnets);
+            for work in listed.filter(|work| work.path == path) {
+                if let WorkKind::Carnet { readme, .. } = &mut work.kind {
+                    *readme = Some(Stamp {
+                        len,
+                        modified: None,
+                    });
+                }
+            }
+            model.schedule.finish_all();
+            let log = Vec::new();
+            let snapshot = Ok(snapshot);
+            let action = Action::Loaded {
+                snapshot,
+                full: false,
+                log,
+            };
+            update(model, action)
+        };
+        assert_eq!(reads(&refresh(&mut model, 1)), 1);
+        update(&mut model, Action::Readme(readme("# ideas", 1)));
+        assert_eq!(reads(&press(&mut model, "jk")), 0, "read once");
+        assert_eq!(reads(&refresh(&mut model, 1)), 0, "unchanged");
+        assert_eq!(reads(&refresh(&mut model, 2)), 1, "written");
+        assert!(model.readme.is_some(), "shown until read again");
+        press(&mut model, "j");
+        update(&mut model, Action::Readme(readme("# late", 2)));
+        assert_ne!(
+            model
+                .readme
+                .as_ref()
+                .and_then(|readme| readme.text.as_deref()),
+            Some("# late"),
+            "a read for a carnet since left is dropped"
         );
         press(&mut model, "gg");
-        assert!(
-            !press(&mut model, "j")
-                .iter()
-                .any(|effect| matches!(effect, Effect::Run(Job::Readme(_)))),
+        assert_eq!(
+            any_reads(&press(&mut model, "j")),
+            0,
             "a worktree has no README"
         );
     }
 
     #[test]
-    fn removing_a_workspace_names_the_carnets_it_forgets() {
+    fn fast_refreshes_relist_the_selected_carnets_commits_and_show_them_meanwhile() {
         let mut model = with_carnets(model());
-        press(&mut model, "1jd");
-        let Some(Modal::Confirm { lines, job, .. }) = &model.modal else {
-            panic!("no confirmation");
-        };
+        press(&mut model, "G\n");
+        let effects = press(&mut model, "j");
+        let path = PathBuf::from("/data/2026-10-02-ideas");
         assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("/data/2026-08-01-hidden")),
-            "a hidden carnet is named: {lines:?}"
+            effects.contains(&Effect::Run(Job::Commits(path.clone()))),
+            "{effects:?}"
+        );
+        let commits = vec!["abc1234 Note the first lead".to_owned()];
+        update(&mut model, Action::Commits(path.clone(), commits.clone()));
+        model.schedule.finish_all();
+        let snapshot = Ok(model.snapshot.clone());
+        let log = Vec::new();
+        let effects = update(
+            &mut model,
+            Action::Loaded {
+                snapshot,
+                full: false,
+                log,
+            },
+        );
+        assert!(
+            effects.contains(&Effect::Run(Job::Commits(path.clone()))),
+            "{effects:?}"
+        );
+        assert_eq!(model.commits.get(&path), Some(&commits));
+    }
+
+    #[test]
+    fn a_carnet_listing_an_issues_key_is_its_linked_work() {
+        let mut model = with_issues(with_carnets(model()));
+        let mut linked = carnet("2026-07-01-notes", "", "side");
+        if let WorkKind::Carnet {
+            tickets, closed, ..
+        } = &mut linked.kind
+        {
+            *tickets = vec!["XYZ-1".into(), "api#4".into()];
+            *closed = true;
+        }
+        model.snapshot.carnets.push(linked);
+        let issue = |key: &str| {
+            let issue = model.issues.iter().find(|issue| issue.key == key);
+            issue.unwrap().clone()
+        };
+        let titles = |issue| {
+            (model.issue_work(&issue).iter())
+                .map(|work| work.title())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            titles(issue("api#4")),
+            ["2026-07-01-notes"],
+            "a closed carnet, by a later ticket"
         );
         assert_eq!(
-            *job,
-            Job::RemoveWorkspace {
-                name: "side".into(),
-                carnets: vec!["/data/2026-08-01-hidden".into()]
-            }
+            titles(issue("ABC-1")),
+            ["api:ABC-1-login", "web:ABC-1-form", "2026-10-01-ABC-1-logs"],
+            "an open carnet once, after the worktrees"
         );
+    }
+
+    #[test]
+    fn c_closes_the_selected_carnets() {
+        let mut model = with_carnets(model());
+        press(&mut model, "G");
+        assert_eq!(
+            jobs(press(&mut model, "c")),
+            [Job::CloseCarnet(vec![
+                "/data/2026-10-02-ideas".into(),
+                "/data/2026-09-20-old".into()
+            ])],
+            "every carnet of the group"
+        );
+        press(&mut model, "gg");
+        assert_eq!(
+            jobs(press(&mut model, "c")),
+            [Job::CloseCarnet(vec!["/data/2026-10-01-ABC-1-logs".into()])],
+            "only the carnets of a group with worktrees"
+        );
+        press(&mut model, "j");
+        assert!(jobs(press(&mut model, "c")).is_empty(), "a worktree");
     }
 
     #[test]
@@ -2451,30 +2113,105 @@ pub mod tests {
     }
 
     #[test]
-    fn removing_a_carnet_forgets_it_and_keeps_its_folder() {
+    fn carnets_are_never_removed() {
         let mut model = with_carnets(model());
         press(&mut model, "Gd");
-        let Some(Modal::Confirm { lines, .. }) = &model.modal else {
-            panic!("no confirmation");
-        };
+        assert!(model.modal.is_none());
         assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("2026-10-02-ideas") && line.contains("stays on disk")),
-            "{lines:?}"
+            model
+                .log
+                .last()
+                .unwrap()
+                .command
+                .contains("carnets are never removed")
+        );
+    }
+
+    fn carnet_titles(model: &Model) -> Vec<String> {
+        model
+            .carnet_rows()
+            .iter()
+            .map(|work| work.title())
+            .collect()
+    }
+
+    #[test]
+    fn the_carnets_sub_tab_lists_every_carnet_while_carnets_are_on() {
+        let mut model = model();
+        press(&mut model, "]");
+        assert_eq!(model.active(), List::Work, "no sub-tab without carnets");
+        let mut model = with_carnets(model);
+        press(&mut model, "]");
+        assert_eq!(model.active(), List::Carnets);
+        assert_eq!(
+            carnet_titles(&model),
+            [
+                "2026-10-02-ideas",
+                "2026-10-01-ABC-1-logs",
+                "2026-09-20-old",
+                "2026-08-01-done"
+            ]
+        );
+        press(&mut model, "/done\n");
+        assert_eq!(carnet_titles(&model), ["2026-08-01-done"]);
+    }
+
+    #[test]
+    fn space_on_a_closed_carnet_opens_it_and_leaves_it_closed() {
+        let mut model = with_carnets(model());
+        press(&mut model, "]G");
+        assert_eq!(
+            jobs(press(&mut model, " ")),
+            [Job::Open(vec!["/data/2026-08-01-done".into()])]
+        );
+    }
+
+    #[test]
+    fn c_closes_an_open_carnet_and_reopens_a_closed_one() {
+        let mut model = with_carnets(model());
+        press(&mut model, "]");
+        assert_eq!(
+            jobs(press(&mut model, "c")),
+            [Job::CloseCarnet(vec!["/data/2026-10-02-ideas".into()])]
+        );
+        press(&mut model, "G");
+        assert_eq!(
+            jobs(press(&mut model, "c")),
+            [Job::ReopenCarnet(vec!["/data/2026-08-01-done".into()])]
+        );
+    }
+
+    #[test]
+    fn s_searches_inside_carnets_and_esc_clears_the_search() {
+        let mut model = with_carnets(model());
+        assert!(jobs(press(&mut model, "s")).is_empty(), "Carnets only");
+        assert!(model.modal.is_none());
+        press(&mut model, "]s");
+        assert!(matches!(&model.modal, Some(Modal::Prompt { .. })));
+        assert_eq!(
+            jobs(press(&mut model, "bug\n")),
+            [Job::SearchCarnets("bug".into())]
+        );
+        let path = PathBuf::from("/data/2026-09-20-old");
+        let effects = update(
+            &mut model,
+            Action::Searched {
+                text: "bug".into(),
+                hits: Some([(path.clone(), vec!["README.md:3:a bug".into()])].into()),
+                log: Vec::new(),
+            },
+        );
+        assert_eq!(carnet_titles(&model), ["2026-09-20-old"]);
+        assert!(
+            effects.contains(&Effect::Run(Job::Commits(path))),
+            "{effects:?}"
         );
         assert_eq!(
-            jobs(press(&mut model, "y")),
-            [Job::Remove(vec![
-                Removal {
-                    path: "/data/2026-10-02-ideas".into(),
-                    worktree: None,
-                },
-                Removal {
-                    path: "/data/2026-09-20-old".into(),
-                    worktree: None,
-                },
-            ])]
+            model.carnet_hits(),
+            Some(&vec!["README.md:3:a bug".to_owned()])
         );
+        press(&mut model, "\x1b");
+        assert_eq!(carnet_titles(&model).len(), 4);
+        assert!(model.search.is_none());
     }
 }

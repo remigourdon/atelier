@@ -7,11 +7,11 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use super::app::{
-    Focus, KEYMAP, List, Model, Panel, Popup, Row, Screen, Source, Work, WorkKind, popup_hints,
+    Cmd, Focus, KEYMAP, List, Model, Panel, Popup, Screen, Source, Work, popup_hints,
 };
+use super::lists;
 use super::widgets;
 use crate::config::Icons;
-use crate::issues::State;
 
 /// Below this width the main view is hidden until `+`.
 pub const NARROW: u16 = 100;
@@ -83,7 +83,7 @@ impl Glyphs {
 }
 
 /// A glyph and its separating space, or nothing for an empty glyph.
-fn icon(glyph: &'static str, style: Style) -> Option<Span<'static>> {
+pub(super) fn icon(glyph: &'static str, style: Style) -> Option<Span<'static>> {
     (!glyph.is_empty()).then(|| Span::styled(format!("{glyph} "), style))
 }
 
@@ -226,7 +226,7 @@ fn render_panel(frame: &mut Frame, model: &Model, palette: &Palette, panel: Pane
             title.push(tab(model.title(other), other == list));
         }
     }
-    if panel == Panel::Work
+    if list == List::Work
         && let Some(workspace) = model.workspace()
     {
         title.push(Span::styled(
@@ -252,24 +252,9 @@ fn render_panel(frame: &mut Frame, model: &Model, palette: &Palette, panel: Pane
     let block = block(Line::from(title), focused, palette);
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
-    let rows = rows(model, palette, list);
+    let rows = lists::of(list).rows(model, palette, list);
     if rows.is_empty() {
-        let loading = match list {
-            List::ToReview | List::Mine => {
-                (model.loading.keys()).any(|source| matches!(source, Source::Reviews(_)))
-            }
-            List::Section(_) => {
-                (model.loading.keys()).any(|source| matches!(source, Source::Issues(_)))
-            }
-            _ => !model.loaded,
-        };
-        let empty = if loading {
-            "loading…"
-        } else if matches!(list, List::Section(_)) && model.tracker_config.scopes().is_empty() {
-            "no [tracker] configured"
-        } else {
-            "nothing here"
-        };
+        let empty = lists::of(list).empty(model, list);
         frame.render_widget(
             Paragraph::new(Span::styled(empty, Style::new().fg(palette.dim))),
             inner,
@@ -300,421 +285,35 @@ fn render_panel(frame: &mut Frame, model: &Model, palette: &Palette, panel: Pane
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn rows<'a>(model: &'a Model, palette: &Palette, list: List) -> Vec<Line<'a>> {
-    let dim = Style::new().fg(palette.dim);
-    match list {
-        List::Workspaces => model
-            .workspaces()
-            .into_iter()
-            .map(|name| {
-                let open = model
-                    .snapshot
-                    .work
-                    .iter()
-                    .filter(|work| work.workspace == *name && work.tab)
-                    .count();
-                let mut spans: Vec<Span> =
-                    icon(palette.glyphs.workspace, dim).into_iter().collect();
-                spans.push(Span::raw(name.as_str()));
-                if model.snapshot.here.as_ref() == Some(name) {
-                    spans.push(Span::styled(" (here)", Style::new().fg(palette.accent)));
-                }
-                if open > 0 {
-                    spans.push(Span::styled(format!(" {open} open"), dim));
-                }
-                Line::from(spans)
-            })
-            .collect(),
-        List::Repos => model
-            .repos()
-            .into_iter()
-            .map(|repo| {
-                let mut spans: Vec<Span> = icon(palette.glyphs.repo, dim).into_iter().collect();
-                spans.push(Span::raw(repo.name()));
-                spans.push(Span::styled(format!(" → {}", repo.default_workspace), dim));
-                Line::from(spans)
-            })
-            .collect(),
-        List::Work => model
-            .work_rows()
-            .into_iter()
-            .map(|line| match line {
-                Row::Group {
-                    name,
-                    members,
-                    folded,
-                    ..
-                } => {
-                    let open = members
-                        .iter()
-                        .filter(|&&index| model.snapshot.work[index].tab)
-                        .count();
-                    Line::from(vec![
-                        Span::styled(
-                            format!(
-                                "{} {}",
-                                if folded {
-                                    palette.glyphs.folded
-                                } else {
-                                    palette.glyphs.unfolded
-                                },
-                                group_name(&name)
-                            ),
-                            Style::new().fg(palette.info).bold(),
-                        ),
-                        Span::styled(format!(" {} · {open} open", members.len()), dim),
-                    ])
-                }
-                Row::Item(index) => {
-                    let work = &model.snapshot.work[index];
-                    let glyphs = &palette.glyphs;
-                    let indent = if work.group.is_empty() && !work.in_carnets_group() {
-                        ""
-                    } else {
-                        "  "
-                    };
-                    let marker = if model.pulling.contains(work.path()) {
-                        let frame = glyphs.spinner[model.frame % glyphs.spinner.len()];
-                        Span::styled(format!("{frame} "), Style::new().fg(palette.info))
-                    } else if work.tab {
-                        Span::styled(format!("{} ", glyphs.open), Style::new().fg(palette.ok))
-                    } else {
-                        Span::styled(format!("{} ", glyphs.closed), dim)
-                    };
-                    let mut spans = vec![Span::raw(indent), marker];
-                    let glyph = if work.is_carnet() {
-                        glyphs.carnet
-                    } else {
-                        glyphs.worktree
-                    };
-                    spans.extend(icon(glyph, dim));
-                    spans.push(Span::raw(work.title()));
-                    let tree = work.tree();
-                    if let Some(tree) = tree.filter(|tree| !tree.symbols.is_empty()) {
-                        let status = if tree.dirty {
-                            Style::new().fg(palette.warn)
-                        } else {
-                            dim
-                        };
-                        spans.push(Span::styled(format!(" {}", tree.symbols), status));
-                    }
-                    if let Some((_, behind)) =
-                        (tree.and_then(|tree| tree.upstream)).filter(|&(_, behind)| behind > 0)
-                    {
-                        spans.push(Span::styled(
-                            format!(" ↓{behind}"),
-                            Style::new().fg(palette.warn),
-                        ));
-                    }
-                    Line::from(spans)
-                }
-            })
-            .collect(),
-        List::ToReview | List::Mine => model
-            .reviews(list)
-            .into_iter()
-            .map(|review| {
-                let glyphs = &palette.glyphs;
-                let marker = match model.review_work(review) {
-                    Some(work) if work.tab => {
-                        Span::styled(format!("{} ", glyphs.open), Style::new().fg(palette.ok))
-                    }
-                    Some(_) => Span::styled(format!("{} ", glyphs.closed), dim),
-                    None => Span::raw("  "),
-                };
-                let mut spans = vec![marker];
-                spans.extend(icon(glyphs.review, dim));
-                spans.push(Span::styled(
-                    format!(
-                        "{}{} ",
-                        model.review_project(review),
-                        review.provider.reference(review.number)
-                    ),
-                    dim,
-                ));
-                spans.push(Span::raw(review.title.as_str()));
-                if review.draft {
-                    spans.push(Span::styled(" draft", Style::new().fg(palette.warn)));
-                }
-                if list == List::ToReview {
-                    spans.push(Span::styled(format!(" @{}", review.author), dim));
-                }
-                Line::from(spans)
-            })
-            .collect(),
-        List::Section(_) => model
-            .issues(list)
-            .into_iter()
-            .map(|issue| {
-                let glyphs = &palette.glyphs;
-                let work = model.issue_work(issue);
-                let marker = if work.iter().any(|work| work.tab) {
-                    Span::styled(format!("{} ", glyphs.open), Style::new().fg(palette.ok))
-                } else if !work.is_empty() {
-                    Span::styled(format!("{} ", glyphs.closed), dim)
-                } else {
-                    Span::raw("  ")
-                };
-                let mut spans = vec![marker];
-                spans.extend(icon(glyphs.issue, dim));
-                spans.push(Span::styled(format!("{} ", issue.key), dim));
-                let state = match issue.state {
-                    State::Todo => None,
-                    State::InProgress => Some(palette.info),
-                    State::Done => Some(palette.ok),
-                };
-                if let Some(color) = state {
-                    let label = format!("{} ", issue.state.label().to_lowercase());
-                    spans.push(Span::styled(label, Style::new().fg(color)));
-                }
-                spans.push(Span::raw(issue.title.as_str()));
-                if issue.blocked {
-                    spans.push(Span::styled(" blocked", Style::new().fg(palette.error)));
-                }
-                for label in &issue.labels {
-                    spans.push(Span::styled(
-                        format!(" {label}"),
-                        Style::new().fg(palette.info),
-                    ));
-                }
-                Line::from(spans)
-            })
-            .collect(),
-    }
-}
-
-/// The key/value detail of the selection, then its recent commits.
-fn detail(model: &Model) -> Vec<(String, String)> {
-    let pair = |key: &str, value: String| (key.to_owned(), value);
-    match model.active() {
-        List::Workspaces => {
-            let Some(name) = model.workspace() else {
-                return Vec::new();
-            };
-            let work: Vec<_> = model
-                .snapshot
-                .work
-                .iter()
-                .filter(|work| work.workspace == name)
-                .collect();
-            let carnets = work.iter().filter(|work| work.is_carnet()).count();
-            let repos: Vec<String> = model
-                .snapshot
-                .repos
-                .iter()
-                .filter(|repo| repo.default_workspace == name)
-                .map(|repo| repo.name())
-                .collect();
-            let mut pairs = vec![
-                pair("Workspace", name.to_owned()),
-                pair(
-                    "Session",
-                    if model.snapshot.here.as_deref() == Some(name) {
-                        "current".into()
-                    } else {
-                        "other".into()
-                    },
-                ),
-                pair("Worktrees", (work.len() - carnets).to_string()),
-            ];
-            if model.carnets {
-                pairs.push(pair("Carnets", carnets.to_string()));
-            }
-            pairs.extend([
-                pair(
-                    "Open tabs",
-                    work.iter().filter(|work| work.tab).count().to_string(),
-                ),
-                pair("Default for", repos.join(", ")),
-            ]);
-            pairs
-        }
-        List::Repos => {
-            let Some(repo) = model.repo() else {
-                return Vec::new();
-            };
-            let count = model
-                .snapshot
-                .work
-                .iter()
-                .filter(|work| work.repo() == Some(&repo.path))
-                .count();
-            vec![
-                pair("Repo", repo.name()),
-                pair("Alias", repo.alias.clone().unwrap_or_default()),
-                pair("Path", repo.path.display().to_string()),
-                pair("Workspace", repo.default_workspace.clone()),
-                pair("Worktrees", count.to_string()),
-                pair(
-                    "Forge",
-                    model
-                        .snapshot
-                        .forges
-                        .get(&repo.path)
-                        .map(|forge| forge.url.clone())
-                        .unwrap_or_default(),
-                ),
-            ]
-        }
-        List::Work => match model.work_row() {
-            Some(Row::Group { name, members, .. }) => {
-                let mut pairs = vec![pair("Group", group_name(&name).to_owned())];
-                pairs.extend(members.iter().map(|&index| {
-                    let work = &model.snapshot.work[index];
-                    pair(kind(work), work.title())
-                }));
-                pairs
-            }
-            Some(Row::Item(index)) => {
-                let work = &model.snapshot.work[index];
-                let WorkKind::Worktree {
-                    repo_name, tree, ..
-                } = &work.kind
-                else {
-                    return vec![
-                        pair("Carnet", work.title()),
-                        pair("Path", work.path.display().to_string()),
-                        pair("Workspace", work.workspace.clone()),
-                        pair("Group", work.group.clone()),
-                        pair("Tab", if work.tab { "open" } else { "closed" }.into()),
-                    ];
-                };
-                vec![
-                    pair("Repo", repo_name.clone()),
-                    pair("Branch", work.branch()),
-                    pair("Path", tree.path.display().to_string()),
-                    pair("Workspace", work.workspace.clone()),
-                    pair("Group", work.group.clone()),
-                    pair("Tab", if work.tab { "open" } else { "closed" }.into()),
-                    pair(
-                        "Status",
-                        if tree.dirty {
-                            format!("dirty +{} -{}", tree.diff.0, tree.diff.1)
-                        } else {
-                            "clean".into()
-                        },
-                    ),
-                    pair(
-                        "Upstream",
-                        tree.upstream
-                            .map(|(ahead, behind)| format!("↑{ahead} ↓{behind}"))
-                            .unwrap_or_else(|| "none".into()),
-                    ),
-                    pair(
-                        "Commit",
-                        format!(
-                            "{} {} ({})",
-                            tree.short_sha, tree.subject, tree.committed_at
-                        ),
-                    ),
-                ]
-            }
-            None => Vec::new(),
-        },
-        List::ToReview | List::Mine => {
-            let Some(review) = model.review() else {
-                return Vec::new();
-            };
-            let repo = match model.project_repo(&review.project_url) {
-                Some(repo) => repo.name(),
-                None => format!("{} (not registered)", review.project),
-            };
-            vec![
-                pair(
-                    "Review",
-                    format!(
-                        "{}{}",
-                        review.project,
-                        review.provider.reference(review.number)
-                    ),
-                ),
-                pair("Title", review.title.clone()),
-                pair("Author", review.author.clone()),
-                pair("Branch", format!("{} → {}", review.branch, review.base)),
-                pair("Status", if review.draft { "draft" } else { "open" }.into()),
-                pair("Updated", review.updated_at.clone()),
-                pair("URL", review.url.clone()),
-                pair("Repo", repo),
-                pair(
-                    "Worktree",
-                    model.review_work(review).map_or_else(
-                        || "none: Space checks it out".into(),
-                        |work| work.path().display().to_string(),
-                    ),
-                ),
-            ]
-        }
-        List::Section(_) => {
-            let Some(issue) = model.issue() else {
-                return Vec::new();
-            };
-            let mut pairs = vec![
-                pair("Issue", issue.key.clone()),
-                pair("Title", issue.title.clone()),
-                pair("State", issue.state.label().into()),
-                pair("Status", issue.status.clone()),
-                pair("Blocked", if issue.blocked { "yes" } else { "no" }.into()),
-                pair("Labels", issue.labels.join(", ")),
-                pair("Assignees", issue.assignees.join(", ")),
-                pair("Updated", issue.updated_at.clone()),
-                pair("URL", issue.url.clone().unwrap_or_default()),
-                pair("Project", issue.project.clone()),
-            ];
-            for (key, value) in [("Type", &issue.kind), ("Priority", &issue.priority)] {
-                pairs.extend(value.clone().map(|value| pair(key, value)));
-            }
-            let work = model.issue_work(issue);
-            if work.is_empty() {
-                pairs.push(pair("Worktree", "none: Space or n creates one".into()));
-            }
-            pairs.extend(work.into_iter().map(|work| {
-                let tab = if work.tab { "open" } else { "closed" };
-                pair(
-                    kind(work),
-                    format!("{} · {} · tab {tab}", work.title(), work.workspace),
-                )
-            }));
-            pairs
-        }
-    }
-}
-
-/// What the main view calls an item.
-fn kind(work: &Work) -> &'static str {
-    if work.is_carnet() {
-        "Carnet"
-    } else {
-        "Worktree"
-    }
+/// The active list's selected item, whose README and commits the main view shows.
+fn selected(model: &Model) -> Option<&Work> {
+    let list = model.active();
+    lists::of(list).item(model, list)
 }
 
 /// The selected carnet's README, rendered once read.
 fn readme(model: &Model) -> Option<Text<'_>> {
-    match (model.active(), model.work_row()?) {
-        (List::Work, Row::Item(index)) => {
-            let readme = model.readmes.get(model.snapshot.work[index].path())?;
-            Some(tui_markdown::from_str(readme.as_deref()?))
-        }
-        _ => None,
-    }
-}
-
-/// How a group row is named; the `Carnets` group has no group name.
-pub fn group_name(name: &str) -> &str {
-    if name.is_empty() { "Carnets" } else { name }
+    let path = selected(model)?.path();
+    let readme = (model.readme.as_ref()).filter(|readme| readme.path == *path)?;
+    Some(tui_markdown::from_str(crate::carnet::body(
+        readme.text.as_deref()?,
+    )))
 }
 
 /// The selected worktree's recent commits, once loaded.
 fn commits(model: &Model) -> Option<&Vec<String>> {
-    match (model.active(), model.work_row()?) {
-        (List::Work, Row::Item(index)) => model.commits.get(model.snapshot.work[index].path()),
-        _ => None,
-    }
+    model.commits.get(selected(model)?.path())
 }
 
 /// How many lines the main view holds, so scrolling stops at its end.
+fn detail(model: &Model) -> Vec<(String, String)> {
+    let list = model.active();
+    lists::of(list).detail(model, list)
+}
+
 pub fn main_len(model: &Model) -> usize {
     detail(model).len()
+        + model.carnet_hits().map_or(0, |hits| hits.len() + 2)
         + readme(model).map_or(0, |readme| readme.lines.len() + 1)
         + commits(model).map_or(0, |commits| commits.len() + 2)
 }
@@ -733,6 +332,14 @@ fn render_main(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect) 
             ])
         })
         .collect();
+    if let Some(hits) = model.carnet_hits() {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            "Matches",
+            Style::new().fg(palette.accent).bold(),
+        ));
+        lines.extend(hits.iter().map(|hit| Line::raw(hit.as_str())));
+    }
     if let Some(readme) = readme(model) {
         lines.push(Line::raw(""));
         lines.extend(readme.lines);
@@ -787,6 +394,7 @@ fn render_hints(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect)
         for binding in KEYMAP
             .iter()
             .filter(|binding| binding.hint.contains(&active.kind()))
+            .filter(|binding| model.carnets || binding.cmd != Cmd::ToggleCarnet)
         {
             if !spans.is_empty() {
                 spans.push(Span::styled(" · ", Style::new().fg(palette.dim)));
@@ -795,7 +403,7 @@ fn render_hints(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect)
             spans.push(Span::raw(format!(" {}", short_help(binding.help))));
         }
     }
-    let loading: Vec<&str> = model.loading.keys().map(|source| source.label()).collect();
+    let loading: Vec<&str> = model.schedule.loading().map(Source::label).collect();
     let [left, right] = Layout::horizontal([
         Constraint::Fill(1),
         Constraint::Length(if loading.is_empty() {

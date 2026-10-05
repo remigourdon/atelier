@@ -28,7 +28,7 @@ const MIGRATIONS: &[&str] = &["
         kind TEXT NOT NULL CHECK (kind IN ('worktree', 'carnet')),
         repo TEXT REFERENCES repos(path),
         group_key TEXT NOT NULL DEFAULT '',
-        workspace TEXT NOT NULL DEFAULT 'vrac' REFERENCES workspaces(name)
+        workspace TEXT NOT NULL REFERENCES workspaces(name)
     );
     CREATE TABLE IF NOT EXISTS tabs (
         path TEXT PRIMARY KEY REFERENCES items(path),
@@ -153,9 +153,19 @@ impl State {
         })
     }
 
+    /// Opens a database that `open` already migrated, as each TUI job does.
+    pub fn connect(path: &Path, default_workspace: &str) -> Result<Self> {
+        let db = Connection::open(path)?;
+        configure(&db)?;
+        Ok(Self {
+            db,
+            default_workspace: default_workspace.to_owned(),
+        })
+    }
+
     pub fn from_connection(mut db: Connection, default_workspace: &str) -> Result<Self> {
-        db.busy_timeout(std::time::Duration::from_secs(5))?;
-        db.pragma_update(None, "foreign_keys", "ON")?;
+        configure(&db)?;
+        // WAL persists in the file, so `connect` needs not set it again.
         db.pragma_update(None, "journal_mode", "WAL")?;
         migrate(&mut db)?;
         db.execute(
@@ -181,7 +191,15 @@ impl State {
     }
 
     pub fn has_workspace(&self, name: &str) -> Result<bool> {
-        Ok(self.workspaces()?.iter().any(|known| known == name))
+        Ok(self
+            .db
+            .query_row(
+                "SELECT 1 FROM workspaces WHERE name = ?",
+                [name],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
     }
 
     pub fn require_workspace(&self, name: &str) -> Result<()> {
@@ -203,9 +221,8 @@ impl State {
         Ok(())
     }
 
-    /// Removes an unused workspace, forgetting the carnets in `forget` and keeping their
-    /// folders. It fails while it owns any other carnet, so none is forgotten unseen.
-    pub fn remove_workspace(&self, name: &str, forget: &[PathBuf]) -> Result<()> {
+    /// Removes a workspace that owns no worktree, moving its carnets to the default workspace.
+    pub fn remove_workspace(&self, name: &str) -> Result<()> {
         if name == self.default_workspace {
             bail!("{name} is the default workspace and cannot be removed");
         }
@@ -226,48 +243,33 @@ impl State {
         if used("SELECT 1 FROM items WHERE workspace = ? AND kind <> 'carnet'")? {
             bail!("{name} owns worktrees");
         }
-        let carnets = self.workspace_carnets(name)?;
-        let unlisted: Vec<String> = (carnets.iter())
-            .filter(|path| !forget.contains(path))
-            .map(|path| path.display().to_string())
-            .collect();
-        if !unlisted.is_empty() {
-            bail!("{name} owns carnets: {}", unlisted.join(", "));
-        }
         let transaction = self.db.unchecked_transaction()?;
-        for path in &carnets {
-            transaction.execute("DELETE FROM items WHERE path = ?", [text(path)])?;
-        }
+        transaction.execute(
+            "UPDATE items SET workspace = ? WHERE workspace = ?",
+            [&self.default_workspace, name],
+        )?;
         transaction.execute("DELETE FROM workspaces WHERE name = ?", [name])?;
         transaction.commit()?;
         Ok(())
-    }
-
-    /// The carnets `workspace` owns, by path.
-    pub fn workspace_carnets(&self, workspace: &str) -> Result<Vec<PathBuf>> {
-        Ok((self.carnets()?.into_iter())
-            .filter(|carnet| carnet.workspace == workspace)
-            .map(|carnet| carnet.path)
-            .collect())
     }
 
     pub fn repos(&self) -> Result<Vec<Repo>> {
         let mut statement = self.db.prepare(
             "SELECT path, alias, default_workspace FROM repos ORDER BY last_used DESC, path",
         )?;
-        let repos = statement.query_map([], |row| {
-            Ok(Repo {
-                path: path_column(row, 0)?,
-                alias: row.get(1)?,
-                default_workspace: row.get(2)?,
-            })
-        })?;
+        let repos = statement.query_map([], repo_row)?;
         Ok(repos.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn repo_by_path(&self, path: impl AsRef<Path>) -> Result<Option<Repo>> {
-        let path = path.as_ref();
-        Ok(self.repos()?.into_iter().find(|repo| repo.path == path))
+        Ok(self
+            .db
+            .query_row(
+                "SELECT path, alias, default_workspace FROM repos WHERE path = ?",
+                [text(path.as_ref())],
+                repo_row,
+            )
+            .optional()?)
     }
 
     /// The one repo whose path, alias or directory name is `name`.
@@ -355,9 +357,9 @@ impl State {
     }
 
     /// Forgets a repo with its items and tabs.
-    pub fn remove_repo(&mut self, path: impl AsRef<Path>) -> Result<()> {
+    pub fn remove_repo(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = text(path.as_ref());
-        let tx = self.db.transaction()?;
+        let tx = self.db.unchecked_transaction()?;
         tx.execute(
             "DELETE FROM tabs WHERE path IN (SELECT path FROM items WHERE repo = ?)",
             [&path],
@@ -396,17 +398,9 @@ impl State {
         Ok(self
             .db
             .query_row(
-                "SELECT path, kind, repo, group_key, workspace FROM items WHERE path = ?",
+                &format!("SELECT {ITEM_COLUMNS} FROM items WHERE path = ?"),
                 [text(path.as_ref())],
-                |row| {
-                    Ok(Item {
-                        path: path_column(row, 0)?,
-                        kind: ItemKind::parse(&row.get::<_, String>(1)?)?,
-                        repo: row.get::<_, Option<String>>(2)?.map(PathBuf::from),
-                        group: row.get(3)?,
-                        workspace: row.get(4)?,
-                    })
-                },
+                item_row,
             )
             .optional()?)
     }
@@ -417,23 +411,17 @@ impl State {
             .ok_or_else(|| eyre!("unknown item: {}", path.display()))
     }
 
-    pub fn items(&self) -> Result<Vec<Item>> {
-        let mut statement = self.db.prepare("SELECT path FROM items ORDER BY path")?;
-        let paths: Vec<PathBuf> = statement
-            .query_map([], |row| path_column(row, 0))?
-            .collect::<rusqlite::Result<_>>()?;
-        paths.iter().map(|path| self.require_item(path)).collect()
+    /// The items matching `filter`, an SQL condition, by path.
+    fn items_where(&self, filter: &str, params: impl rusqlite::Params) -> Result<Vec<Item>> {
+        let mut statement = self.db.prepare(&format!(
+            "SELECT {ITEM_COLUMNS} FROM items WHERE {filter} ORDER BY path"
+        ))?;
+        let items = statement.query_map(params, item_row)?;
+        Ok(items.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// The recorded carnets, by path.
-    pub fn carnets(&self) -> Result<Vec<Item>> {
-        let mut statement = self
-            .db
-            .prepare("SELECT path FROM items WHERE kind = 'carnet' ORDER BY path")?;
-        let paths: Vec<PathBuf> = statement
-            .query_map([], |row| path_column(row, 0))?
-            .collect::<rusqlite::Result<_>>()?;
-        paths.iter().map(|path| self.require_item(path)).collect()
+    pub fn items(&self) -> Result<Vec<Item>> {
+        self.items_where("1", [])
     }
 
     /// Today's local date, `YYYY-MM-DD`.
@@ -466,13 +454,7 @@ impl State {
     }
 
     pub fn repo_items(&self, repo: impl AsRef<Path>) -> Result<Vec<Item>> {
-        let mut statement = self
-            .db
-            .prepare("SELECT path FROM items WHERE repo = ? ORDER BY path")?;
-        let paths: Vec<PathBuf> = statement
-            .query_map([text(repo.as_ref())], |row| path_column(row, 0))?
-            .collect::<rusqlite::Result<_>>()?;
-        paths.iter().map(|path| self.require_item(path)).collect()
+        self.items_where("repo = ?", [text(repo.as_ref())])
     }
 
     pub fn remove_item(&self, path: impl AsRef<Path>) -> Result<()> {
@@ -488,20 +470,19 @@ impl State {
         let mut statement = self
             .db
             .prepare("SELECT path, session, tab_id, pane_id FROM tabs ORDER BY path")?;
-        let tabs = statement.query_map([], |row| {
-            Ok(Tab {
-                path: path_column(row, 0)?,
-                session: row.get(1)?,
-                tab_id: row.get::<_, i64>(2)? as u64,
-                pane_id: row.get(3)?,
-            })
-        })?;
+        let tabs = statement.query_map([], tab_row)?;
         Ok(tabs.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn tab(&self, path: impl AsRef<Path>) -> Result<Option<Tab>> {
-        let path = path.as_ref();
-        Ok(self.tabs()?.into_iter().find(|tab| tab.path == path))
+        Ok(self
+            .db
+            .query_row(
+                "SELECT path, session, tab_id, pane_id FROM tabs WHERE path = ?",
+                [text(path.as_ref())],
+                tab_row,
+            )
+            .optional()?)
     }
 
     pub fn set_tab(&self, tab: &Tab) -> Result<()> {
@@ -566,6 +547,43 @@ impl State {
             Err(err) => (cached(None).unwrap_or_default(), Some(err)),
         }
     }
+}
+
+/// The columns `item_row` reads, in order.
+const ITEM_COLUMNS: &str = "path, kind, repo, group_key, workspace";
+
+fn item_row(row: &Row) -> rusqlite::Result<Item> {
+    Ok(Item {
+        path: path_column(row, 0)?,
+        kind: ItemKind::parse(&row.get::<_, String>(1)?)?,
+        repo: row.get::<_, Option<String>>(2)?.map(PathBuf::from),
+        group: row.get(3)?,
+        workspace: row.get(4)?,
+    })
+}
+
+fn repo_row(row: &Row) -> rusqlite::Result<Repo> {
+    Ok(Repo {
+        path: path_column(row, 0)?,
+        alias: row.get(1)?,
+        default_workspace: row.get(2)?,
+    })
+}
+
+fn tab_row(row: &Row) -> rusqlite::Result<Tab> {
+    Ok(Tab {
+        path: path_column(row, 0)?,
+        session: row.get(1)?,
+        tab_id: row.get::<_, i64>(2)? as u64,
+        pane_id: row.get(3)?,
+    })
+}
+
+/// The per-connection settings every open needs.
+fn configure(db: &Connection) -> Result<()> {
+    db.busy_timeout(std::time::Duration::from_secs(5))?;
+    db.pragma_update(None, "foreign_keys", "ON")?;
+    Ok(())
 }
 
 fn migrate(db: &mut Connection) -> Result<()> {
@@ -692,10 +710,10 @@ mod tests {
     #[test]
     fn default_workspace_cannot_be_removed() {
         let state = fresh();
-        assert!(state.remove_workspace("default", &[]).is_err());
+        assert!(state.remove_workspace("default").is_err());
         state.add_workspace("w").unwrap();
-        state.remove_workspace("w", &[]).unwrap();
-        assert!(state.remove_workspace("w", &[]).is_err());
+        state.remove_workspace("w").unwrap();
+        assert!(state.remove_workspace("w").is_err());
     }
 
     #[test]
@@ -705,7 +723,7 @@ mod tests {
         state.add_repo("/r", None, "w").unwrap();
         assert!(
             state
-                .remove_workspace("w", &[])
+                .remove_workspace("w")
                 .unwrap_err()
                 .to_string()
                 .contains("repo default")
@@ -716,7 +734,7 @@ mod tests {
             .unwrap();
         assert!(
             state
-                .remove_workspace("w", &[])
+                .remove_workspace("w")
                 .unwrap_err()
                 .to_string()
                 .contains("owns worktrees")
@@ -724,38 +742,15 @@ mod tests {
     }
 
     #[test]
-    fn a_workspace_owning_carnets_is_removed_only_forgetting_them() {
+    fn removing_a_workspace_moves_its_carnets_to_the_default_one() {
         let state = fresh();
         state.add_workspace("w").unwrap();
         state
             .add_item("/c1", ItemKind::Carnet, None, "", "w")
             .unwrap();
-        state
-            .add_item("/c2", ItemKind::Carnet, None, "", "default")
-            .unwrap();
-        assert_eq!(
-            state.workspace_carnets("w").unwrap(),
-            [PathBuf::from("/c1")]
-        );
-        let error = state.remove_workspace("w", &[]).unwrap_err().to_string();
-        assert!(error.contains("owns carnets: /c1"), "{error}");
-        state
-            .add_item("/c3", ItemKind::Carnet, None, "", "w")
-            .unwrap();
-        let error = (state.remove_workspace("w", &["/c1".into()]).unwrap_err()).to_string();
-        assert!(
-            error.contains("owns carnets: /c3"),
-            "one recorded since: {error}"
-        );
-        assert!(
-            state.item("/c1").unwrap().is_some(),
-            "nothing forgotten on failure"
-        );
-        let forget = state.workspace_carnets("w").unwrap();
-        state.remove_workspace("w", &forget).unwrap();
+        state.remove_workspace("w").unwrap();
         assert!(!state.has_workspace("w").unwrap());
-        assert_eq!(state.item("/c1").unwrap(), None);
-        assert!(state.item("/c2").unwrap().is_some());
+        assert_eq!(state.require_item("/c1").unwrap().workspace, "default");
     }
 
     #[test]
@@ -779,7 +774,7 @@ mod tests {
 
     #[test]
     fn removing_a_repo_forgets_its_items_and_tabs() {
-        let mut state = fresh();
+        let state = fresh();
         state.add_repo("/r", None, "default").unwrap();
         state
             .add_item(

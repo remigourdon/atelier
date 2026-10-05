@@ -2,6 +2,8 @@
 
 mod app;
 mod jobs;
+mod lists;
+mod schedule;
 mod update;
 mod view;
 mod widgets;
@@ -124,7 +126,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use super::app::{Action, Model};
+    use super::app::{Action, Feed, Model, Rows, WorkKind};
     use super::update::update;
     use super::*;
     use crate::config::Icons;
@@ -164,7 +166,7 @@ mod tests {
             &mut model,
             Action::Commits(path, vec!["abc1234 Add login (2 hours ago, R)".into()]),
         );
-        model.loading.clear();
+        model.schedule.finish_all();
         model.log.push(crate::process::Logged {
             command: "git -C /src/api pull --ff-only".into(),
             error: None,
@@ -228,9 +230,9 @@ mod tests {
         issues.extend(parse_gh(tests::GH_CLOSED, false).unwrap());
         update(
             &mut model,
-            Action::Issues {
-                tracker: crate::issues::Tracker::GitHub,
-                issues: Ok(issues),
+            Action::Fetched {
+                feed: Feed::Issues(crate::issues::Tracker::GitHub),
+                rows: Ok(Rows::Issues(issues)),
                 log: Vec::new(),
             },
         );
@@ -248,12 +250,35 @@ mod tests {
         for key in [key('G'), enter, key('j')] {
             update(&mut model, Action::Key(key));
         }
-        let readme = "# 2026-10-02-ideas\n\nWhat I found **so far**.\n";
-        update(
-            &mut model,
-            Action::Readme("/data/2026-10-02-ideas".into(), Some(readme.into())),
-        );
-        model.loading.clear();
+        let text =
+            "+++\nsummary = \"hidden\"\n+++\n# 2026-10-02-ideas\n\nWhat I found **so far**.\n";
+        let readme = app::Readme {
+            path: "/data/2026-10-02-ideas".into(),
+            stamp: None,
+            text: Some(text.into()),
+        };
+        update(&mut model, Action::Readme(readme));
+        model.schedule.finish_all();
+        insta::assert_snapshot!(render(&model, 120, 30));
+    }
+
+    #[test]
+    fn carnets_sub_tab() {
+        let mut model = update::tests::with_carnets(loaded(120, 30));
+        // One open carnet, with a tab, a second ticket and a summary, and one closed.
+        model.snapshot.carnets.retain(|work| {
+            work.path.ends_with("2026-10-01-ABC-1-logs") || work.path.ends_with("2026-08-01-done")
+        });
+        model.snapshot.carnets[0].tab = true;
+        if let WorkKind::Carnet {
+            tickets, summary, ..
+        } = &mut model.snapshot.carnets[0].kind
+        {
+            tickets.push("api#4".into());
+            *summary = "Login fails after the token refresh".into();
+        }
+        update(&mut model, Action::Key(key(']')));
+        model.schedule.finish_all();
         insta::assert_snapshot!(render(&model, 120, 30));
     }
 
