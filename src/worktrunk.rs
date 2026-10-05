@@ -176,6 +176,8 @@ pub struct Worktree {
     pub committed_at: String,
     /// worktrunk's compact status, such as `!?↑`.
     pub symbols: String,
+    /// The repo's default branch, when worktrunk reports it.
+    pub default_branch: Option<String>,
     /// Its branch is the repo's default branch.
     pub on_default: bool,
     /// worktrunk finds its branch integrated into the default branch's remote, so it is
@@ -264,6 +266,7 @@ impl Listing {
                     ahead_of_default: to_default.ahead,
                     symbols: item.display.symbols,
                     on_default,
+                    default_branch: default_branch.clone(),
                     gone: false,
                 })
             })
@@ -443,6 +446,7 @@ mod tests {
         let merged = &listing.worktrees[2];
         assert!(merged.integrated);
         assert_eq!(merged.ahead_of_default, Some(1));
+        assert_eq!(merged.default_branch.as_deref(), Some("main"));
     }
 
     fn integrated(item: &str) -> bool {

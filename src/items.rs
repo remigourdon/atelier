@@ -8,6 +8,8 @@ use color_eyre::eyre::{Result, eyre};
 use regex::Regex;
 
 use crate::config::{Config, group_from_name};
+#[cfg(test)]
+use crate::finish::Signal;
 use crate::finish::Step;
 use crate::process::{Logged, Runner};
 use crate::reviews::Review;
@@ -371,14 +373,12 @@ impl<'a> Items<'a> {
         })
     }
 
-    /// Fetches each repo, pruning gone branches, and returns the repos whose fetch failed with
-    /// the error.
-    pub fn fetch(&self, repos: &[PathBuf]) -> Vec<(PathBuf, color_eyre::Report)> {
+    /// Fetches each repo, pruning gone branches, and returns the repos whose fetch failed; the
+    /// runner records why.
+    pub fn fetch(&self, repos: &[PathBuf]) -> Vec<PathBuf> {
         (repos.iter())
-            .filter_map(|repo| {
-                let err = git::fetch_prune(self.runner, repo).err()?;
-                Some((repo.clone(), err))
-            })
+            .filter(|repo| git::fetch_prune(self.runner, repo).is_err())
+            .cloned()
             .collect()
     }
 
@@ -388,7 +388,7 @@ impl<'a> Items<'a> {
         let mut steps = steps.to_vec();
         steps.sort_by_key(Step::order);
         each(&steps, |step| match step {
-            Step::Remove(removal) => self.remove(std::slice::from_ref(removal)),
+            Step::Remove { removal, .. } => self.remove(std::slice::from_ref(removal)),
             Step::CloseCarnet(path) => self.set_carnets_closed(std::slice::from_ref(path), true),
             Step::Pull(path) => git::pull_ff_only(self.runner, path),
         })
@@ -1215,13 +1215,14 @@ mod tests {
         let notes = carnet::tests::repo(dir.path(), "2026-10-01-G-1-notes", None);
         (state.add_item(&notes, ItemKind::Carnet, None, "G-1", "default")).unwrap();
         let fake = Fake::default().always("wt -C /r remove --foreground --yes a", None);
-        let removal = |branch: &str, force| {
-            Step::Remove(Removal {
+        let removal = |branch: &str, force| Step::Remove {
+            removal: Removal {
                 path: format!("/r.{branch}").into(),
                 repo: "/r".into(),
                 branch: Some(branch.into()),
                 force,
-            })
+            },
+            signal: Signal::Integrated,
         };
         let steps = [
             Step::Pull("/r".into()),
@@ -1279,8 +1280,7 @@ mod tests {
             fake.calls(),
             ["git -C /a fetch --prune", "git -C /b fetch --prune"]
         );
-        assert_eq!(failed.len(), 1);
-        assert_eq!(failed[0].0, Path::new("/b"));
+        assert_eq!(failed, [Path::new("/b")]);
     }
 
     #[test]

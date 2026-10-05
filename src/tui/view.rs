@@ -12,6 +12,7 @@ use super::app::{
 use super::lists;
 use super::widgets;
 use crate::config::Icons;
+use crate::finish::Signal;
 
 /// Below this width the main view is hidden until `+`.
 pub const NARROW: u16 = 100;
@@ -86,6 +87,16 @@ impl Glyphs {
                 gone: "\u{f127}",
                 spinner,
             },
+        }
+    }
+}
+
+impl Glyphs {
+    /// A finished worktree's mark.
+    pub fn signal(&self, signal: Signal) -> &'static str {
+        match signal {
+            Signal::Integrated => self.integrated,
+            Signal::Gone => self.gone,
         }
     }
 }

@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 
 use super::app::{Modal, Popup, finish_hints, popup_hints};
 use super::view::{Palette, offset};
-use crate::finish::{Line as PlanLine, Plan, Signal};
+use crate::finish::{Line as PlanLine, Plan, Step};
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let [row] = Layout::vertical([Constraint::Length(height)])
@@ -142,7 +142,7 @@ fn finish_lines<'a>(plan: &'a Plan, palette: &Palette) -> Vec<Line<'a>> {
             PlanLine::Warning(text) => {
                 Line::styled(format!("! {text}"), Style::new().fg(palette.warn))
             }
-            PlanLine::Section(name) => {
+            PlanLine::Heading(name) => {
                 Line::styled(name.as_str(), Style::new().fg(palette.info).bold())
             }
             PlanLine::Info { label, note } => Line::from(vec![
@@ -150,31 +150,28 @@ fn finish_lines<'a>(plan: &'a Plan, palette: &Palette) -> Vec<Line<'a>> {
                 Span::styled(note.as_str(), dim),
             ]),
             PlanLine::Step {
+                step,
                 label,
                 note,
-                signal,
-                dirty,
                 checked,
-                ..
             } => {
-                let box_ = if *checked { "[x] " } else { "[ ] " };
-                let mark = match (dirty, signal) {
-                    (true, _) => Some(Span::styled("! ", Style::new().fg(palette.warn))),
-                    (_, Some(Signal::Integrated)) => {
-                        Some(Span::styled(format!("{} ", palette.glyphs.integrated), dim))
+                let checkbox = if *checked { "[x] " } else { "[ ] " };
+                // A removal's reason, or `!` when it discards changes.
+                let mark = match step {
+                    Step::Remove { removal, .. } if removal.force => {
+                        Span::styled("! ", Style::new().fg(palette.warn))
                     }
-                    (_, Some(Signal::Gone)) => {
-                        Some(Span::styled(format!("{} ", palette.glyphs.gone), dim))
+                    Step::Remove { signal, .. } => {
+                        Span::styled(format!("{} ", palette.glyphs.signal(*signal)), dim)
                     }
-                    (_, None) => Some(Span::raw("  ")),
+                    Step::CloseCarnet(_) | Step::Pull(_) => Span::raw("  "),
                 };
-                let mut spans = vec![
-                    Span::styled(box_, Style::new().fg(palette.accent)),
+                Line::from(vec![
+                    Span::styled(checkbox, Style::new().fg(palette.accent)),
                     Span::raw(format!("{label:label_width$}  ")),
-                ];
-                spans.extend(mark);
-                spans.push(Span::styled(note.as_str(), dim));
-                Line::from(spans)
+                    mark,
+                    Span::styled(note.as_str(), dim),
+                ])
             }
         })
         .collect()

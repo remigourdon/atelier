@@ -1,6 +1,6 @@
 //! Runs jobs off the UI thread, each with its own database connection, and reports actions.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{Report, Result, eyre};
 
@@ -154,7 +154,7 @@ fn plan(
         let (snapshot, problems) = items.snapshot(false)?;
         log.extend(problems);
         let names: Vec<String> = (failed.iter())
-            .map(|(repo, _)| repo_name(&snapshot, repo))
+            .map(|repo| repo_name(&snapshot, repo))
             .collect();
         Ok(finish::plan(&snapshot, scope, &names))
     });
@@ -162,7 +162,7 @@ fn plan(
     (plan, log)
 }
 
-fn repo_name(snapshot: &Snapshot, path: &std::path::Path) -> String {
+fn repo_name(snapshot: &Snapshot, path: &Path) -> String {
     (snapshot.repos.iter())
         .find(|repo| repo.path == path)
         .map_or_else(|| state::dir_name(path), |repo| repo.name())

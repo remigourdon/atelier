@@ -305,10 +305,7 @@ mod tests {
     #[test]
     fn finish_plan() {
         let mut model = finished(120, 30);
-        let scope = crate::finish::Scope::Work {
-            groups: vec!["ABC-1".into()],
-            items: Vec::new(),
-        };
+        let scope = crate::finish::Scope::group("ABC-1");
         let plan = crate::finish::plan(&model.snapshot, &scope, &["web".into()]);
         update(
             &mut model,

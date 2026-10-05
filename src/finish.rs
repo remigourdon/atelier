@@ -47,55 +47,79 @@ pub enum Scope {
         items: Vec<PathBuf>,
     },
     /// A sweep of a workspace: each of its groups with a finished worktree, and its finished
-    /// worktrees in no group.
+    /// worktrees in no group. It touches only the workspace's own items.
     Workspace(String),
     /// An issue's linked work: the worktrees in its group and the carnets whose first ticket
     /// it is. `state` is the issue's, for the title.
     Issue { key: String, state: String },
 }
 
-/// A part of a plan: a group, or an item in no group.
-enum Unit {
+/// What a plan covers: a group, or an item in no group.
+enum Cover {
     Group(String),
     Item(PathBuf),
 }
 
 impl Scope {
-    fn units(&self, snapshot: &Snapshot) -> Vec<Unit> {
+    /// One group's scope, as `f` on a group's row makes it, for tests.
+    #[cfg(test)]
+    pub fn group(key: &str) -> Self {
+        Scope::Work {
+            groups: vec![key.to_owned()],
+            items: Vec::new(),
+        }
+    }
+
+    fn covers(&self, snapshot: &Snapshot) -> Vec<Cover> {
         match self {
-            Scope::Work { groups, items } => (groups.iter().cloned().map(Unit::Group))
-                .chain(items.iter().cloned().map(Unit::Item))
+            Scope::Work { groups, items } => (groups.iter().cloned().map(Cover::Group))
+                .chain(items.iter().cloned().map(Cover::Item))
                 .collect(),
-            Scope::Workspace(name) => {
-                let here = || (snapshot.work.iter()).filter(|work| work.workspace == *name);
-                let groups: BTreeSet<&String> = (here().map(|work| &work.group))
+            Scope::Workspace(_) => {
+                let own = || (snapshot.work.iter()).filter(|work| self.touches(work));
+                let groups: BTreeSet<&String> = (own().map(|work| &work.group))
                     .filter(|group| !group.is_empty())
                     .collect();
-                let ungrouped = (here())
+                let ungrouped = own()
                     .filter(|work| work.group.is_empty() && work.removable())
-                    .map(|work| Unit::Item(work.path.clone()));
-                (groups.into_iter().cloned().map(Unit::Group))
+                    .map(|work| Cover::Item(work.path.clone()));
+                (groups.into_iter().cloned().map(Cover::Group))
                     .chain(ungrouped)
                     .collect()
             }
-            Scope::Issue { key, .. } => vec![Unit::Group(key.clone())],
+            Scope::Issue { key, .. } => vec![Cover::Group(key.clone())],
+        }
+    }
+
+    /// Whether it may touch `work`: a sweep only its workspace's items.
+    fn touches(&self, work: &Work) -> bool {
+        match self {
+            Scope::Workspace(name) => work.workspace == *name,
+            _ => true,
         }
     }
 
     /// The repos of the worktrees it may touch, to fetch before building its plan.
     pub fn repos(&self, snapshot: &Snapshot) -> Vec<PathBuf> {
-        let repos: BTreeSet<&PathBuf> = (self.units(snapshot).iter())
-            .flat_map(|unit| members(snapshot, unit))
+        let repos: BTreeSet<&PathBuf> = (self.covers(snapshot).iter())
+            .flat_map(|cover| self.own_members(snapshot, cover))
             .filter_map(Work::repo)
             .collect();
         repos.into_iter().cloned().collect()
     }
 
+    /// What `cover` holds that the plan may touch.
+    fn own_members<'a>(&self, snapshot: &'a Snapshot, cover: &Cover) -> Vec<&'a Work> {
+        (members(snapshot, cover).into_iter())
+            .filter(|work| self.touches(work))
+            .collect()
+    }
+
     fn title(&self, snapshot: &Snapshot) -> String {
         match self {
             Scope::Work { .. } => {
-                let names: Vec<String> = (self.units(snapshot).iter())
-                    .map(|unit| unit_name(snapshot, unit))
+                let names: Vec<String> = (self.covers(snapshot).iter())
+                    .map(|cover| cover_name(snapshot, cover))
                     .collect();
                 format!("Finish {}", names.join(", "))
             }
@@ -105,19 +129,20 @@ impl Scope {
     }
 }
 
-fn members<'a>(snapshot: &'a Snapshot, unit: &Unit) -> Vec<&'a Work> {
+/// Everything `cover` holds, in any workspace.
+fn members<'a>(snapshot: &'a Snapshot, cover: &Cover) -> Vec<&'a Work> {
     (snapshot.work.iter())
-        .filter(|work| match unit {
-            Unit::Group(key) => work.group == *key,
-            Unit::Item(path) => work.path == *path,
+        .filter(|work| match cover {
+            Cover::Group(key) => work.group == *key,
+            Cover::Item(path) => work.path == *path,
         })
         .collect()
 }
 
-fn unit_name(snapshot: &Snapshot, unit: &Unit) -> String {
-    match unit {
-        Unit::Group(key) => key.clone(),
-        Unit::Item(path) => (members(snapshot, unit).first())
+fn cover_name(snapshot: &Snapshot, cover: &Cover) -> String {
+    match cover {
+        Cover::Group(key) => key.clone(),
+        Cover::Item(path) => (members(snapshot, cover).first())
             .map_or_else(|| path.display().to_string(), |work| work.title()),
     }
 }
@@ -127,7 +152,7 @@ fn unit_name(snapshot: &Snapshot, unit: &Unit) -> String {
 pub enum Step {
     /// `wt remove`, with `--force` when dirty and never `-D`: worktrunk deletes an integrated
     /// branch and keeps any other, so unpushed commits survive.
-    Remove(Removal),
+    Remove { removal: Removal, signal: Signal },
     /// Sets `closed = true`, as `c` does.
     CloseCarnet(PathBuf),
     /// `git pull --ff-only --prune` on a main worktree.
@@ -138,7 +163,7 @@ impl Step {
     /// Removals run first, then carnet closes, then pulls.
     pub fn order(&self) -> u8 {
         match self {
-            Step::Remove(_) => 0,
+            Step::Remove { .. } => 0,
             Step::CloseCarnet(_) => 1,
             Step::Pull(_) => 2,
         }
@@ -150,7 +175,7 @@ pub enum Line {
     /// A fetch that failed, so the plan shows the last known state.
     Warning(String),
     /// A group's heading, when the plan holds several.
-    Section(String),
+    Heading(String),
     /// What the plan does not do, and why; never checkable.
     Info { label: String, note: String },
     /// What the plan can do, run when checked.
@@ -158,10 +183,6 @@ pub enum Line {
         step: Step,
         label: String,
         note: String,
-        /// A removal's reason.
-        signal: Option<Signal>,
-        /// A removal that discards uncommitted changes.
-        dirty: bool,
         checked: bool,
     },
 }
@@ -181,7 +202,7 @@ impl Plan {
             .collect()
     }
 
-    /// Checks or unchecks a step line.
+    /// Checks or unchecks a step line; any other line stays as it is.
     pub fn toggle(&mut self, index: usize) {
         if let Some(Line::Step { checked, .. }) = self.lines.get_mut(index) {
             *checked = !*checked;
@@ -203,23 +224,26 @@ impl Plan {
     }
 }
 
-/// A group's or an item's lines, whether any worktree in it is finished, and the repos it
-/// touches.
-struct Section {
-    name: String,
+/// A group's or an item's lines under its heading, whether any worktree in it is finished, and
+/// the repos it touches.
+struct Part {
+    heading: String,
     lines: Vec<Line>,
     finished: bool,
     repos: BTreeSet<PathBuf>,
 }
 
-fn section(snapshot: &Snapshot, unit: &Unit) -> Section {
-    let members = members(snapshot, unit);
+fn part(snapshot: &Snapshot, scope: &Scope, cover: &Cover) -> Part {
+    let own = scope.own_members(snapshot, cover);
     let mut lines = Vec::new();
     let mut repos = BTreeSet::new();
     let mut finished = false;
-    // Whether every worktree that is not a main one has a checked remove line.
-    let mut all_removed = true;
-    for work in &members {
+    // Whether every worktree of the group that is not a main one, in any workspace, has a
+    // checked remove line.
+    let mut all_removed = (members(snapshot, cover).iter())
+        .filter(|work| work.removable())
+        .all(|work| scope.touches(work));
+    for work in &own {
         let (Some(tree), Some(repo)) = (work.tree(), work.repo()) else {
             continue;
         };
@@ -248,8 +272,15 @@ fn section(snapshot: &Snapshot, unit: &Unit) -> Section {
             notes.push("uncommitted changes will be lost".into());
         }
         if signal == Signal::Gone {
+            let default = tree
+                .default_branch
+                .as_deref()
+                .unwrap_or("the default branch");
             notes.push(match tree.ahead_of_default {
-                Some(ahead) if ahead > 0 => format!("branch kept: {ahead} unmerged commit(s)"),
+                Some(1) => format!("branch kept: 1 commit not in {default}"),
+                Some(ahead) if ahead > 1 => {
+                    format!("branch kept: {ahead} commits not in {default}")
+                }
                 _ => "branch kept".into(),
             });
         }
@@ -257,19 +288,14 @@ fn section(snapshot: &Snapshot, unit: &Unit) -> Section {
             notes.push("tab open".into());
         }
         lines.push(Line::Step {
-            step: Step::Remove(removal),
+            step: Step::Remove { removal, signal },
             label: format!("remove {}", work.title()),
             note: notes.join(" · "),
-            signal: Some(signal),
-            dirty,
             checked: !dirty,
         });
     }
     // An open carnet: in a group, one whose first ticket is the group, as its group is.
-    for carnet in members
-        .iter()
-        .filter(|work| work.is_carnet() && !work.closed())
-    {
+    for carnet in (own.iter()).filter(|work| work.is_carnet() && !work.closed()) {
         lines.push(Line::Step {
             step: Step::CloseCarnet(carnet.path.clone()),
             label: format!("close carnet {}", carnet.title()),
@@ -278,13 +304,11 @@ fn section(snapshot: &Snapshot, unit: &Unit) -> Section {
             } else {
                 "work still in flight".into()
             },
-            signal: None,
-            dirty: false,
             checked: all_removed,
         });
     }
-    Section {
-        name: unit_name(snapshot, unit),
+    Part {
+        heading: cover_name(snapshot, cover),
         lines,
         finished,
         repos,
@@ -315,8 +339,6 @@ fn pull(main: &Work) -> Option<Line> {
             step: Step::Pull(main.path.clone()),
             label,
             note: format!("↓{behind}"),
-            signal: None,
-            dirty: false,
             checked: true,
         }),
     }
@@ -328,25 +350,28 @@ pub fn plan(snapshot: &Snapshot, scope: &Scope, failed: &[String]) -> Plan {
     let mut lines: Vec<Line> = (failed.iter())
         .map(|repo| Line::Warning(format!("fetch failed in {repo}: showing last known state")))
         .collect();
-    let mut sections: Vec<Section> = (scope.units(snapshot).iter())
-        .map(|unit| section(snapshot, unit))
+    let mut parts: Vec<Part> = (scope.covers(snapshot).iter())
+        .map(|cover| part(snapshot, scope, cover))
         .collect();
     // A sweep shows only what is finished, unless nothing is: then every group says why.
-    if matches!(scope, Scope::Workspace(_)) && sections.iter().any(|section| section.finished) {
-        sections.retain(|section| section.finished);
+    if matches!(scope, Scope::Workspace(_)) && parts.iter().any(|part| part.finished) {
+        parts.retain(|part| part.finished);
     }
-    let several = sections.len() > 1;
+    let several = parts.len() > 1;
     let mut repos = BTreeSet::new();
-    for section in sections {
+    for part in parts {
         if several {
-            lines.push(Line::Section(section.name));
+            lines.push(Line::Heading(part.heading));
         }
-        lines.extend(section.lines);
-        repos.extend(section.repos);
+        lines.extend(part.lines);
+        repos.extend(part.repos);
     }
     for repo in &repos {
-        let main = (snapshot.work.iter())
-            .find(|work| work.repo() == Some(repo) && work.tree().is_some_and(|tree| tree.main));
+        let main = (snapshot.work.iter()).find(|work| {
+            scope.touches(work)
+                && work.repo() == Some(repo)
+                && work.tree().is_some_and(|tree| tree.main)
+        });
         lines.extend(main.and_then(pull));
     }
     if lines.iter().all(|line| matches!(line, Line::Warning(_))) {
@@ -389,6 +414,7 @@ mod tests {
                     branch: Some(branch.into()),
                     main,
                     on_default: main,
+                    default_branch: Some("main".into()),
                     upstream: Some((0, 0)),
                     ..Worktree::default()
                 }),
@@ -434,19 +460,12 @@ mod tests {
         }
     }
 
-    fn group(key: &str) -> Scope {
-        Scope::Work {
-            groups: vec![key.into()],
-            items: Vec::new(),
-        }
-    }
-
     /// Each line as `[x] label · note`, `[ ]` unchecked, four spaces for info.
     fn shown(plan: &Plan) -> Vec<String> {
         (plan.lines.iter())
             .map(|line| match line {
                 Line::Warning(text) => format!("! {text}"),
-                Line::Section(name) => format!("# {name}"),
+                Line::Heading(name) => format!("# {name}"),
                 Line::Info { label, note } => format!("    {label} · {note}"),
                 Line::Step {
                     label,
@@ -492,13 +511,13 @@ mod tests {
             work("web", "ABC-1-wip", "ABC-1", "side"),
             work("web", "XYZ-1", "XYZ-1", "side"),
         ]);
-        let plan = plan(&snapshot, &group("ABC-1"), &[]);
+        let plan = plan(&snapshot, &Scope::group("ABC-1"), &[]);
         assert_eq!(plan.title, "Finish ABC-1");
         assert_eq!(
             shown(&plan),
             [
                 "[x] remove api:ABC-1-login · integrated · tab open",
-                "[x] remove api:ABC-1-fix · upstream gone · branch kept: 2 unmerged commit(s)",
+                "[x] remove api:ABC-1-fix · upstream gone · branch kept: 2 commits not in main",
                 "[ ] remove web:ABC-1-form · integrated · uncommitted changes will be lost",
                 "[ ] remove web:ABC-1-old · upstream gone · uncommitted changes will be lost · branch kept",
                 "    web:ABC-1-wip · not integrated, upstream present",
@@ -508,16 +527,45 @@ mod tests {
     }
 
     #[test]
+    fn a_gone_branch_counts_its_commits_not_in_the_default_branch() {
+        let note = |ahead, default: Option<&str>| {
+            let mut fix = gone(work("api", "fix", "", "d"));
+            fix.tree_mut().ahead_of_default = ahead;
+            fix.tree_mut().default_branch = default.map(Into::into);
+            let scope = Scope::Work {
+                groups: Vec::new(),
+                items: vec!["/src/api.fix".into()],
+            };
+            shown(&plan(&snapshot(vec![fix]), &scope, &[])).remove(0)
+        };
+        let lines = [
+            note(Some(1), Some("trunk")),
+            note(Some(3), None),
+            note(Some(0), Some("main")),
+            note(None, Some("main")),
+        ];
+        assert_eq!(
+            lines.map(|line| line.rsplit(" · ").next().unwrap().to_owned()),
+            [
+                "branch kept: 1 commit not in trunk",
+                "branch kept: 3 commits not in the default branch",
+                "branch kept",
+                "branch kept",
+            ]
+        );
+    }
+
+    #[test]
     fn removals_force_only_dirty_worktrees() {
         let snapshot = snapshot(vec![
             integrated(work("api", "a", "G-1", "d")),
             dirty(integrated(work("api", "b", "G-1", "d"))),
         ]);
-        let mut plan = plan(&snapshot, &group("G-1"), &[]);
+        let mut plan = plan(&snapshot, &Scope::group("G-1"), &[]);
         plan.toggle(1);
         let forced: Vec<bool> = (plan.checked().into_iter())
             .map(|step| match step {
-                Step::Remove(removal) => removal.force,
+                Step::Remove { removal, .. } => removal.force,
                 other => panic!("{other:?}"),
             })
             .collect();
@@ -533,7 +581,7 @@ mod tests {
             carnet("2026-10-02-other", &["XYZ-9", "ABC-1"]),
         ]);
         assert_eq!(
-            shown(&plan(&all, &group("ABC-1"), &[]))[2..],
+            shown(&plan(&all, &Scope::group("ABC-1"), &[]))[2..],
             ["[x] close carnet 2026-10-01-ABC-1-flake · "],
             "a carnet listing the key only later is not closed"
         );
@@ -541,21 +589,21 @@ mod tests {
         in_flight
             .work
             .push(work("web", "ABC-1-c", "ABC-1", "default"));
-        let lines = shown(&plan(&in_flight, &group("ABC-1"), &[]));
+        let lines = shown(&plan(&in_flight, &Scope::group("ABC-1"), &[]));
         assert_eq!(
             lines.last().unwrap(),
             "[ ] close carnet 2026-10-01-ABC-1-flake · work still in flight"
         );
         let mut kept_dirty = all;
         kept_dirty.work[0] = dirty(kept_dirty.work[0].clone());
-        let lines = shown(&plan(&kept_dirty, &group("ABC-1"), &[]));
+        let lines = shown(&plan(&kept_dirty, &Scope::group("ABC-1"), &[]));
         assert!(lines.last().unwrap().starts_with("[ ] close carnet"));
         let only_main = snapshot(vec![
             work("api", "main", "ABC-1", "default"),
             carnet("2026-10-01-ABC-1-flake", &["ABC-1"]),
         ]);
         assert_eq!(
-            shown(&plan(&only_main, &group("ABC-1"), &[])),
+            shown(&plan(&only_main, &Scope::group("ABC-1"), &[])),
             [
                 "[x] close carnet 2026-10-01-ABC-1-flake · ",
                 "    pull api:main · up to date",
@@ -583,17 +631,19 @@ mod tests {
             ),
         ] {
             let snapshot = snapshot(vec![integrated(work("api", "a", "G-1", "d")), main]);
-            let lines = shown(&plan(&snapshot, &group("G-1"), &[]));
+            let lines = shown(&plan(&snapshot, &Scope::group("G-1"), &[]));
             assert_eq!(lines[1], expected);
         }
     }
 
     #[test]
-    fn a_sweep_has_a_section_per_group_with_finished_work() {
+    fn a_sweep_has_a_part_per_group_with_finished_work_in_its_workspace() {
         let mut snapshot = snapshot(vec![
             work("api", "main", "", "default"),
             integrated(work("api", "ABC-1-a", "ABC-1", "default")),
             work("web", "ABC-1-b", "ABC-1", "side"),
+            integrated(work("web", "ABC-1-c", "ABC-1", "side")),
+            carnet("2026-10-01-ABC-1-x", &["ABC-1"]),
             work("api", "XYZ-2", "XYZ-2", "default"),
             gone(work("api", "DEF-3", "DEF-3", "default")),
             integrated(work("api", "loose", "", "default")),
@@ -602,30 +652,32 @@ mod tests {
         let sweep = Scope::Workspace("default".into());
         assert_eq!(
             sweep.repos(&snapshot),
-            [Path::new("/src/api"), Path::new("/src/web")]
+            [Path::new("/src/api")],
+            "only the workspace's own worktrees"
         );
-        let plan = plan(&snapshot, &sweep, &[]);
-        assert_eq!(plan.title, "Finish workspace default");
+        let swept = plan(&snapshot, &sweep, &[]);
+        assert_eq!(swept.title, "Finish workspace default");
         assert_eq!(
-            shown(&plan),
+            shown(&swept),
             [
                 "# ABC-1",
                 "[x] remove api:ABC-1-a · integrated",
-                "    web:ABC-1-b · not integrated, upstream present",
+                "[ ] close carnet 2026-10-01-ABC-1-x · work still in flight",
                 "# DEF-3",
                 "[x] remove api:DEF-3 · upstream gone · branch kept",
                 "# api:loose",
                 "[x] remove api:loose · integrated",
                 "    pull api:main · up to date",
             ],
-            "XYZ-2 has nothing finished; GHI-4 is in another workspace"
+            "XYZ-2 has nothing finished; ABC-1's worktrees in side stay, and so does its carnet"
         );
-        snapshot
-            .work
-            .retain(|work| crate::finish::signal(work).is_none());
+        snapshot.work.retain(|work| signal(work).is_none());
         assert_eq!(
-            shown(&super::plan(&snapshot, &sweep, &[])),
+            shown(&plan(&snapshot, &sweep, &[])),
             [
+                "# ABC-1",
+                "[ ] close carnet 2026-10-01-ABC-1-x · work still in flight",
+                "# XYZ-2",
                 "    api:XYZ-2 · not integrated, upstream present",
                 "    pull api:main · up to date",
             ],
@@ -673,7 +725,7 @@ mod tests {
 
     #[test]
     fn a_failed_fetch_warns_and_an_empty_plan_says_so() {
-        let plan = plan(&snapshot(Vec::new()), &group("G-1"), &["api".into()]);
+        let plan = plan(&snapshot(Vec::new()), &Scope::group("G-1"), &["api".into()]);
         assert_eq!(
             shown(&plan),
             [
@@ -690,7 +742,7 @@ mod tests {
             integrated(work("api", "a", "G-1", "d")),
             work("api", "b", "G-1", "d"),
         ]);
-        let mut plan = plan(&snapshot, &group("G-1"), &[]);
+        let mut plan = plan(&snapshot, &Scope::group("G-1"), &[]);
         assert_eq!(plan.checkable(), [0]);
         plan.toggle(1);
         plan.toggle(0);

@@ -433,8 +433,7 @@ fn modal_key(model: &mut Model, modal: Modal, key: KeyEvent) -> Vec<Effect> {
             Vec::new()
         }
         Modal::Finish { mut plan, selected } => {
-            let checkable = plan.checkable();
-            let at = checkable.iter().position(|&index| index == selected);
+            let last = plan.lines.len().saturating_sub(1);
             let selected = match popup_lookup(Popup::Finish, &key) {
                 Some(PopupCmd::Accept) => {
                     let steps = plan.checked();
@@ -449,13 +448,8 @@ fn modal_key(model: &mut Model, modal: Modal, key: KeyEvent) -> Vec<Effect> {
                     plan.toggle(selected);
                     selected
                 }
-                Some(PopupCmd::Down) => at
-                    .and_then(|at| checkable.get(at + 1))
-                    .copied()
-                    .unwrap_or(selected),
-                Some(PopupCmd::Up) => {
-                    (at.filter(|&at| at > 0)).map_or(selected, |at| checkable[at - 1])
-                }
+                Some(PopupCmd::Down) => (selected + 1).min(last),
+                Some(PopupCmd::Up) => selected.saturating_sub(1),
                 _ => selected,
             };
             model.modal = Some(Modal::Finish { plan, selected });
@@ -843,6 +837,7 @@ pub mod tests {
                     branch: Some(branch.into()),
                     main,
                     on_default: main,
+                    default_branch: Some("main".into()),
                     short_sha: "abc1234".into(),
                     subject: "Commit".into(),
                     ..Worktree::default()
@@ -1081,10 +1076,7 @@ pub mod tests {
     fn f_plans_the_selections_groups_a_workspace_or_an_issues_linked_work() {
         let mut model = with_issues(model());
         let both = vec![PathBuf::from("/src/api"), PathBuf::from("/src/web")];
-        let group = Scope::Work {
-            groups: vec!["ABC-1".into()],
-            items: Vec::new(),
-        };
+        let group = Scope::group("ABC-1");
         assert_eq!(
             plan_scope(press(&mut model, "jf")),
             (group, both.clone()),
@@ -1125,11 +1117,7 @@ pub mod tests {
         model.snapshot.work[1].tree_mut().integrated = true;
         let form = model.snapshot.work[2].tree_mut();
         (form.gone, form.dirty) = (true, true);
-        let scope = Scope::Work {
-            groups: vec!["ABC-1".into()],
-            items: Vec::new(),
-        };
-        let plan = finish::plan(&model.snapshot, &scope, &[]);
+        let plan = finish::plan(&model.snapshot, &Scope::group("ABC-1"), &[]);
         let log = vec![Logged {
             command: "git -C /src/api fetch --prune".into(),
             error: None,
@@ -1159,19 +1147,28 @@ pub mod tests {
         let (plan, selected) = finish_modal(&model);
         assert_eq!(selected, 0);
         assert_eq!(plan.checked().len(), 1, "the dirty one is unchecked");
-        press(&mut model, "jj");
+        let last = plan.lines.len() - 1;
+        assert!(matches!(plan.lines[last], finish::Line::Info { .. }));
+        press(&mut model, "jjjjjj");
         assert_eq!(
             finish_modal(&model).1,
-            1,
-            "stays on the last checkable line"
+            last,
+            "j reaches the info lines, and stops at the last"
         );
-        press(&mut model, " k ");
+        press(&mut model, " ");
+        assert_eq!(
+            finish_modal(&model).0.checked().len(),
+            1,
+            "an info line stays"
+        );
+        press(&mut model, "kkkkkk");
+        press(&mut model, "j k ");
         assert_eq!(finish_modal(&model).1, 0);
         let jobs = jobs(press(&mut model, "\n"));
         let [Job::Finish(steps)] = &jobs[..] else {
             panic!("{jobs:?}");
         };
-        let [Step::Remove(removal)] = &steps[..] else {
+        let [Step::Remove { removal, .. }] = &steps[..] else {
             panic!("{steps:?}");
         };
         assert_eq!(removal.path, PathBuf::from("/src/web.ABC-1-form"));

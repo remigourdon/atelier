@@ -254,11 +254,7 @@ impl ListKind for WorkList {
                     }
                     // Finished: dimmed, with why.
                     if let Some(signal) = finish::signal(work) {
-                        let glyph = match signal {
-                            finish::Signal::Integrated => glyphs.integrated,
-                            finish::Signal::Gone => glyphs.gone,
-                        };
-                        spans.push(Span::raw(format!(" {glyph}")));
+                        spans.push(Span::raw(format!(" {}", glyphs.signal(signal))));
                         spans = spans.into_iter().map(|span| span.style(dim)).collect();
                     }
                     Line::from(spans)
