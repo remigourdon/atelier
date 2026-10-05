@@ -6,12 +6,12 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use tui_input::Input;
 
+use super::lists;
+pub use super::lists::work::Row;
 use crate::issues::{self, Issue, TrackerConfig};
 pub use crate::items::{Removal, Snapshot, Work, WorkKind};
 use crate::process::Logged;
-use crate::reviews::{Provider, Review, Role};
-use crate::state::Repo;
-use crate::worktrunk;
+use crate::reviews::{Provider, Review};
 
 /// The side panels, top to bottom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -70,22 +70,7 @@ pub enum Kind {
 
 impl List {
     pub fn kind(self) -> Kind {
-        match self {
-            List::Workspaces => Kind::Workspaces,
-            List::Repos => Kind::Repos,
-            List::Work => Kind::Work,
-            List::ToReview | List::Mine => Kind::Reviews,
-            List::Section(_) => Kind::Issues,
-        }
-    }
-
-    /// The reviews it lists, for the Reviews panel's sub-tabs.
-    pub fn role(self) -> Option<Role> {
-        match self {
-            List::ToReview => Some(Role::ToReview),
-            List::Mine => Some(Role::Mine),
-            _ => None,
-        }
+        lists::of(self).kind()
     }
 }
 
@@ -102,23 +87,6 @@ pub enum Screen {
     Normal,
     Half,
     Full,
-}
-
-/// The end of the key of a workspace's `Carnets` group, which no group name can produce.
-const CARNETS_KEY: &str = "\0\0carnets";
-
-/// A row of the Work panel.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Row {
-    /// A group header; `members` index `Snapshot::work`. The `Carnets` group, of ungrouped
-    /// carnets, has an empty `name`.
-    Group {
-        key: String,
-        name: String,
-        members: Vec<usize>,
-        folded: bool,
-    },
-    Item(usize),
 }
 
 /// Background work, run off the UI thread; each reports back with actions.
@@ -694,14 +662,7 @@ impl Model {
     }
 
     pub fn title(&self, list: List) -> &str {
-        match list {
-            List::Workspaces => "Workspaces",
-            List::Repos => "Repos",
-            List::Work => "Work",
-            List::ToReview => "To review",
-            List::Mine => "Mine",
-            List::Section(index) => self.tracker_config.title(index),
-        }
+        lists::of(list).title(self, list)
     }
 
     /// The list keys act on: the focused panel's, or the last one's from the main view.
@@ -723,7 +684,7 @@ impl Model {
         self.log.drain(..excess);
     }
 
-    fn matches(&self, list: List, fields: &[&str]) -> bool {
+    pub(super) fn matches(&self, list: List, fields: &[&str]) -> bool {
         let filter = self.filter(list).to_lowercase();
         filter.is_empty()
             || fields
@@ -731,250 +692,7 @@ impl Model {
                 .any(|field| field.to_lowercase().contains(&filter))
     }
 
-    pub fn workspaces(&self) -> Vec<&String> {
-        self.snapshot
-            .workspaces
-            .iter()
-            .filter(|name| self.matches(List::Workspaces, &[name]))
-            .collect()
-    }
-
-    pub fn repos(&self) -> Vec<&Repo> {
-        self.snapshot
-            .repos
-            .iter()
-            .filter(|repo| self.matches(List::Repos, &[&repo.name(), &repo.path.to_string_lossy()]))
-            .collect()
-    }
-
-    /// A list's reviews, narrowed by its filter.
-    pub fn reviews(&self, list: List) -> Vec<&Review> {
-        self.reviews
-            .iter()
-            .filter(|review| {
-                Some(review.role) == list.role()
-                    && self.matches(
-                        list,
-                        &[
-                            &review.title,
-                            &review.project,
-                            &review.author,
-                            &review.branch,
-                            &review.provider.reference(review.number),
-                        ],
-                    )
-            })
-            .collect()
-    }
-
-    /// The selected review, when a review list is active.
-    pub fn review(&self) -> Option<&Review> {
-        let list = self.active();
-        self.reviews(list).get(self.index(list)).copied()
-    }
-
-    /// The registered repo whose forge web page is `project_url`.
-    pub fn project_repo(&self, project_url: &str) -> Option<&Repo> {
-        let path = self.snapshot.forges.iter().find_map(|(path, forge)| {
-            worktrunk::same_project(&forge.url, project_url).then_some(path)
-        })?;
-        self.snapshot.repos.iter().find(|repo| repo.path == *path)
-    }
-
-    /// The registered repo's name for a review's project, else the project's path.
-    pub fn review_project(&self, review: &Review) -> String {
-        self.project_repo(&review.project_url)
-            .map_or_else(|| review.project.clone(), Repo::name)
-    }
-
-    /// The worktree that has a review's branch checked out.
-    pub fn review_work(&self, review: &Review) -> Option<&Work> {
-        let repo = self.project_repo(&review.project_url)?;
-        self.snapshot.work.iter().find(|work| {
-            work.repo() == Some(&repo.path)
-                && (work.tree()).and_then(|tree| tree.branch.as_deref())
-                    == Some(review.branch.as_str())
-        })
-    }
-
-    /// A section's issues, narrowed by its filter.
-    pub fn issues(&self, list: List) -> Vec<&Issue> {
-        let List::Section(index) = list else {
-            return Vec::new();
-        };
-        self.issues
-            .iter()
-            .filter(|issue| {
-                self.tracker_config.section(issue) == Some(index)
-                    && self.matches(
-                        list,
-                        &[
-                            &issue.key,
-                            &issue.title,
-                            &issue.project,
-                            &issue.labels.join(" "),
-                            &issue.assignees.join(" "),
-                        ],
-                    )
-            })
-            .collect()
-    }
-
-    /// The selected issue, when a section is active.
-    pub fn issue(&self) -> Option<&Issue> {
-        let list = self.active();
-        self.issues(list).get(self.index(list)).copied()
-    }
-
-    /// An issue's linked work: the worktrees in its group, which is its key.
-    /// An issue's linked work: the worktrees in its group and the carnets, closed ones too,
-    /// that list its key among their tickets.
-    pub fn issue_work(&self, issue: &Issue) -> Vec<&Work> {
-        let worktrees =
-            (self.snapshot.work.iter()).filter(|work| !work.is_carnet() && work.group == issue.key);
-        let carnets =
-            (self.snapshot.carnets.iter()).filter(|carnet| carnet.tickets().contains(&issue.key));
-        worktrees.chain(carnets).collect()
-    }
-
-    /// The workspace whose work panel 2 shows: the one selected in panel 1.
-    pub fn workspace(&self) -> Option<&str> {
-        let names = self.workspaces();
-        names
-            .get(self.index(List::Workspaces))
-            .or(names.first())
-            .map(|name| name.as_str())
-            .or(self.snapshot.here.as_deref())
-    }
-
-    pub fn repo(&self) -> Option<&Repo> {
-        self.repos().get(self.index(List::Repos)).copied()
-    }
-
-    /// Whether a group row is folded; the `Carnets` group starts folded.
-    pub fn is_folded(&self, key: &str) -> bool {
-        self.folded.contains(key) != key.ends_with(CARNETS_KEY)
-    }
-
-    pub fn set_folded(&mut self, key: &str, folded: bool) {
-        if folded == key.ends_with(CARNETS_KEY) {
-            self.folded.remove(key);
-        } else {
-            self.folded.insert(key.to_owned());
-        }
-    }
-
-    /// Panel 2's rows: named groups, foldable, then ungrouped worktrees, then the ungrouped
-    /// carnets in a `Carnets` group. Worktrees come before carnets, which are newest first.
-    pub fn work_rows(&self) -> Vec<Row> {
-        let Some(workspace) = self.workspace() else {
-            return Vec::new();
-        };
-        let work = &self.snapshot.work;
-        let filtering = !self.filter(List::Work).is_empty();
-        let mut members: Vec<usize> = (0..work.len())
-            .filter(|&index| {
-                let work = &work[index];
-                work.workspace == workspace
-                    && self.matches(
-                        List::Work,
-                        &[&work.title(), &work.group, &work.path.to_string_lossy()],
-                    )
-            })
-            .collect();
-        // Named groups, then ungrouped worktrees, then ungrouped carnets.
-        let section = |work: &Work| {
-            (
-                work.group.is_empty(),
-                work.in_carnets_group(),
-                work.group.clone(),
-            )
-        };
-        members.sort_by(|&a, &b| {
-            let (a, b) = (&work[a], &work[b]);
-            section(a)
-                .cmp(&section(b))
-                .then_with(|| match (&a.kind, &b.kind) {
-                    (
-                        WorkKind::Worktree {
-                            repo_name: x,
-                            tree: tx,
-                            ..
-                        },
-                        WorkKind::Worktree {
-                            repo_name: y,
-                            tree: ty,
-                            ..
-                        },
-                    ) => (x, !tx.main, a.branch()).cmp(&(y, !ty.main, b.branch())),
-                    (WorkKind::Worktree { .. }, WorkKind::Carnet { .. }) => {
-                        std::cmp::Ordering::Less
-                    }
-                    (WorkKind::Carnet { .. }, WorkKind::Worktree { .. }) => {
-                        std::cmp::Ordering::Greater
-                    }
-                    (WorkKind::Carnet { .. }, WorkKind::Carnet { .. }) => {
-                        b.path.file_name().cmp(&a.path.file_name())
-                    }
-                })
-        });
-        let mut lines = Vec::new();
-        let mut index = 0;
-        while index < members.len() {
-            let first = &work[members[index]];
-            let carnets = first.in_carnets_group();
-            let end = members[index..]
-                .iter()
-                .position(|&other| section(&work[other]) != section(first))
-                .map_or(members.len(), |offset| index + offset);
-            let slice = &members[index..end];
-            if first.group.is_empty() && !carnets {
-                lines.extend(slice.iter().map(|&member| Row::Item(member)));
-            } else {
-                let key = if carnets {
-                    format!("{workspace}{CARNETS_KEY}")
-                } else {
-                    format!("{workspace}\0{}", first.group)
-                };
-                let folded = !filtering && self.is_folded(&key);
-                lines.push(Row::Group {
-                    key,
-                    name: first.group.clone(),
-                    members: slice.to_vec(),
-                    folded,
-                });
-                if !folded {
-                    lines.extend(slice.iter().map(|&member| Row::Item(member)));
-                }
-            }
-            index = end;
-        }
-        lines
-    }
-
-    pub fn work_row(&self) -> Option<Row> {
-        self.work_rows().into_iter().nth(self.index(List::Work))
-    }
-
-    /// The selected worktree, or every worktree of the selected group.
-    pub fn targets(&self) -> Vec<&Work> {
-        match self.work_row() {
-            Some(Row::Item(index)) => vec![&self.snapshot.work[index]],
-            Some(Row::Group { members, .. }) => members
-                .iter()
-                .map(|&index| &self.snapshot.work[index])
-                .collect(),
-            None => Vec::new(),
-        }
-    }
-
     pub fn len(&self, list: List) -> usize {
-        match list {
-            List::Workspaces => self.workspaces().len(),
-            List::Repos => self.repos().len(),
-            List::Work => self.work_rows().len(),
-            List::ToReview | List::Mine => self.reviews(list).len(),
-            List::Section(_) => self.issues(list).len(),
-        }
+        lists::of(list).len(self, list)
     }
 }

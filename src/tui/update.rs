@@ -1,7 +1,7 @@
 //! `update(model, action) -> effects`: every state change, with no I/O.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -12,14 +12,13 @@ use tui_input::backend::crossterm::EventHandler;
 
 use super::app::{
     Action, Binding, Cmd, Due, Effect, FAST_REFRESH, FULL_REFRESH, Focus, Job, KEYMAP, List,
-    MenuEntry, Modal, Model, On, Panel, Popup, PopupCmd, Removal, Row, Screen, Snapshot, Source,
-    Submit, Work, WorkKind, lookup, popup_lookup,
+    MenuEntry, Modal, Model, On, Panel, Popup, PopupCmd, Row, Screen, Snapshot, Source, Submit,
+    Work, WorkKind, lookup, popup_lookup,
 };
+use super::lists;
 use super::view::{areas, main_len, offset};
-use crate::issues::Issue;
 use crate::process::Logged;
 use crate::reviews::Provider;
-use crate::state::Repo;
 use crate::worktrunk;
 
 pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
@@ -165,7 +164,7 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
 }
 
 /// Starts a job, showing its loading indicator.
-fn run(model: &mut Model, job: Job) -> Effect {
+pub(super) fn run(model: &mut Model, job: Job) -> Effect {
     *model.loading.entry(job.source()).or_default() += 1;
     if let Job::Pull(paths) = &job {
         model.pulling.extend(paths.iter().cloned());
@@ -273,85 +272,33 @@ fn tick(model: &mut Model) -> Vec<Effect> {
     }
 }
 
-/// Selections, kept by identity across a refresh.
-struct Keep {
-    workspace: Option<String>,
-    repo: Option<std::path::PathBuf>,
-    line: Option<LineKey>,
-    /// Each review list's and section's selection, by [`listed_ids`].
-    listed: Vec<(List, String)>,
-}
-
-#[derive(PartialEq)]
-enum LineKey {
-    Group(String),
-    Item(std::path::PathBuf),
-}
+/// Each list's selection, kept by its row's identity across a refresh.
+struct Keep(Vec<(List, String)>);
 
 impl Keep {
     fn of(model: &Model) -> Self {
-        Self {
-            workspace: model.workspace().map(Into::into),
-            repo: model.repo().map(|repo| repo.path.clone()),
-            line: model.work_row().map(|line| line_key(model, &line)),
-            listed: (model.lists().into_iter())
-                .filter_map(|list| {
-                    let id = listed_ids(model, list).into_iter().nth(model.index(list))?;
-                    Some((list, id))
-                })
-                .collect(),
-        }
+        let selected = (model.lists().into_iter())
+            .filter_map(|list| {
+                let id = lists::of(list)
+                    .ids(model, list)
+                    .into_iter()
+                    .nth(model.index(list))?;
+                Some((list, id))
+            })
+            .collect();
+        Self(selected)
     }
 
+    /// Selects each kept row where it is now. Lists restore in panel order, so Work's rows are
+    /// those of the workspace already restored.
     fn restore(self, model: &mut Model) {
-        let workspace = self
-            .workspace
-            .and_then(|name| model.workspaces().iter().position(|other| **other == name));
-        model
-            .selected
-            .insert(List::Workspaces, workspace.unwrap_or(0));
-        let repo = self
-            .repo
-            .and_then(|path| model.repos().iter().position(|repo| repo.path == path));
-        model.selected.insert(List::Repos, repo.unwrap_or(0));
-        let line = self.line.and_then(|key| {
-            model
-                .work_rows()
-                .iter()
-                .position(|line| line_key(model, line) == key)
-        });
-        let line = line.unwrap_or(model.index(List::Work));
-        model.selected.insert(List::Work, line);
-        for (list, id) in self.listed {
-            if let Some(index) = listed_ids(model, list)
-                .iter()
-                .position(|other| *other == id)
-            {
+        for (list, id) in self.0 {
+            let ids = lists::of(list).ids(model, list);
+            if let Some(index) = ids.iter().position(|other| *other == id) {
                 model.selected.insert(list, index);
             }
         }
         clamp_all(model);
-    }
-}
-
-/// What identifies a list's review or issue rows across refreshes: a review's URL, an issue's
-/// key, which unlike its URL is never empty.
-fn listed_ids(model: &Model, list: List) -> Vec<String> {
-    match list {
-        List::ToReview | List::Mine => (model.reviews(list).iter())
-            .map(|review| review.url.clone())
-            .collect(),
-        List::Section(_) => (model.issues(list).iter())
-            .map(|issue| issue.key.clone())
-            .collect(),
-        List::Workspaces | List::Repos | List::Work => Vec::new(),
-    }
-}
-
-fn line_key(model: &Model, line: &Row) -> LineKey {
-    match line {
-        Row::Group { key, .. } => LineKey::Group(key.clone()),
-        Row::Item(index) => LineKey::Item(model.snapshot.work[*index].path().clone()),
     }
 }
 
@@ -589,7 +536,7 @@ fn submit(model: &mut Model, then: Submit, value: &str) -> Vec<Effect> {
     vec![run(model, job)]
 }
 
-fn note(model: &mut Model, message: &str) -> Vec<Effect> {
+pub(super) fn note(model: &mut Model, message: &str) -> Vec<Effect> {
     model.push_log([Logged {
         command: message.into(),
         error: None,
@@ -681,14 +628,12 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
             model.sub.insert(model.panel, tabs[next]);
             model.scroll = (0, 0);
         }
-        Cmd::Activate => return activate(model),
-        Cmd::Enter => match model.work_row() {
-            // Not the row's `folded`: a filter shows every group unfolded.
-            Some(Row::Group { key, .. }) if list == List::Work => {
-                model.set_folded(&key, !model.is_folded(&key));
+        Cmd::Activate => return lists::of(list).activate(model, list),
+        Cmd::Enter => {
+            if !lists::of(list).enter(model, list) {
+                model.focus = Focus::Main;
             }
-            _ => model.focus = Focus::Main,
-        },
+        }
         Cmd::CollapseAll | Cmd::ExpandAll => {
             for row in model.work_rows() {
                 if let Row::Group { key, .. } = row {
@@ -697,42 +642,15 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
             }
             clamp_all(model);
         }
-        Cmd::New => return new(model),
-        Cmd::Edit => return edit(model),
-        Cmd::Move => return move_to(model),
-        Cmd::Remove => return remove(model),
-        Cmd::Close => {
-            let open: Vec<_> = work_targets(model)
-                .into_iter()
-                .filter(|work| work.tab)
-                .collect();
-            let paths = paths(&open);
-            if !paths.is_empty() {
-                return vec![run(model, Job::Close(paths))];
-            }
-        }
-        Cmd::CloseCarnet => {
-            let carnets: Vec<_> = work_targets(model)
-                .into_iter()
-                .filter(|work| work.is_carnet())
-                .collect();
-            let paths = paths(&carnets);
-            if !paths.is_empty() {
-                return vec![run(model, Job::CloseCarnet(paths))];
-            }
-        }
-        Cmd::Pull => {
-            let trees: Vec<_> = work_targets(model)
-                .into_iter()
-                .filter(|work| work.tree().is_some())
-                .collect();
-            let paths = paths(&trees);
-            if !paths.is_empty() {
-                return vec![run(model, Job::Pull(paths))];
-            }
-        }
+        Cmd::New => return lists::of(list).create(model, list),
+        Cmd::Edit => return lists::of(list).edit(model, list),
+        Cmd::Move => return lists::of(list).move_to(model, list),
+        Cmd::Remove => return lists::of(list).remove(model, list),
+        Cmd::Close => return lists::of(list).close(model, list),
+        Cmd::CloseCarnet => return lists::of(list).close_carnet(model, list),
+        Cmd::Pull => return lists::of(list).pull(model, list),
         Cmd::Browse => {
-            return match url(model) {
+            return match lists::of(list).url(model, list) {
                 Some(url) => vec![run(model, Job::Browse(url))],
                 None => note(model, "no forge URL for this selection"),
             };
@@ -740,9 +658,9 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
         Cmd::CopyMenu => {
             let mut entries = Vec::new();
             for (key, label, value) in [
-                ("p", "path", copy_path(model)),
-                ("b", "branch", branch(model)),
-                ("u", "URL", url(model)),
+                ("p", "path", lists::of(list).copy_path(model, list)),
+                ("b", "branch", lists::of(list).branch(model, list)),
+                ("u", "URL", lists::of(list).url(model, list)),
             ] {
                 if let Some(value) = value {
                     entries.push(MenuEntry {
@@ -761,7 +679,8 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
             }
         }
         Cmd::CopyPath => {
-            if let Some(path) = copy_path(model).or_else(|| url(model)) {
+            let kind = lists::of(list);
+            if let Some(path) = (kind.copy_path(model, list)).or_else(|| kind.url(model, list)) {
                 return update(model, Action::Copy(path));
             }
         }
@@ -817,246 +736,12 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
     Vec::new()
 }
 
-fn paths(works: &[&Work]) -> Vec<PathBuf> {
-    works.iter().map(|work| work.path().clone()).collect()
-}
-
 /// The whole terminal, for laying out outside a draw.
 fn screen(model: &Model) -> Rect {
     Rect::new(0, 0, model.size.0, model.size.1)
 }
 
-/// The worktrees the Work panel's selection covers, or none from another panel.
-fn work_targets(model: &Model) -> Vec<&Work> {
-    if model.active() == List::Work {
-        model.targets()
-    } else {
-        Vec::new()
-    }
-}
-
-fn activate(model: &mut Model) -> Vec<Effect> {
-    match model.active() {
-        List::Workspaces => {
-            let Some(name) = model.workspace().map(str::to_owned) else {
-                return Vec::new();
-            };
-            if model.snapshot.here.is_some() {
-                vec![run(model, Job::SwitchWorkspace(name))]
-            } else {
-                vec![Effect::Attach(name)]
-            }
-        }
-        List::Repos => Vec::new(),
-        List::Work => {
-            let paths = paths(&model.targets());
-            if paths.is_empty() {
-                Vec::new()
-            } else {
-                vec![run(model, Job::Open(paths))]
-            }
-        }
-        List::ToReview | List::Mine => {
-            let Some(review) = model.review() else {
-                return Vec::new();
-            };
-            let Some(repo) = model.project_repo(&review.project_url) else {
-                let message = format!(
-                    "{} is not registered: add a clone with `atelier add <path>`",
-                    review.project
-                );
-                return note(model, &message);
-            };
-            let job = Job::Checkout {
-                repo: repo.path.clone(),
-                workspace: repo.default_workspace.clone(),
-                review: Box::new(review.clone()),
-            };
-            vec![run(model, job)]
-        }
-        List::Section(_) => {
-            let Some(issue) = model.issue().cloned() else {
-                return Vec::new();
-            };
-            let paths = paths(&model.issue_work(&issue));
-            if paths.is_empty() {
-                ask_start(model, issue)
-            } else {
-                vec![run(model, Job::Open(paths))]
-            }
-        }
-    }
-}
-
-/// Asks which repo an issue's worktree goes in, then for its branch. The menu suggests the
-/// repos of its linked work, then its own repo on GitHub, but never picks one: a tracker-only
-/// repo holds issues whose work happens elsewhere. It goes to the workspace of the linked work
-/// in that repo, else of any linked work, else the repo's default one.
-fn ask_start(model: &mut Model, issue: Issue) -> Vec<Effect> {
-    let linked = model.issue_work(&issue);
-    let workspace = |repo: &Repo| {
-        let work = (linked.iter().find(|work| work.repo() == Some(&repo.path))).or(linked.first());
-        work.map_or(repo.default_workspace.clone(), |work| {
-            work.workspace.clone()
-        })
-    };
-    let own = (issue.project_url.as_deref()).and_then(|url| model.project_repo(url));
-    let mut repos: Vec<&Repo> = model.snapshot.repos.iter().collect();
-    repos.sort_by_key(|repo| {
-        let suggested = (linked.iter()).any(|work| work.repo() == Some(&repo.path));
-        let own = own.is_some_and(|own| own.path == repo.path);
-        (!suggested, !own)
-    });
-    let entries: Vec<MenuEntry> = (repos.into_iter().enumerate())
-        .map(|(index, repo)| MenuEntry {
-            key: (index + 1).to_string(),
-            label: repo.name(),
-            action: Action::Ask {
-                title: format!("New worktree of {} for {}: branch", repo.name(), issue.key),
-                initial: issue.branch(),
-                then: Submit::Start {
-                    repo: repo.path.clone(),
-                    workspace: workspace(repo),
-                    issue: Box::new(issue.clone()),
-                },
-            },
-        })
-        .collect();
-    if entries.is_empty() {
-        return note(
-            model,
-            "no repos yet: register one with `atelier add <path>`",
-        );
-    }
-    model.modal = Some(Modal::Menu {
-        title: format!("New worktree for {} in", issue.key),
-        entries,
-        selected: 0,
-    });
-    Vec::new()
-}
-
-fn new(model: &mut Model) -> Vec<Effect> {
-    match model.active() {
-        List::Workspaces => update(
-            model,
-            Action::Ask {
-                title: "New workspace".into(),
-                initial: String::new(),
-                then: Submit::Workspace,
-            },
-        ),
-        List::Repos => note(model, "register repos with `atelier add <path>`"),
-        List::ToReview | List::Mine => Vec::new(),
-        List::Section(_) => match model.issue().cloned() {
-            Some(issue) => ask_start(model, issue),
-            None => Vec::new(),
-        },
-        List::Work => {
-            let Some(workspace) = model.workspace().map(str::to_owned) else {
-                return Vec::new();
-            };
-            let group = match model.work_row() {
-                Some(Row::Group { name, .. }) => name,
-                Some(Row::Item(index)) => model.snapshot.work[index].group.clone(),
-                None => String::new(),
-            };
-            let ask = |repo: std::path::PathBuf, name: String| Action::Ask {
-                title: format!("New worktree of {name}: branch"),
-                initial: String::new(),
-                then: Submit::Branch {
-                    repo,
-                    workspace: workspace.clone(),
-                    group: group.clone(),
-                },
-            };
-            // The selected worktree's repo, else every repo.
-            let selected = (model.targets().first()).and_then(|work| match &work.kind {
-                WorkKind::Worktree {
-                    repo, repo_name, ..
-                } => Some((repo.clone(), repo_name.clone())),
-                WorkKind::Carnet { .. } => None,
-            });
-            let mut entries: Vec<MenuEntry> = match selected {
-                Some((repo, name)) if !model.carnets => return update(model, ask(repo, name)),
-                Some((repo, name)) => vec![MenuEntry {
-                    key: "1".into(),
-                    label: format!("worktree of {name}"),
-                    action: ask(repo, name),
-                }],
-                None => (model.snapshot.repos.iter().enumerate())
-                    .map(|(index, repo)| MenuEntry {
-                        key: (index + 1).to_string(),
-                        label: if model.carnets {
-                            format!("worktree of {}", repo.name())
-                        } else {
-                            repo.name()
-                        },
-                        action: ask(repo.path.clone(), repo.name()),
-                    })
-                    .collect(),
-            };
-            if model.carnets {
-                entries.push(MenuEntry {
-                    key: "c".into(),
-                    label: "carnet".into(),
-                    action: Action::Ask {
-                        title: "New carnet: name".into(),
-                        initial: String::new(),
-                        then: Submit::Carnet { workspace, group },
-                    },
-                });
-            }
-            if entries.is_empty() {
-                return note(
-                    model,
-                    "no repos yet: register one with `atelier add <path>`",
-                );
-            }
-            let title = if model.carnets {
-                "New"
-            } else {
-                "New worktree in"
-            };
-            model.modal = Some(Modal::Menu {
-                title: title.into(),
-                entries,
-                selected: 0,
-            });
-            Vec::new()
-        }
-    }
-}
-
-fn edit(model: &mut Model) -> Vec<Effect> {
-    let action = match model.active() {
-        List::Workspaces | List::ToReview | List::Mine | List::Section(_) => return Vec::new(),
-        List::Repos => {
-            let Some(repo) = model.repo() else {
-                return Vec::new();
-            };
-            Action::Ask {
-                title: format!("Alias of {} (empty clears it)", repo.path.display()),
-                initial: repo.alias.clone().unwrap_or_default(),
-                then: Submit::Alias(repo.path.clone()),
-            }
-        }
-        List::Work => {
-            let targets = model.targets();
-            let Some(first) = targets.first() else {
-                return Vec::new();
-            };
-            Action::Ask {
-                title: format!("Group of {} item(s)", targets.len()),
-                initial: first.group.clone(),
-                then: Submit::Group(paths(&targets)),
-            }
-        }
-    };
-    update(model, action)
-}
-
-fn workspace_menu(
+pub(super) fn workspace_menu(
     model: &mut Model,
     title: String,
     current: &str,
@@ -1085,145 +770,14 @@ fn workspace_menu(
     Vec::new()
 }
 
-fn move_to(model: &mut Model) -> Vec<Effect> {
-    match model.active() {
-        List::Workspaces | List::ToReview | List::Mine | List::Section(_) => Vec::new(),
-        List::Repos => {
-            let Some(repo) = model.repo().cloned() else {
-                return Vec::new();
-            };
-            workspace_menu(
-                model,
-                format!("Default workspace of {}", repo.name()),
-                &repo.default_workspace,
-                |workspace| Job::SetRepoWorkspace {
-                    repo: repo.path.clone(),
-                    workspace,
-                },
-            )
-        }
-        List::Work => {
-            let targets = model.targets();
-            let Some(first) = targets.first() else {
-                return Vec::new();
-            };
-            let current = first.workspace.clone();
-            let paths = paths(&targets);
-            workspace_menu(
-                model,
-                format!("Move {} item(s) to", paths.len()),
-                &current,
-                |workspace| Job::Move {
-                    paths: paths.clone(),
-                    workspace,
-                },
-            )
-        }
-    }
-}
-
-fn confirm(model: &mut Model, title: String, lines: Vec<String>, job: Job) -> Vec<Effect> {
+pub(super) fn confirm(
+    model: &mut Model,
+    title: String,
+    lines: Vec<String>,
+    job: Job,
+) -> Vec<Effect> {
     model.modal = Some(Modal::Confirm { title, lines, job });
     Vec::new()
-}
-
-fn remove(model: &mut Model) -> Vec<Effect> {
-    match model.active() {
-        List::ToReview | List::Mine | List::Section(_) => Vec::new(),
-        List::Workspaces => {
-            let Some(name) = model.workspace().map(str::to_owned) else {
-                return Vec::new();
-            };
-            let lines = vec![format!("Remove the workspace {name}?")];
-            confirm(
-                model,
-                "Remove workspace".into(),
-                lines,
-                Job::RemoveWorkspace(name),
-            )
-        }
-        List::Repos => {
-            let Some(repo) = model.repo().cloned() else {
-                return Vec::new();
-            };
-            confirm(
-                model,
-                "Forget repo".into(),
-                vec![
-                    format!("Forget {} and close its tabs?", repo.name()),
-                    "Its worktrees stay on disk.".into(),
-                ],
-                Job::Forget(repo.path),
-            )
-        }
-        List::Work => {
-            let targets = model.targets();
-            let removable: Vec<(&Work, Removal)> = (targets.into_iter())
-                .filter_map(|work| Some((work, Removal::of(work)?)))
-                .collect();
-            if removable.is_empty() {
-                return note(model, "main worktrees and carnets are never removed");
-            }
-            let mut lines = vec!["Remove these?".to_owned()];
-            for (work, removal) in &removable {
-                let note = if removal.force {
-                    "  (uncommitted changes will be lost)"
-                } else {
-                    ""
-                };
-                lines.push(format!("  {}{note}", work.title()));
-            }
-            let removals = removable.into_iter().map(|(_, removal)| removal).collect();
-            confirm(model, "Remove".into(), lines, Job::Remove(removals))
-        }
-    }
-}
-
-fn copy_path(model: &Model) -> Option<String> {
-    match model.active() {
-        List::Workspaces => model.workspace().map(Into::into),
-        List::Repos => model.repo().map(|repo| repo.path.display().to_string()),
-        List::Work => match model.work_row()? {
-            Row::Item(index) => Some(model.snapshot.work[index].path().display().to_string()),
-            Row::Group { name, .. } => Some(name).filter(|name| !name.is_empty()),
-        },
-        List::ToReview | List::Mine | List::Section(_) => None,
-    }
-}
-
-fn branch(model: &Model) -> Option<String> {
-    match model.active() {
-        List::Work => match model.work_row()? {
-            Row::Item(index) => (model.snapshot.work[index].tree())?.branch.clone(),
-            Row::Group { .. } => None,
-        },
-        List::ToReview | List::Mine => model.review().map(|review| review.branch.clone()),
-        List::Workspaces | List::Repos | List::Section(_) => None,
-    }
-}
-
-/// The forge page of the selected repo, review, or worktree's branch.
-fn url(model: &Model) -> Option<String> {
-    let forges = &model.snapshot.forges;
-    match model.active() {
-        List::Repos => forges
-            .get(&model.repo()?.path)
-            .map(|forge| forge.url.clone()),
-        List::Work => match model.work_row()? {
-            Row::Item(index) => {
-                let work = &model.snapshot.work[index];
-                let forge = forges.get(work.repo()?)?;
-                Some(match &work.tree()?.branch {
-                    Some(branch) => forge.branch_url(branch),
-                    None => forge.url.clone(),
-                })
-            }
-            Row::Group { .. } => None,
-        },
-        List::ToReview | List::Mine => model.review().map(|review| review.url.clone()),
-        List::Section(_) => model.issue()?.url.clone(),
-        List::Workspaces => None,
-    }
 }
 
 fn mouse_event(model: &mut Model, mouse: MouseEvent) -> Vec<Effect> {
@@ -1277,6 +831,8 @@ fn mouse_event(model: &mut Model, mouse: MouseEvent) -> Vec<Effect> {
 
 #[cfg(test)]
 pub mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use crate::reviews::{Review, Role};
     use crate::state::Repo;

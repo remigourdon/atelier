@@ -2,6 +2,7 @@
 
 mod app;
 mod jobs;
+mod lists;
 mod update;
 mod view;
 mod widgets;
