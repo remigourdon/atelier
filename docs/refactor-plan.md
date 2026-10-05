@@ -28,7 +28,7 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
 
 - **Status:** done
 - **Branch:** `record-refactor-plan`, from `main`
-- `CONTEXT.md` (Carnet, Closed carnet, Findings, Group, Linked work), ADR 0001, `docs/design.md` (carnet redesign, keys `c` and `s`, the Carnets sub-tab, the new `carnet` CLI), and this file.
+- `CONTEXT.md` (Carnet, Closed carnet, Group, Linked work), ADR 0001, `docs/design.md` (carnet redesign, keys `c` and `s`, the Carnets sub-tab, the new `carnet` CLI), and this file.
 
 ## Step 1 — Small fixes
 
@@ -144,8 +144,7 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
    - `create`:
      - Folder: `<date>-<name in kebab case>`, keeping a key typed at the start of the name.
      - README: `# <name>`, under front matter whose `tickets` holds the typed key, else the selected group when it is a ticket key (`Names` pattern) or a GitHub issue key (`repo#12`, `owner/repo#12`).
-     - `.gitignore`: `raw/`.
-     - Then `git init`, and a first commit, `Create carnet`, of both files.
+     - Then `git init`, and a first commit, `Create carnet`, of the README.
    - `add` is deleted.
 2. **Items scans the root on each snapshot**, when carnets are enabled.
    - Each carnet found gets an `items` row, kind `carnet`: an existing row keeps its workspace, a new one goes to the default workspace. Its `group_key` is set to its first ticket, as a cache that tab names and grouping read.
