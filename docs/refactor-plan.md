@@ -165,8 +165,9 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
    - Since step 1, a fast refresh keeps the loaded READMEs and commits, so a carnet's stay stale until the next full refresh. The scan already reads each README: when a carnet's README differs from the loaded one, `Action::Loaded` drops that carnet's README and commits.
 4. **Verbs.**
    - `regroup` on a carnet calls `set_first_ticket` and renames its tab. `Items::regroup` already renames a carnet's tab on its own; worktrees keep today's path.
-   - New `close_carnet(path)`, which also closes its tab, and `reopen_carnet(path)`.
+   - New `set_carnets_closed(paths, closed)`; closing also closes the tab.
    - The TUI's `c` key (new `Cmd::CloseCarnet`) on a Work carnet row, or on a group header for its carnets, runs `Job::CloseCarnet(paths)`.
+   - `d` never touches a carnet: `Removal` describes only worktrees, and `Removal::of` returns `None` for carnets and main worktrees.
 5. **Workspace removal moves carnets.** It no longer forgets them:
    - `State::remove_workspace` moves the workspace's carnets to the default workspace. Worktrees still block it.
    - Delete `--forget-carnets`, `State::workspace_carnets`, the `carnets` field of `Job::RemoveWorkspace`, the `carnets` argument of `Items::remove_workspace` and `State::remove_workspace`, and the carnet lines in the TUI confirmation.
@@ -196,6 +197,7 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
 - **Status:** todo
 - **Branch:** `refactor-list-modules`, from `refactor-carnet-record`
 - **Files:** new `src/tui/lists/{mod,workspaces,repos,work,reviews,issues}.rs`; `src/tui/{app,update,view}.rs`
+- **Since step 3:** Work has one more operation, `c` (`Cmd::CloseCarnet`, today an arm in `update::command`), which belongs in `work.rs` like `d`, `x` and `p`. Work's `remove` builds `Removal::of(work)`, which skips carnets and main worktrees. The Work rows hold open carnets only; closed ones are in `Snapshot.carnets`.
 
 **Why.** Each operation (`activate`, `new`, `edit`, `move_to`, `remove`, `copy_path`, `branch`, `url`, `listed_ids`, `len`, `title`, `rows`, `detail`) matches on every `List`, about 17 match sites over 3 files, so a new list touches all of them. Step 5 adds one.
 
@@ -264,7 +266,7 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
    - A missing `rg` goes to the command log with the same message as the CLI.
 5. **Keys.**
    - `Space` opens the carnet's tab. A closed carnet stays closed.
-   - `c` closes an open carnet or reopens a closed one (`reopen_carnet` from step 3).
+   - `c` closes an open carnet or reopens a closed one. Add `Job::ReopenCarnet(paths)`, run through `Items::set_carnets_closed(paths, false)`.
    - `y` / `C-o` copy its path.
    - The detail view is the same as for a carnet in Work.
 6. **Keymap.** Add `List::Carnets` to the keymap's `Kind` tables:

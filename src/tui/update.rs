@@ -1162,10 +1162,7 @@ fn remove(model: &mut Model) -> Vec<Effect> {
                 .filter_map(|work| Some((work, Removal::of(work)?)))
                 .collect();
             if removable.is_empty() {
-                return note(
-                    model,
-                    "main worktrees and carnets are never removed: c closes a carnet",
-                );
+                return note(model, "main worktrees and carnets are never removed");
             }
             let mut lines = vec!["Remove these?".to_owned()];
             for (work, removal) in &removable {
@@ -2573,7 +2570,7 @@ pub mod tests {
                 .last()
                 .unwrap()
                 .command
-                .contains("c closes a carnet")
+                .contains("carnets are never removed")
         );
     }
 }
