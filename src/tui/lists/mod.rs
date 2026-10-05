@@ -1,6 +1,7 @@
 //! The selectable lists: one module per kind of list, each owning its rows, its detail and
 //! what each key does on its selection.
 
+pub mod carnets;
 mod issues;
 mod repos;
 mod reviews;
@@ -34,6 +35,10 @@ pub trait ListKind: Sync {
             "loading…"
         }
     }
+    /// The selected item whose README and commits the main view shows.
+    fn item<'a>(&self, _model: &'a Model, _list: List) -> Option<&'a Work> {
+        None
+    }
     fn activate(&self, _model: &mut Model, _list: List) -> Vec<Effect> {
         Vec::new()
     }
@@ -52,6 +57,10 @@ pub trait ListKind: Sync {
     }
     fn remove(&self, _model: &mut Model, _list: List) -> Vec<Effect> {
         Vec::new()
+    }
+    /// `Esc` on the list, once its filter is clear; `false` when it does nothing.
+    fn back(&self, _model: &mut Model, _list: List) -> bool {
+        false
     }
     /// A command only some lists act on, such as `x`, `c` or `p`; the others ignore it.
     fn command(&self, _model: &mut Model, _list: List, _cmd: Cmd) -> Vec<Effect> {
@@ -74,6 +83,7 @@ pub fn of(list: List) -> &'static dyn ListKind {
         List::Workspaces => &workspaces::Workspaces,
         List::Repos => &repos::Repos,
         List::Work => &work::WorkList,
+        List::Carnets => &carnets::Carnets,
         List::ToReview | List::Mine => &reviews::Reviews,
         List::Section(_) => &issues::Issues,
     }

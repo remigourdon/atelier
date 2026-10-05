@@ -6,8 +6,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
-use super::app::{Focus, KEYMAP, Model, Panel, Popup, Screen, popup_hints};
-use super::lists::{self, work};
+use super::app::{Cmd, Focus, KEYMAP, List, Model, Panel, Popup, Screen, Work, popup_hints};
+use super::lists;
 use super::widgets;
 use crate::config::Icons;
 
@@ -224,7 +224,7 @@ fn render_panel(frame: &mut Frame, model: &Model, palette: &Palette, panel: Pane
             title.push(tab(model.title(other), other == list));
         }
     }
-    if panel == Panel::Work
+    if list == List::Work
         && let Some(workspace) = model.workspace()
     {
         title.push(Span::styled(
@@ -283,9 +283,15 @@ fn render_panel(frame: &mut Frame, model: &Model, palette: &Palette, panel: Pane
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// The active list's selected item, whose README and commits the main view shows.
+fn selected(model: &Model) -> Option<&Work> {
+    let list = model.active();
+    lists::of(list).item(model, list)
+}
+
 /// The selected carnet's README, rendered once read.
 fn readme(model: &Model) -> Option<Text<'_>> {
-    let readme = model.readmes.get(work::selected(model)?.path())?;
+    let readme = model.readmes.get(selected(model)?.path())?;
     Some(tui_markdown::from_str(crate::carnet::body(
         readme.as_deref()?,
     )))
@@ -293,7 +299,7 @@ fn readme(model: &Model) -> Option<Text<'_>> {
 
 /// The selected worktree's recent commits, once loaded.
 fn commits(model: &Model) -> Option<&Vec<String>> {
-    model.commits.get(work::selected(model)?.path())
+    model.commits.get(selected(model)?.path())
 }
 
 /// How many lines the main view holds, so scrolling stops at its end.
@@ -304,6 +310,7 @@ fn detail(model: &Model) -> Vec<(String, String)> {
 
 pub fn main_len(model: &Model) -> usize {
     detail(model).len()
+        + model.carnet_hits().map_or(0, |hits| hits.len() + 2)
         + readme(model).map_or(0, |readme| readme.lines.len() + 1)
         + commits(model).map_or(0, |commits| commits.len() + 2)
 }
@@ -322,6 +329,14 @@ fn render_main(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect) 
             ])
         })
         .collect();
+    if let Some(hits) = model.carnet_hits() {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            "Matches",
+            Style::new().fg(palette.accent).bold(),
+        ));
+        lines.extend(hits.iter().map(|hit| Line::raw(hit.as_str())));
+    }
     if let Some(readme) = readme(model) {
         lines.push(Line::raw(""));
         lines.extend(readme.lines);
@@ -376,6 +391,7 @@ fn render_hints(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect)
         for binding in KEYMAP
             .iter()
             .filter(|binding| binding.hint.contains(&active.kind()))
+            .filter(|binding| model.carnets || binding.cmd != Cmd::ToggleCarnet)
         {
             if !spans.is_empty() {
                 spans.push(Span::styled(" · ", Style::new().fg(palette.dim)));

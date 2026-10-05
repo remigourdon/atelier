@@ -245,7 +245,7 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
 
 ## Step 5 — Carnets sub-tab
 
-- **Status:** todo
+- **Status:** done (#20)
 - **Branch:** `refactor-carnets-subtab`, from `refactor-list-modules`
 - **Files:** new `src/tui/lists/carnets.rs`; `src/tui/app.rs` (`List::Carnets`, `Panel::tabs`, keymap), `src/tui/jobs.rs`, `src/tui/view.rs`, `src/tui/update.rs`, `src/carnet.rs`
 - **Spec:** the panel 2 row and keys table in `docs/design.md`.
@@ -288,6 +288,7 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
 - **Status:** todo
 - **Branch:** `refactor-remote-listings`, from `refactor-carnets-subtab`
 - **Files:** new `src/tui/schedule.rs`; `src/tui/{app,update,jobs,view}.rs`, `src/reviews.rs`, `src/issues.rs`
+- **Since step 5:** `Job::SearchCarnets(text)` is a third listing in `jobs::run`, beside `Commits` and `Readme`, reporting `Action::Searched`; its `Source` is `Run`. It is user-started, not scheduled, so it stays out of `schedule.rs`. `Job::ReopenCarnet` changes items, so `Action::Finished` must still refresh after it.
 
 **Why.** Reviews and Issues run through two copies of one pipeline: two `Job` variants, two `Action` variants, two update arms, two `fetch_*` functions, two job loops and two due flags. The refresh cadence is spread over Model fields that tests poke directly.
 

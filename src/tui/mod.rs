@@ -125,7 +125,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use super::app::{Action, Model};
+    use super::app::{Action, Model, WorkKind};
     use super::update::update;
     use super::*;
     use crate::config::Icons;
@@ -255,6 +255,26 @@ mod tests {
             &mut model,
             Action::Readme("/data/2026-10-02-ideas".into(), Some(readme.into())),
         );
+        model.loading.clear();
+        insta::assert_snapshot!(render(&model, 120, 30));
+    }
+
+    #[test]
+    fn carnets_sub_tab() {
+        let mut model = update::tests::with_carnets(loaded(120, 30));
+        // One open carnet, with a tab, a second ticket and a summary, and one closed.
+        model.snapshot.carnets.retain(|work| {
+            work.path.ends_with("2026-10-01-ABC-1-logs") || work.path.ends_with("2026-08-01-done")
+        });
+        model.snapshot.carnets[0].tab = true;
+        if let WorkKind::Carnet {
+            tickets, summary, ..
+        } = &mut model.snapshot.carnets[0].kind
+        {
+            tickets.push("api#4".into());
+            *summary = "Login fails after the token refresh".into();
+        }
+        update(&mut model, Action::Key(key(']')));
         model.loading.clear();
         insta::assert_snapshot!(render(&model, 120, 30));
     }

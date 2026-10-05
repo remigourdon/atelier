@@ -101,7 +101,7 @@ Lazygit model: numbered side panels on the left, the main view on the right show
 | Panel | Sub-tabs | Content |
 |---|---|---|
 | 1 | Workspaces │ Repos | Workspaces (current session first); repos with alias and default workspace |
-| 2 | Work │ Carnets | Work: worktrees and open carnets of the selected workspace, grouped by group, foldable; carnets newest first, ungrouped ones in a `Carnets` group folded by default. Main worktrees always shown. Carnets: every carnet in every workspace, closed ones included, newest first with its summary; `/` matches name, tickets and summary, and a content search runs `rg` over the root. |
+| 2 | Work │ Carnets | Work: worktrees and open carnets of the selected workspace, grouped by group, foldable; carnets newest first, ungrouped ones in a `Carnets` group folded by default. Main worktrees always shown. Carnets, only while carnets are enabled: every carnet in every workspace, closed ones included, newest first with its tickets and summary; `/` matches name, tickets and summary. `s` runs `rg` over the root and narrows the list to the carnets with hits, whose hit lines the main view shows above the README, until `Esc`. |
 | 3 | To review │ Mine | Reviews |
 | 4 | one per section | Issues; when the sections do not fit the title, only the active one shows, with its position |
 
@@ -125,7 +125,7 @@ Lazygit defaults. The keymap is one table in code that also feeds `?` and the hi
 | `n` | new worktree (menu with carnet when carnets are enabled) · new worktree for an issue · new workspace in Workspaces |
 | `e` · `m` · `d` · `x` | edit group or repo alias · move to workspace or set a repo's workspace · remove worktree or workspace, forget repo (confirm) · close tab |
 | `p` | `git pull --ff-only` on the worktree; carnets are skipped |
-| `c` · `s` | close or reopen a carnet · search inside carnets with `rg` (Carnets sub-tab) |
+| `c` · `s` | close or reopen a carnet (in the hint bar while carnets are enabled) · search inside carnets with `rg` (Carnets sub-tab) |
 | `o` · `y` `C-o` | open in browser · copy path/branch/URL via OSC 52 |
 | `/` | substring filter on the focused panel |
 | `R` · `?` · `+` `_` · `@` | refresh · actions menu · screen mode · toggle command log |
