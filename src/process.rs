@@ -1,9 +1,12 @@
 //! External commands, behind a trait so orchestration can be tested without them.
 
 use std::cell::RefCell;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Result, WrapErr};
 
 pub trait Runner {
     /// Runs a command to completion and returns its trimmed stdout, failing on a non-zero exit.
@@ -91,6 +94,35 @@ pub struct Logged {
     pub error: Option<String>,
 }
 
+/// Saves every retained entry without terminal clipping, keeping earlier exports intact.
+pub fn export_log(directory: &Path, entries: &[Logged]) -> Result<PathBuf> {
+    std::fs::create_dir_all(directory)
+        .wrap_err_with(|| format!("creating {}", directory.display()))?;
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let path = directory.join(format!(
+        "command-log-{timestamp}-{}.log",
+        std::process::id()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
+        .wrap_err_with(|| format!("creating {}", path.display()))?;
+    for entry in entries {
+        let line = match &entry.error {
+            Some(error) => format!("✗ {}: {error}", entry.command),
+            None => format!("✓ {}", entry.command),
+        };
+        writeln!(file, "{line}").wrap_err_with(|| format!("writing {}", path.display()))?;
+    }
+    Ok(path)
+}
+
 /// Runs commands through another runner and records each one.
 pub struct Recorder<'a> {
     inner: &'a dyn Runner,
@@ -138,6 +170,49 @@ impl Runner for Recorder<'_> {
 mod tests {
     use super::fake::Fake;
     use super::*;
+
+    #[test]
+    fn exports_complete_entries_and_keeps_previous_exports() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("logs");
+        let long_command = format!("git {}", "long-argument".repeat(100));
+        let error = "first line\nsecond line\n".to_owned() + &"details".repeat(100);
+        let entries = vec![
+            Logged {
+                command: "git status".into(),
+                error: None,
+            },
+            Logged {
+                command: long_command.clone(),
+                error: Some(error.clone()),
+            },
+        ];
+        let path = export_log(&directory, &entries).unwrap();
+        let expected = format!("✓ git status\n✗ {long_command}: {error}\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+        let empty = export_log(&directory, &[]).unwrap();
+        assert_ne!(path, empty);
+        assert_eq!(std::fs::read_to_string(empty).unwrap(), "");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn export_reports_an_unwritable_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("file");
+        std::fs::write(&directory, "keep").unwrap();
+        let error = export_log(&directory, &[]).unwrap_err();
+        assert!(format!("{error:#}").contains(&directory.display().to_string()));
+        assert_eq!(std::fs::read_to_string(directory).unwrap(), "keep");
+    }
 
     #[test]
     fn recorder_logs_successes_and_failures() {

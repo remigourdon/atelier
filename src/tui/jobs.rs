@@ -82,6 +82,24 @@ pub fn run(context: &Context, job: Job) -> Action {
             let text = std::fs::read_to_string(path.join("README.md")).ok();
             Action::Readme(Readme { path, stamp, text })
         }
+        Job::ExportLog(ref entries) => {
+            let directory = crate::config::state_home().join("atelier/logs");
+            let entry = match crate::process::export_log(&directory, entries) {
+                Ok(path) => Logged {
+                    command: format!("export command log to {}", path.display()),
+                    error: None,
+                },
+                Err(err) => Logged {
+                    command: "export command log".into(),
+                    error: Some(format!("{err:#}")),
+                },
+            };
+            Action::Finished {
+                job,
+                log: vec![entry],
+                error: None,
+            }
+        }
         Job::SearchCarnets(text) => {
             let hits = match context.config.carnet_root() {
                 Some(root) => carnet::hits(&recorder, &root, &text),
@@ -238,6 +256,7 @@ fn execute(context: &Context, state: &State, runner: &dyn Runner, job: Job) -> R
         | Job::Commits(_)
         | Job::Readme(_)
         | Job::SearchCarnets(_)
+        | Job::ExportLog(_)
         | Job::Plan { .. }
         | Job::Fetch { .. } => {
             unreachable!("run handles these")

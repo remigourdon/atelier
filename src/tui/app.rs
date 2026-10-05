@@ -151,6 +151,8 @@ pub enum Job {
     RemoveWorkspace(String),
     SwitchWorkspace(String),
     Browse(String),
+    /// Saves the current command log, captured when requested.
+    ExportLog(Vec<Logged>),
     /// Lists a feed in each of its keys, hosts or scopes, from the cache unless `force`.
     Fetch {
         feed: Feed,
@@ -252,7 +254,10 @@ impl Job {
 
     /// Whether it changes items, workspaces, repos or tabs, so a refresh shows it once done.
     pub fn changes_items(&self) -> bool {
-        !matches!(self, Job::Browse(_) | Job::SwitchWorkspace(_))
+        !matches!(
+            self,
+            Job::Browse(_) | Job::SwitchWorkspace(_) | Job::ExportLog(_)
+        )
     }
 }
 
@@ -411,6 +416,7 @@ pub enum Cmd {
     NextScreen,
     PrevScreen,
     ToggleLog,
+    ExportLog,
     Back,
     Quit,
 }
@@ -521,6 +527,7 @@ pub const KEYMAP: &[Binding] = &[
     Binding { keys: &[ch('+')], label: "+", cmd: Cmd::NextScreen, help: "next screen mode", hint: NONE, on: On::Global },
     Binding { keys: &[ch('_')], label: "_", cmd: Cmd::PrevScreen, help: "previous screen mode", hint: NONE, on: On::Global },
     Binding { keys: &[ch('@')], label: "@", cmd: Cmd::ToggleLog, help: "toggle the command log", hint: NONE, on: On::Global },
+    Binding { keys: &[ch('E')], label: "E", cmd: Cmd::ExportLog, help: "export the command log to a file", hint: NONE, on: On::Global },
     Binding { keys: &[code(KeyCode::Esc)], label: "Esc", cmd: Cmd::Back, help: "back", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('q'), ctrl('c')], label: "q", cmd: Cmd::Quit, help: "quit", hint: ALL, on: On::Global },
 ];
