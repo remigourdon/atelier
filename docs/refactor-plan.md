@@ -37,7 +37,7 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
 
 ## Step 1 — Small fixes
 
-- **Status:** todo
+- **Status:** done (#16)
 - **Branch:** `refactor-small-fixes`, from `record-refactor-plan`
 - **Files:** `src/state.rs`, `src/sync.rs`, `src/zellij.rs`, `src/cli.rs`, `src/tui/jobs.rs`, `src/tui/update.rs`
 
