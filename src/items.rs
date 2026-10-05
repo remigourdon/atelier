@@ -157,7 +157,7 @@ impl Removal {
 }
 
 /// The canonical path when it exists, so paths match the ones hooks record.
-fn canonical(path: &Path) -> PathBuf {
+pub fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_owned())
 }
 

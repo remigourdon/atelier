@@ -76,14 +76,15 @@ impl Item {
 }
 
 /// The `items.kind` column.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ItemKind {
     Worktree,
     Carnet,
 }
 
 impl ItemKind {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             ItemKind::Worktree => "worktree",
             ItemKind::Carnet => "carnet",
@@ -151,6 +152,15 @@ impl State {
             db: Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?,
             default_workspace: default_workspace.to_owned(),
         })
+    }
+
+    /// Opens the database read-only, else an empty one in memory when there is none yet, so
+    /// reading never creates it.
+    pub fn read(path: &Path, default_workspace: &str) -> Result<Self> {
+        match path.exists() {
+            true => Self::open_read_only(path, default_workspace),
+            false => Self::from_connection(Connection::open_in_memory()?, default_workspace),
+        }
     }
 
     /// Opens a database that `open` already migrated, as each TUI job does.
@@ -509,6 +519,18 @@ impl State {
                  AND (?3 IS NULL OR fetched_at >= datetime('now', ?3))",
                 params![source, key, since],
                 |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// A cached remote response of any age and when it was fetched, `YYYY-MM-DD HH:MM:SS` UTC.
+    pub fn cached_entry(&self, source: &str, key: &str) -> Result<Option<(String, String)>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT json, fetched_at FROM cache WHERE source = ? AND key = ?",
+                params![source, key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?)
     }

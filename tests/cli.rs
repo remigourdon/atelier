@@ -207,6 +207,15 @@ fn shell_init_fish_wraps_wt() {
 }
 
 #[test]
+fn context_never_creates_the_database() {
+    let home = Home::new();
+    let json = home.ok(&["context", "--json"]);
+    let context: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(context["item"], serde_json::Value::Null);
+    assert!(!home.path("state/atelier").exists());
+}
+
+#[test]
 fn carnets_are_folders_under_the_configured_root() {
     let home = Home::new();
     assert!(
@@ -260,19 +269,28 @@ fn carnets_are_folders_under_the_configured_root() {
             .contains("2026-01-03-done\tORD-7\tFixed\n")
     );
 
-    assert_eq!(
-        home.ok(&["carnet", "path", "ORD-7"]),
-        format!(
-            "{}\n",
-            home.path("Data/2026-01-02-ORD-7-old-notes")
-                .canonicalize()
-                .unwrap()
-                .display()
-        )
+    let json = home.ok(&["context", "--json", &path.join("notes").to_string_lossy()]);
+    let context: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(context["item"]["kind"], "carnet");
+    assert_eq!(context["workspace"]["name"], "default");
+    assert_eq!(context["group"], "ABC-1");
+    assert_eq!(context["carnet"], path.to_string_lossy().as_ref());
+    let json = home.ok(&["context", "--json", "--key", "ORD-7"]);
+    let context: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(context["item"], serde_json::Value::Null);
+    assert_eq!(context["carnets"].as_array().unwrap().len(), 2);
+    assert!(
+        (context["carnet"].as_str().unwrap()).ends_with("2026-01-02-ORD-7-old-notes"),
+        "{context}"
     );
-    let missing = home.run(&["carnet", "path", "XYZ-9"]);
-    assert!(!missing.status.success() && missing.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("atelier carnet new"));
+    assert_eq!(
+        home.ok(&["context", &home.path("Data").to_string_lossy()]),
+        "item       not in an atelier item\n"
+    );
+    assert!(
+        home.fails(&["context", ".", "--key", "ORD-7"])
+            .contains("cannot be used with")
+    );
 
     let search = home
         .command(&["carnet", "search", "x"])

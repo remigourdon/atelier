@@ -8,6 +8,7 @@ use clap_complete::engine::{ArgValueCandidates, CompletionCandidate};
 use color_eyre::eyre::{Result, WrapErr, bail};
 
 use crate::config::Config;
+use crate::context::{self, Target};
 use crate::git;
 use crate::hooks::{self, Phase};
 use crate::items::Items;
@@ -63,6 +64,19 @@ enum Command {
         #[arg(add = ArgValueCandidates::new(complete_workspaces))]
         workspace: String,
     },
+    /// Describe a directory's worktree or carnet: its workspace, its group's issue, worktrees
+    /// and carnets. Reads atelier's records, the issue cache and `wt list`; changes nothing.
+    Context {
+        /// A directory inside the item to describe.
+        #[arg(default_value = ".", conflicts_with = "key")]
+        path: PathBuf,
+        /// Describe a ticket key's issue, worktrees and carnets instead.
+        #[arg(short, long)]
+        key: Option<String>,
+        /// Print JSON, for scripts and coding agents.
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage carnets, the investigation folders under `[carnets] root`.
     #[command(subcommand)]
     Carnet(Carnet),
@@ -109,12 +123,6 @@ enum Carnet {
     },
     /// Search every carnet for a text with ripgrep.
     Search { text: String },
-    /// Print the path of the newest open carnet with a ticket.
-    Path {
-        /// The ticket key (default: the group of the worktree or carnet holding the current
-        /// directory).
-        key: Option<String>,
-    },
 }
 
 #[derive(Subcommand)]
@@ -150,6 +158,23 @@ pub fn run() -> Result<()> {
         }
         Command::Hooks(command) => run_hooks(command),
         Command::Tui => crate::tui::run(Config::load()?),
+        Command::Context { path, key, json } => {
+            let config = Config::load()?;
+            // Read-only: describing a directory must not create or migrate the database.
+            let state = State::read(&state::db_path(), config.default_workspace())?;
+            let target = match &key {
+                Some(key) => Target::Key(key),
+                None => Target::Dir(&path),
+            };
+            let here = crate::zellij::current_session();
+            let context = context::describe(&state, &config, &System, here.as_deref(), target)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&context)?);
+            } else {
+                print!("{}", context::render(&context));
+            }
+            Ok(())
+        }
         Command::Hook { phase } => {
             // A hook must never abort worktrunk: report and succeed.
             if let Err(err) = run_hook(phase) {
@@ -261,15 +286,14 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
                     }
                 }
                 Carnet::Search { text } => crate::carnet::search(&System, &root, &text)?,
-                Carnet::Path { key } => {
-                    let dir = std::env::current_dir()?;
-                    let path = crate::carnet::path_for(state, &names, &root, key.as_deref(), &dir)?;
-                    println!("{}", path.display());
-                }
             }
             Ok(())
         }
-        Command::Hooks(_) | Command::Shell(_) | Command::Hook { .. } | Command::Tui => {
+        Command::Hooks(_)
+        | Command::Shell(_)
+        | Command::Hook { .. }
+        | Command::Tui
+        | Command::Context { .. } => {
             unreachable!()
         }
     }

@@ -499,11 +499,43 @@ pub fn fetch(
     api: &dyn Issues,
     force: bool,
 ) -> (Vec<Issue>, Option<Report>) {
-    let source = api.tracker().cli();
-    let key = format!("issues {}", api.scope());
+    let (source, key) = cache_slot(api.tracker(), api.scope());
     let (issues, error) = state.fetch_cached(source, &key, force, || api.issues());
     let error = error.map(|err| err.wrap_err(format!("{source} issues in {}", api.scope())));
     (issues, error)
+}
+
+/// Where the issues of a tracker's scope are cached: its source and key.
+fn cache_slot(tracker: Tracker, scope: &str) -> (&'static str, String) {
+    (tracker.cli(), format!("issues {scope}"))
+}
+
+/// The issue `key` as the last fetch of a configured scope left it in the cache, and when that
+/// fetch ran. Runs no command.
+pub fn cached(
+    state: &crate::state::State,
+    config: &TrackerConfig,
+    key: &str,
+) -> Result<Option<(Issue, String)>> {
+    let mut found = None;
+    for (tracker, scopes) in config.scopes() {
+        for scope in scopes {
+            let (source, slot) = cache_slot(tracker, &scope);
+            let entry = state.cached_entry(source, &slot)?;
+            let Some((json, fetched_at)) = entry else {
+                continue;
+            };
+            let Ok(issues) = serde_json::from_str::<Vec<Issue>>(&json) else {
+                continue;
+            };
+            if let Some(issue) = issues.into_iter().find(|issue| issue.key == key)
+                && found.as_ref().is_none_or(|(_, at)| *at < fetched_at)
+            {
+                found = Some((issue, fetched_at));
+            }
+        }
+    }
+    Ok(found)
 }
 
 /// The subset of each tracker's JSON that atelier reads.
