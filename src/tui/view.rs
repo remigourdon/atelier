@@ -29,6 +29,10 @@ pub struct Palette {
     pub error: Color,
     pub warn: Color,
     pub info: Color,
+    /// A review's reviewers requested changes.
+    pub changes_requested: Color,
+    /// A review's required approval is not given yet.
+    pub approval_pending: Color,
     pub glyphs: Glyphs,
 }
 
@@ -47,6 +51,9 @@ pub struct Glyphs {
     /// A finished worktree's mark: integrated, or its upstream gone.
     pub integrated: &'static str,
     pub gone: &'static str,
+    /// A branch's CI mark, its colour the status, and the mark when it could not be fetched.
+    pub ci: &'static str,
+    pub ci_error: &'static str,
     pub spinner: [&'static str; 4],
 }
 
@@ -67,11 +74,13 @@ impl Glyphs {
                 unfolded: "▾",
                 integrated: "⊂",
                 gone: "⊘",
+                ci: "◆",
+                ci_error: "⚠",
                 spinner,
             },
             // Nerd Fonts: fa-desktop, oct-repo, dev-git_branch, fa-book, oct-git_pull_request,
             // oct-issue_opened, fa-circle, fa-circle_o, fa-folder, fa-folder_open, oct-git_merge,
-            // fa-chain_broken.
+            // fa-chain_broken, fa-diamond, fa-warning.
             Icons::Nerd => Self {
                 workspace: "\u{f108}",
                 repo: "\u{f401}",
@@ -85,6 +94,8 @@ impl Glyphs {
                 unfolded: "\u{f07c}",
                 integrated: "\u{f419}",
                 gone: "\u{f127}",
+                ci: "\u{f219}",
+                ci_error: "\u{f071}",
                 spinner,
             },
         }
@@ -119,6 +130,8 @@ impl Palette {
             error: colors.red.into(),
             warn: colors.peach.into(),
             info: colors.blue.into(),
+            changes_requested: colors.pink.into(),
+            approval_pending: colors.teal.into(),
         }
     }
 }
@@ -324,14 +337,16 @@ fn commits(model: &Model) -> Option<&Vec<String>> {
     model.commits.get(selected(model)?.path())
 }
 
-/// How many lines the main view holds, so scrolling stops at its end.
-fn detail(model: &Model) -> Vec<(String, String)> {
+fn detail(model: &Model, palette: &Palette) -> Vec<(String, Line<'static>)> {
     let list = model.active();
-    lists::of(list).detail(model, list)
+    lists::of(list).detail(model, palette, list)
 }
 
+/// How many lines the main view holds, so scrolling stops at its end. Any palette lays out
+/// the same lines.
 pub fn main_len(model: &Model) -> usize {
-    detail(model).len()
+    let palette = Palette::new(catppuccin::PALETTE.mocha, Icons::Unicode);
+    detail(model, &palette).len()
         + model.carnet_hits().map_or(0, |hits| hits.len() + 2)
         + readme(model).map_or(0, |readme| readme.lines.len() + 1)
         + commits(model).map_or(0, |commits| commits.len() + 2)
@@ -340,15 +355,18 @@ pub fn main_len(model: &Model) -> usize {
 fn render_main(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect) {
     let focused = model.focus == Focus::Main;
     let block = block(Line::from(" Main "), focused, palette);
-    let pairs = detail(model);
+    let pairs = detail(model, palette);
     let width = pairs.iter().map(|(key, _)| key.len()).max().unwrap_or(0);
     let mut lines: Vec<Line> = pairs
         .into_iter()
         .map(|(key, value)| {
-            Line::from(vec![
-                Span::styled(format!("{key:width$}  "), Style::new().fg(palette.accent)),
-                Span::styled(value, Style::new().fg(palette.text)),
-            ])
+            let key = Span::styled(format!("{key:width$}  "), Style::new().fg(palette.accent));
+            // Each span's own colours, else the text colour.
+            let value = value.spans.into_iter().map(|span| {
+                let style = Style::new().fg(palette.text).patch(span.style);
+                span.style(style)
+            });
+            Line::from_iter(std::iter::once(key).chain(value))
         })
         .collect();
     if let Some(hits) = model.carnet_hits() {

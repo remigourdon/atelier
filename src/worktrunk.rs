@@ -8,6 +8,7 @@ use toml_edit::{DocumentMut, Item, Table, value};
 
 use crate::hooks::{self, Phase};
 use crate::process::Runner;
+use crate::reviews::Provider;
 
 /// The key atelier's command sits under in each hook's named table.
 const ENTRY: &str = "atelier";
@@ -151,6 +152,13 @@ pub fn same_project(a: &str, b: &str) -> bool {
 }
 
 impl Forge {
+    /// How the forge refers to review `number`: `#12`, or `!12` on GitLab.
+    pub fn review_reference(&self, number: u64) -> String {
+        Provider::from_name(&self.provider)
+            .unwrap_or(Provider::GitHub)
+            .reference(number)
+    }
+
     /// The web page of a branch.
     pub fn branch_url(&self, branch: &str) -> String {
         match self.provider.as_str() {
@@ -188,6 +196,150 @@ pub struct Worktree {
     /// Its branch's configured upstream no longer exists, as after a merged review deleted it.
     /// `wt list` cannot tell this apart from never pushed: [`crate::git::gone_branches`] does.
     pub gone: bool,
+    /// Its branch's CI, when listed with `--full` and there is one to show.
+    pub ci: Option<Ci>,
+}
+
+/// A branch's CI, as worktrunk's CI column reports it: its checks and its review's decision.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ci {
+    pub state: CiState,
+    /// Local HEAD differs from the remote, so the status is of an older commit.
+    pub stale: bool,
+    /// The checks are of the branch's own workflow, as for a default branch: it has no review.
+    pub branch_workflow: bool,
+    pub review: Option<CiReview>,
+}
+
+/// What worktrunk's CI column shows, its "no CI" aside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CiState {
+    Passed,
+    Running,
+    Failed,
+    Conflicts,
+    /// The status could not be fetched.
+    Error,
+    ChangesRequested,
+    /// A required approval is not given yet.
+    ApprovalPending,
+}
+
+impl CiState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Running => "running",
+            Self::Failed => "failed",
+            Self::Conflicts => "conflicts",
+            Self::Error => "error",
+            Self::ChangesRequested => Decision::ChangesRequested.label(),
+            Self::ApprovalPending => Decision::Pending.label(),
+        }
+    }
+}
+
+/// The open review of a branch, as worktrunk finds it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CiReview {
+    pub number: Option<u64>,
+    pub url: Option<String>,
+    /// `None` when the forge reports no decision.
+    pub decision: Option<Decision>,
+}
+
+/// What reviewers decided on a review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    ChangesRequested,
+    /// A required approval is not given yet.
+    Pending,
+    Draft,
+    Approved,
+}
+
+impl Decision {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "changes_requested" => Some(Self::ChangesRequested),
+            "pending" => Some(Self::Pending),
+            "draft" => Some(Self::Draft),
+            "approved" => Some(Self::Approved),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ChangesRequested => "changes requested",
+            Self::Pending => "approval pending",
+            Self::Draft => "draft",
+            Self::Approved => "approved",
+        }
+    }
+}
+
+impl Ci {
+    /// worktrunk's CI column from an item's `checks` and `pr`, `Some(None)` being `null`:
+    /// both `null` is a fetch error, `pr.mergeable` false is conflicts, and changes requested
+    /// outranks running checks while a pending approval only recolors a passing or check-less
+    /// branch. `None` when there is nothing to show.
+    fn of(checks: Option<Option<raw::Checks>>, pr: Option<Option<raw::Pr>>) -> Option<Self> {
+        if let (Some(None), Some(None)) = (&checks, &pr) {
+            return Some(Self {
+                state: CiState::Error,
+                stale: false,
+                branch_workflow: false,
+                review: None,
+            });
+        }
+        let checks = checks.flatten();
+        let review = pr.flatten().map(|pr| {
+            let conflicts = pr.mergeable == Some(false);
+            let review = CiReview {
+                number: pr.number,
+                url: pr.url,
+                decision: pr.review.as_deref().and_then(Decision::from_name),
+            };
+            (review, conflicts)
+        });
+        let status = checks.as_ref().and_then(|checks| checks.status.as_deref());
+        let decision = review.as_ref().and_then(|(review, _)| review.decision);
+        let state = if review.as_ref().is_some_and(|&(_, conflicts)| conflicts) {
+            CiState::Conflicts
+        } else if status == Some("failed") {
+            CiState::Failed
+        } else if decision == Some(Decision::ChangesRequested) {
+            CiState::ChangesRequested
+        } else if status == Some("running") {
+            CiState::Running
+        } else if decision == Some(Decision::Pending) {
+            CiState::ApprovalPending
+        } else if status == Some("passed") {
+            CiState::Passed
+        } else {
+            return None;
+        };
+        Some(Self {
+            state,
+            stale: checks.as_ref().is_some_and(|checks| checks.stale),
+            branch_workflow: checks.is_some_and(|checks| checks.source == "branch"),
+            review: review.map(|(review, _)| review),
+        })
+    }
+
+    /// worktrunk dims the column for a draft.
+    pub fn draft(&self) -> bool {
+        self.decision() == Some(Decision::Draft)
+    }
+
+    pub fn decision(&self) -> Option<Decision> {
+        self.review.as_ref()?.decision
+    }
+
+    pub fn review_url(&self) -> Option<&str> {
+        self.review.as_ref()?.url.as_deref()
+    }
 }
 
 /// Lists a repo's worktrees, pinning the JSON schema whatever the user's config says.
@@ -268,6 +420,7 @@ impl Listing {
                     on_default,
                     default_branch: default_branch.clone(),
                     gone: false,
+                    ci: Ci::of(item.checks, item.pr),
                 })
             })
             .collect();
@@ -330,6 +483,35 @@ mod raw {
         pub default_branch: Option<DefaultBranch>,
         #[serde(default)]
         pub display: Display,
+        /// `Some(None)` when `null`, which tells a fetch error apart from no CI.
+        #[serde(default, deserialize_with = "present")]
+        pub checks: Option<Option<Checks>>,
+        #[serde(default, deserialize_with = "present")]
+        pub pr: Option<Option<Pr>>,
+    }
+
+    /// A field that is there, even as `null`.
+    fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Option<T>>, D::Error> {
+        Ok(Some(Option::<T>::deserialize(deserializer)?))
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    pub struct Checks {
+        pub status: Option<String>,
+        pub source: String,
+        pub stale: bool,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    pub struct Pr {
+        pub number: Option<u64>,
+        pub url: Option<String>,
+        pub review: Option<String>,
+        pub mergeable: Option<bool>,
     }
 
     /// How a branch compares with the repo's default branch.
@@ -443,7 +625,18 @@ mod tests {
         assert_eq!(feature.symbols, "!?↑");
         assert_eq!(feature.diff, (12, 3));
         assert!(!feature.integrated && !feature.on_default && !feature.gone);
+        let ci = main.ci.as_ref().unwrap();
+        assert_eq!(ci.state, CiState::Passed);
+        assert!(ci.branch_workflow && ci.review.is_none());
+        let ci = feature.ci.as_ref().unwrap();
+        assert_eq!(ci.state, CiState::ChangesRequested);
+        assert!(ci.stale);
+        assert_eq!(
+            ci.review_url(),
+            Some("https://github.com/remigourdon/atelier/pull/12")
+        );
         let merged = &listing.worktrees[2];
+        assert_eq!(merged.ci, None);
         assert!(merged.integrated);
         assert_eq!(merged.ahead_of_default, Some(1));
         assert_eq!(merged.default_branch.as_deref(), Some("main"));
@@ -468,6 +661,72 @@ mod tests {
         assert!(integrated(r#""display":{"state":"integrated"}"#));
         assert!(integrated(r#""display":{"state":"empty"}"#));
         assert!(!integrated(r#""display":{"state":"ahead"}"#));
+    }
+
+    fn ci(fields: &str) -> Option<Ci> {
+        let json =
+            format!(r#"{{"items":[{{"branch":"b","worktree":{{"path":"/r.b"}}{fields}}}]}}"#);
+        Listing::parse(&json).unwrap().worktrees.remove(0).ci
+    }
+
+    fn state(fields: &str) -> Option<CiState> {
+        ci(fields).map(|ci| ci.state)
+    }
+
+    #[test]
+    fn ci_follows_worktrunks_column() {
+        assert_eq!(state(""), None, "not collected or never pushed");
+        assert_eq!(state(r#","pr":{"number":3}"#), None, "no CI");
+        assert_eq!(state(r#","checks":null,"pr":null"#), Some(CiState::Error));
+        let checks = |status: &str, pr: &str| {
+            state(&format!(
+                r#","checks":{{"status":{status},"source":"pr"}},"pr":{pr}"#
+            ))
+        };
+        assert_eq!(checks(r#""passed""#, "{}"), Some(CiState::Passed));
+        assert_eq!(checks(r#""running""#, "{}"), Some(CiState::Running));
+        assert_eq!(checks(r#""failed""#, "{}"), Some(CiState::Failed));
+        assert_eq!(
+            checks("null", r#"{"mergeable":false}"#),
+            Some(CiState::Conflicts)
+        );
+        assert_eq!(
+            checks(r#""running""#, r#"{"review":"changes_requested"}"#),
+            Some(CiState::ChangesRequested),
+            "outranks running"
+        );
+        assert_eq!(
+            checks(r#""failed""#, r#"{"review":"changes_requested"}"#),
+            Some(CiState::Failed)
+        );
+        assert_eq!(
+            checks(r#""passed""#, r#"{"review":"pending"}"#),
+            Some(CiState::ApprovalPending)
+        );
+        assert_eq!(
+            checks(r#""running""#, r#"{"review":"pending"}"#),
+            Some(CiState::Running),
+            "only recolors a passing branch"
+        );
+        assert_eq!(
+            state(r#","pr":{"review":"pending"}"#),
+            Some(CiState::ApprovalPending),
+            "or a check-less one"
+        );
+    }
+
+    #[test]
+    fn ci_keeps_the_review_and_whether_it_is_stale_or_the_branch_workflows() {
+        let review = ci(r#","checks":{"status":"passed","source":"pr","stale":true},
+            "pr":{"number":27,"url":"https://github.com/o/r/pull/27","review":"draft"}"#)
+        .unwrap();
+        assert!(review.stale && !review.branch_workflow);
+        assert!(review.draft());
+        assert_eq!(review.review_url(), Some("https://github.com/o/r/pull/27"));
+        assert_eq!(review.review.unwrap().number, Some(27));
+        let main = ci(r#","checks":{"status":"failed","source":"branch"}"#).unwrap();
+        assert!(main.branch_workflow && main.review.is_none());
+        assert_eq!(main.state, CiState::Failed);
     }
 
     #[test]

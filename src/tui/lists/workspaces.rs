@@ -74,7 +74,12 @@ impl ListKind for Workspaces {
             .collect()
     }
 
-    fn detail(&self, model: &Model, _list: List) -> Vec<(String, String)> {
+    fn detail(
+        &self,
+        model: &Model,
+        palette: &Palette,
+        _list: List,
+    ) -> Vec<(String, Line<'static>)> {
         let Some(name) = model.workspace() else {
             return Vec::new();
         };
@@ -97,9 +102,9 @@ impl ListKind for Workspaces {
             pair(
                 "Session",
                 if model.snapshot.here.as_deref() == Some(name) {
-                    "current".into()
+                    Span::styled("current", Style::new().fg(palette.accent))
                 } else {
-                    "other".into()
+                    Span::raw("other")
                 },
             ),
             pair("Worktrees", (work.len() - carnets).to_string()),

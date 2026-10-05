@@ -10,7 +10,8 @@ mod workspaces;
 
 use std::path::PathBuf;
 
-use ratatui::text::Line;
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
 
 use super::app::{Cmd, Effect, Job, Kind, List, Model, Work};
 use super::update::run;
@@ -27,8 +28,8 @@ pub trait ListKind: Sync {
     /// Each row's identity, which keeps the selection across a refresh.
     fn ids(&self, model: &Model, list: List) -> Vec<String>;
     fn rows<'a>(&self, model: &'a Model, palette: &Palette, list: List) -> Vec<Line<'a>>;
-    /// The key/value detail of the selection, atop the main view.
-    fn detail(&self, model: &Model, list: List) -> Vec<(String, String)>;
+    /// The key/value detail of the selection, atop the main view, coloured as its row is.
+    fn detail(&self, model: &Model, palette: &Palette, list: List) -> Vec<(String, Line<'static>)>;
     /// What an empty list says.
     fn empty(&self, model: &Model, _list: List) -> &'static str {
         if model.loaded {
@@ -123,6 +124,37 @@ fn kind(work: &Work) -> &'static str {
     }
 }
 
-fn pair(key: &str, value: String) -> (String, String) {
-    (key.to_owned(), value)
+fn pair(key: &str, value: impl Into<Line<'static>>) -> (String, Line<'static>) {
+    (key.to_owned(), value.into())
+}
+
+/// A carnet's tickets and an issue's labels.
+fn tag_style(palette: &Palette) -> Style {
+    Style::new().fg(palette.info)
+}
+
+/// The mark of an item whose tab is open or closed, and its style.
+fn tab(open: bool, palette: &Palette) -> (&'static str, Style) {
+    if open {
+        (palette.glyphs.open, Style::new().fg(palette.ok))
+    } else {
+        (palette.glyphs.closed, Style::new().fg(palette.dim))
+    }
+}
+
+/// A row's tab mark.
+fn tab_mark(open: bool, palette: &Palette) -> Span<'static> {
+    let (glyph, style) = tab(open, palette);
+    Span::styled(format!("{glyph} "), style)
+}
+
+/// `open` or `closed`, coloured as the tab mark.
+fn tab_word(open: bool, palette: &Palette) -> Span<'static> {
+    let (_, style) = tab(open, palette);
+    Span::styled(if open { "open" } else { "closed" }, style)
+}
+
+/// The detail's tab state, marked as its row is.
+fn tab_detail(open: bool, palette: &Palette) -> Line<'static> {
+    Line::from(vec![tab_mark(open, palette), tab_word(open, palette)])
 }

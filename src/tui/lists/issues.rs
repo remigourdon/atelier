@@ -3,7 +3,7 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, close_tabs, kind, pair, paths, plan};
+use super::{ListKind, close_tabs, kind, pair, paths, plan, tab_mark, tab_word, tag_style};
 use crate::finish::Scope;
 use crate::issues::{Issue, State};
 use crate::state::Repo;
@@ -104,6 +104,19 @@ fn ask_start(model: &mut Model, issue: Issue) -> Vec<Effect> {
     Vec::new()
 }
 
+/// An issue's state: in progress or done stand out, to do does not.
+fn state_style(state: State, palette: &Palette) -> Style {
+    match state {
+        State::Todo => Style::new(),
+        State::InProgress => Style::new().fg(palette.info),
+        State::Done => Style::new().fg(palette.ok),
+    }
+}
+
+fn blocked_style(palette: &Palette) -> Style {
+    Style::new().fg(palette.error)
+}
+
 impl ListKind for Issues {
     fn kind(&self) -> Kind {
         Kind::Issues
@@ -135,51 +148,59 @@ impl ListKind for Issues {
             .map(|issue| {
                 let glyphs = &palette.glyphs;
                 let work = model.issue_work(issue);
-                let marker = if work.iter().any(|work| work.tab) {
-                    Span::styled(format!("{} ", glyphs.open), Style::new().fg(palette.ok))
-                } else if !work.is_empty() {
-                    Span::styled(format!("{} ", glyphs.closed), dim)
-                } else {
+                let marker = if work.is_empty() {
                     Span::raw("  ")
+                } else {
+                    tab_mark(work.iter().any(|work| work.tab), palette)
                 };
                 let mut spans = vec![marker];
                 spans.extend(icon(glyphs.issue, dim));
                 spans.push(Span::styled(format!("{} ", issue.key), dim));
-                let state = match issue.state {
-                    State::Todo => None,
-                    State::InProgress => Some(palette.info),
-                    State::Done => Some(palette.ok),
-                };
-                if let Some(color) = state {
+                if issue.state != State::Todo {
                     let label = format!("{} ", issue.state.label().to_lowercase());
-                    spans.push(Span::styled(label, Style::new().fg(color)));
+                    spans.push(Span::styled(label, state_style(issue.state, palette)));
                 }
                 spans.push(Span::raw(issue.title.as_str()));
                 if issue.blocked {
-                    spans.push(Span::styled(" blocked", Style::new().fg(palette.error)));
+                    spans.push(Span::styled(" blocked", blocked_style(palette)));
                 }
                 for label in &issue.labels {
-                    spans.push(Span::styled(
-                        format!(" {label}"),
-                        Style::new().fg(palette.info),
-                    ));
+                    spans.push(Span::styled(format!(" {label}"), tag_style(palette)));
                 }
                 Line::from(spans)
             })
             .collect()
     }
 
-    fn detail(&self, model: &Model, _list: List) -> Vec<(String, String)> {
+    fn detail(
+        &self,
+        model: &Model,
+        palette: &Palette,
+        _list: List,
+    ) -> Vec<(String, Line<'static>)> {
         let Some(issue) = model.issue() else {
             return Vec::new();
         };
         let mut pairs = vec![
             pair("Issue", issue.key.clone()),
             pair("Title", issue.title.clone()),
-            pair("State", issue.state.label().into()),
+            pair(
+                "State",
+                Span::styled(issue.state.label(), state_style(issue.state, palette)),
+            ),
             pair("Status", issue.status.clone()),
-            pair("Blocked", if issue.blocked { "yes" } else { "no" }.into()),
-            pair("Labels", issue.labels.join(", ")),
+            pair(
+                "Blocked",
+                if issue.blocked {
+                    Span::styled("yes", blocked_style(palette))
+                } else {
+                    Span::raw("no")
+                },
+            ),
+            pair(
+                "Labels",
+                Span::styled(issue.labels.join(", "), tag_style(palette)),
+            ),
             pair("Assignees", issue.assignees.join(", ")),
             pair("Updated", issue.updated_at.clone()),
             pair("URL", issue.url.clone().unwrap_or_default()),
@@ -190,14 +211,15 @@ impl ListKind for Issues {
         }
         let work = model.issue_work(issue);
         if work.is_empty() {
-            pairs.push(pair("Worktree", "none: Space or n creates one".into()));
+            pairs.push(pair("Worktree", "none: Space or n creates one"));
         }
         pairs.extend(work.into_iter().map(|work| {
-            let tab = if work.tab { "open" } else { "closed" };
-            pair(
-                kind(work),
-                format!("{} · {} · tab {tab}", work.title(), work.workspace),
-            )
+            let line = vec![
+                tab_mark(work.tab, palette),
+                Span::raw(format!("{} · {} · tab ", work.title(), work.workspace)),
+                tab_word(work.tab, palette),
+            ];
+            pair(kind(work), line)
         }));
         pairs
     }

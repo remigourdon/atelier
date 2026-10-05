@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, close_tabs, pair};
+use super::{ListKind, close_tabs, pair, tab_detail, tab_mark, tag_style};
 use crate::tui::app::{Action, Cmd, Effect, Job, Kind, List, Model, Submit, Work, WorkKind};
 use crate::tui::update::{run, update};
 use crate::tui::view::{Palette, icon};
@@ -54,8 +54,13 @@ impl Model {
     }
 }
 
+/// A closed carnet's mark.
+fn closed_mark(palette: &Palette) -> Span<'static> {
+    Span::styled("closed", Style::new().fg(palette.warn))
+}
+
 /// A carnet's detail, in either list.
-pub fn detail(work: &Work) -> Vec<(String, String)> {
+pub fn detail(work: &Work, palette: &Palette) -> Vec<(String, Line<'static>)> {
     let (tickets, closed, summary) = match &work.kind {
         WorkKind::Carnet {
             tickets,
@@ -69,12 +74,12 @@ pub fn detail(work: &Work) -> Vec<(String, String)> {
         pair("Carnet", work.title()),
         pair("Path", work.path.display().to_string()),
         pair("Workspace", work.workspace.clone()),
-        pair("Tickets", tickets),
+        pair("Tickets", Span::styled(tickets, tag_style(palette))),
         pair("Summary", summary),
-        pair("Tab", if work.tab { "open" } else { "closed" }.into()),
+        pair("Tab", tab_detail(work.tab, palette)),
     ];
     if closed {
-        pairs.push(pair("Closed", "yes".into()));
+        pairs.push(pair("Closed", closed_mark(palette)));
     }
     pairs
 }
@@ -103,23 +108,19 @@ impl ListKind for Carnets {
         let glyphs = &palette.glyphs;
         (model.carnet_rows().into_iter())
             .map(|work| {
-                let marker = if work.tab {
-                    Span::styled(format!("{} ", glyphs.open), Style::new().fg(palette.ok))
-                } else {
-                    Span::styled(format!("{} ", glyphs.closed), dim)
-                };
-                let mut spans = vec![marker];
+                let mut spans = vec![tab_mark(work.tab, palette)];
                 spans.extend(icon(glyphs.carnet, dim));
                 spans.push(Span::raw(work.title()));
                 let tickets = work.tickets();
                 if !tickets.is_empty() {
                     spans.push(Span::styled(
                         format!(" {}", tickets.join(",")),
-                        Style::new().fg(palette.info),
+                        tag_style(palette),
                     ));
                 }
                 if work.closed() {
-                    spans.push(Span::styled(" closed", Style::new().fg(palette.warn)));
+                    spans.push(Span::raw(" "));
+                    spans.push(closed_mark(palette));
                 }
                 if let WorkKind::Carnet { summary, .. } = &work.kind
                     && !summary.is_empty()
@@ -131,8 +132,15 @@ impl ListKind for Carnets {
             .collect()
     }
 
-    fn detail(&self, model: &Model, _list: List) -> Vec<(String, String)> {
-        model.carnet().map(detail).unwrap_or_default()
+    fn detail(
+        &self,
+        model: &Model,
+        palette: &Palette,
+        _list: List,
+    ) -> Vec<(String, Line<'static>)> {
+        (model.carnet())
+            .map(|work| detail(work, palette))
+            .unwrap_or_default()
     }
 
     fn empty(&self, model: &Model, _list: List) -> &'static str {

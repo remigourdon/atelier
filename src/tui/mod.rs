@@ -325,4 +325,51 @@ mod tests {
         update(&mut model, Action::Key(key('?')));
         insta::assert_snapshot!(render(&model, 100, 30));
     }
+
+    #[test]
+    fn ci_marks_rows_and_carries_its_colour_to_the_detail() {
+        use crate::worktrunk::{Ci, CiReview, CiState, Decision};
+        let mut model = loaded(120, 30);
+        model.snapshot.work[0].tree_mut().ci = Some(Ci {
+            state: CiState::Passed,
+            stale: false,
+            branch_workflow: true,
+            review: None,
+        });
+        model.snapshot.work[1].tree_mut().ci = Some(Ci {
+            state: CiState::Failed,
+            stale: true,
+            branch_workflow: false,
+            review: Some(CiReview {
+                number: Some(27),
+                url: Some("https://github.com/o/api/pull/27".into()),
+                decision: Some(Decision::ChangesRequested),
+            }),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let palette = Palette::new(catppuccin::PALETTE.mocha, Icons::Unicode);
+        terminal
+            .draw(|frame| view::render(frame, &model, &palette))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let marks: Vec<_> = (buffer.content.iter())
+            .filter(|cell| cell.symbol() == "◆")
+            .map(|cell| {
+                (
+                    cell.fg,
+                    cell.modifier.contains(ratatui::style::Modifier::DIM),
+                )
+            })
+            .collect();
+        assert_eq!(
+            marks,
+            [
+                (palette.error, true),
+                (palette.ok, false),
+                (palette.error, true)
+            ],
+            "the grouped stale row and its detail, then main's row"
+        );
+        insta::assert_snapshot!(terminal.backend().to_string());
+    }
 }
