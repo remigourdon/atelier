@@ -75,10 +75,6 @@ pub fn run(context: &Context, job: Job) -> Action {
             let lines = git::log(&recorder, &path).unwrap_or_default();
             Action::Commits(path, lines)
         }
-        Job::Readme(path) => {
-            let readme = std::fs::read_to_string(path.join("README.md")).ok();
-            Action::Readme(path, readme)
-        }
         Job::SearchCarnets(text) => {
             let hits = match context.config.carnet_root() {
                 Some(root) => carnet::hits(&recorder, &root, &text),
@@ -193,11 +189,9 @@ fn fetch(
 fn execute(context: &Context, state: &State, runner: &dyn Runner, job: Job) -> Result<()> {
     let items = context.items(state, runner)?;
     match job {
-        Job::Refresh { .. }
-        | Job::Commits(_)
-        | Job::Readme(_)
-        | Job::SearchCarnets(_)
-        | Job::Fetch { .. } => unreachable!("run handles these"),
+        Job::Refresh { .. } | Job::Commits(_) | Job::SearchCarnets(_) | Job::Fetch { .. } => {
+            unreachable!("run handles these")
+        }
         Job::Open(paths) => items.open(&paths),
         Job::Close(paths) => items.close(&paths),
         Job::Pull(paths) => items.pull(&paths),

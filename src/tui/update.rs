@@ -1,7 +1,7 @@
 //! `update(model, action) -> effects`: every state change, with no I/O.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -12,8 +12,8 @@ use tui_input::backend::crossterm::EventHandler;
 
 use super::app::{
     Action, Binding, Cmd, Effect, Feed, Focus, Job, KEYMAP, List, MenuEntry, Modal, Model, On,
-    Panel, Popup, PopupCmd, Row, Rows, Screen, Search, Snapshot, Source, Submit, Work, WorkKind,
-    lookup, popup_lookup,
+    Panel, Popup, PopupCmd, Row, Rows, Screen, Search, Snapshot, Source, Submit, Work, lookup,
+    popup_lookup,
 };
 use super::lists;
 use super::view::{areas, main_len, offset};
@@ -74,8 +74,9 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
                     let old = std::mem::replace(&mut model.snapshot, snapshot);
                     model.loaded = true;
                     keep.restore(model);
-                    drop_stale(model, &old, full);
+                    let relist = drop_stale(model, &old, full);
                     effects.extend(commits(model));
+                    effects.extend(relist.map(|path| run(model, Job::Commits(path))));
                     effects.extend(fetch(model));
                 }
                 Err(error) => model.push_log([Logged {
@@ -87,10 +88,6 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
         }
         Action::Commits(path, lines) => {
             model.commits.insert(path, lines);
-            done(model, Source::Git)
-        }
-        Action::Readme(path, readme) => {
-            model.readmes.insert(path, readme);
             done(model, Source::Git)
         }
         Action::Searched { text, hits, log } => {
@@ -249,59 +246,49 @@ fn select_moved(model: &mut Model, list: List, index: usize) -> Vec<Effect> {
     commits(model)
 }
 
-/// Drops what a refresh made stale: everything on a full refresh, else what was loaded for
-/// items no longer listed, the commits of worktrees whose head moved, and the README and
-/// commits of carnets whose README changed.
-fn drop_stale(model: &mut Model, old: &Snapshot, full: bool) {
+/// Drops the commits a refresh made stale: every one on a full refresh, else those of items
+/// no longer listed, of worktrees whose head moved, and of carnets, whose head the snapshot
+/// does not know. The selected carnet's stay on screen until listed again: returns its path.
+fn drop_stale(model: &mut Model, old: &Snapshot, full: bool) -> Option<PathBuf> {
     if full {
         model.commits.clear();
-        model.readmes.clear();
-        return;
+        return None;
     }
-    let head = |work: &Work| work.tree().map(|tree| tree.short_sha.clone());
-    // Closed carnets too, which the Carnets list shows.
-    let listed = || model.snapshot.work.iter().chain(&model.snapshot.carnets);
-    let heads: HashMap<&Path, Option<String>> = listed()
-        .map(|work| (work.path.as_path(), head(work)))
+    let heads: HashMap<&Path, &str> = (old.work.iter())
+        .filter_map(|work| Some((work.path.as_path(), work.tree()?.short_sha.as_str())))
         .collect();
-    let rewritten = listed().filter(|work| match &work.kind {
-        WorkKind::Carnet { readme, .. } => {
-            (model.readmes.get(&work.path)).is_some_and(|loaded| loaded != readme)
-        }
-        WorkKind::Worktree { .. } => false,
-    });
-    let moved: HashSet<&Path> = (old.work.iter())
-        .filter(|work| {
-            heads
-                .get(work.path.as_path())
-                .is_some_and(|now| *now != head(work))
+    let unmoved = |work: &Work| {
+        (work.tree()).is_some_and(|tree| {
+            heads.get(work.path.as_path()).copied() == Some(tree.short_sha.as_str())
         })
-        .chain(rewritten)
-        .map(|work| work.path.as_path())
+    };
+    let mut kept: HashSet<PathBuf> = (model.snapshot.work.iter())
+        .filter(|work| unmoved(work))
+        .map(|work| work.path.clone())
         .collect();
-    (model.commits)
-        .retain(|path, _| heads.contains_key(path.as_path()) && !moved.contains(path.as_path()));
-    (model.readmes)
-        .retain(|path, _| heads.contains_key(path.as_path()) && !moved.contains(path.as_path()));
+    let relist = (selected(model))
+        .filter(|work| work.is_carnet() && model.commits.contains_key(&work.path))
+        .map(|work| work.path.clone());
+    kept.extend(relist.clone());
+    model.commits.retain(|path, _| kept.contains(path));
+    relist
 }
 
-/// Fetches the selected item's recent commits, and a carnet's README, unless they are loaded:
-/// the active list's item, else the Work list's.
-fn commits(model: &mut Model) -> Vec<Effect> {
-    let mut effects = Vec::new();
+/// The active list's selected item, else the Work list's.
+fn selected(model: &Model) -> Option<&Work> {
     let list = model.active();
-    let selected = (lists::of(list).item(model, list))
-        .or_else(|| lists::of(List::Work).item(model, List::Work));
-    if let Some(work) = selected {
-        let (path, carnet) = (work.path.clone(), work.is_carnet());
-        if carnet && !model.readmes.contains_key(&path) {
-            effects.push(run(model, Job::Readme(path.clone())));
+    (lists::of(list).item(model, list)).or_else(|| lists::of(List::Work).item(model, List::Work))
+}
+
+/// Fetches the selected item's recent commits unless they are loaded.
+fn commits(model: &mut Model) -> Vec<Effect> {
+    match selected(model) {
+        Some(work) if !model.commits.contains_key(&work.path) => {
+            let path = work.path.clone();
+            vec![run(model, Job::Commits(path))]
         }
-        if !model.commits.contains_key(&path) {
-            effects.push(run(model, Job::Commits(path)));
-        }
+        _ => Vec::new(),
     }
-    effects
 }
 
 fn key_press(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
@@ -762,9 +749,8 @@ fn mouse_event(model: &mut Model, mouse: MouseEvent) -> Vec<Effect> {
 
 #[cfg(test)]
 pub mod tests {
-    use std::path::PathBuf;
-
     use super::*;
+    use crate::items::WorkKind;
     use crate::reviews::{Review, Role};
     use crate::state::Repo;
     use crate::worktrunk::{Forge, Worktree};
@@ -1207,7 +1193,7 @@ pub mod tests {
     fn fast_refreshes_keep_commits_whose_head_did_not_move() {
         let mut model = with_carnets(model());
         let loaded = |model: &Model| -> Vec<String> {
-            let mut paths: Vec<String> = (model.commits.keys().chain(model.readmes.keys()))
+            let mut paths: Vec<String> = (model.commits.keys())
                 .map(|path| path.display().to_string())
                 .collect();
             paths.sort();
@@ -1229,8 +1215,6 @@ pub mod tests {
             for work in &model.snapshot.work {
                 model.commits.insert(work.path.clone(), Vec::new());
             }
-            let carnet = PathBuf::from("/data/2026-10-02-ideas");
-            model.readmes.insert(carnet, None);
         };
         fill(&mut model);
         let mut snapshot = model.snapshot.clone();
@@ -1244,14 +1228,8 @@ pub mod tests {
         refresh(&mut model, snapshot, false);
         assert_eq!(
             loaded(&model),
-            [
-                "/data/2026-10-01-ABC-1-logs",
-                "/data/2026-10-02-ideas",
-                "/data/2026-10-02-ideas",
-                "/src/api",
-                "/src/web.ABC-1-form",
-            ],
-            "the moved head and the unlisted items are dropped"
+            ["/src/api", "/src/web.ABC-1-form"],
+            "the moved head, the unlisted items and the unselected carnets are dropped"
         );
         fill(&mut model);
         let snapshot = model.snapshot.clone();
@@ -1915,28 +1893,33 @@ pub mod tests {
     }
 
     #[test]
-    fn selecting_a_carnet_reads_its_readme_once() {
+    fn fast_refreshes_relist_the_selected_carnets_commits_and_show_them_meanwhile() {
         let mut model = with_carnets(model());
         press(&mut model, "G\n");
         let effects = press(&mut model, "j");
         let path = PathBuf::from("/data/2026-10-02-ideas");
         assert!(
-            effects.contains(&Effect::Run(Job::Readme(path.clone()))),
+            effects.contains(&Effect::Run(Job::Commits(path.clone()))),
             "{effects:?}"
         );
-        update(&mut model, Action::Readme(path, Some("# ideas".into())));
-        let effects = press(&mut model, "jk");
+        let commits = vec!["abc1234 Note the first lead".to_owned()];
+        update(&mut model, Action::Commits(path.clone(), commits.clone()));
+        model.schedule.finish_all();
+        let snapshot = Ok(model.snapshot.clone());
+        let log = Vec::new();
+        let effects = update(
+            &mut model,
+            Action::Loaded {
+                snapshot,
+                full: false,
+                log,
+            },
+        );
         assert!(
-            !effects.iter().any(|effect| matches!(effect, Effect::Run(Job::Readme(path)) if path.ends_with("2026-10-02-ideas"))),
+            effects.contains(&Effect::Run(Job::Commits(path.clone()))),
             "{effects:?}"
         );
-        press(&mut model, "gg");
-        assert!(
-            !press(&mut model, "j")
-                .iter()
-                .any(|effect| matches!(effect, Effect::Run(Job::Readme(_)))),
-            "a worktree has no README"
-        );
+        assert_eq!(model.commits.get(&path), Some(&commits));
     }
 
     #[test]
@@ -2128,7 +2111,7 @@ pub mod tests {
         );
         assert_eq!(carnet_titles(&model), ["2026-09-20-old"]);
         assert!(
-            effects.contains(&Effect::Run(Job::Readme(path))),
+            effects.contains(&Effect::Run(Job::Commits(path))),
             "{effects:?}"
         );
         assert_eq!(

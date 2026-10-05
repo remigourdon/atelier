@@ -103,8 +103,6 @@ pub enum Job {
         full: bool,
     },
     Commits(PathBuf),
-    /// Reads a carnet's README.
-    Readme(PathBuf),
     Open(Vec<PathBuf>),
     Close(Vec<PathBuf>),
     Pull(Vec<PathBuf>),
@@ -235,7 +233,7 @@ impl Job {
     pub fn source(&self) -> Source {
         match self {
             Job::Refresh { .. } => Source::Wt,
-            Job::Commits(_) | Job::Readme(_) => Source::Git,
+            Job::Commits(_) => Source::Git,
             Job::Fetch { feed, .. } => Source::Feed(*feed),
             _ => Source::Run,
         }
@@ -332,7 +330,6 @@ pub enum Action {
         log: Vec<Logged>,
     },
     Commits(PathBuf, Vec<String>),
-    Readme(PathBuf, Option<String>),
     /// A carnet search's hit lines by carnet, `None` when it failed.
     Searched {
         text: String,
@@ -611,8 +608,6 @@ pub struct Model {
     /// What is loading, and when to refresh.
     pub schedule: Schedule,
     pub commits: HashMap<PathBuf, Vec<String>>,
-    /// Carnets' READMEs, read once selected; `None` when a carnet has none.
-    pub readmes: HashMap<PathBuf, Option<String>>,
     /// Both providers' reviews in both roles, most recently updated first.
     pub reviews: Vec<Review>,
     /// Where issues come from and their sections.
@@ -648,7 +643,6 @@ impl Model {
             log: Vec::new(),
             schedule: Schedule::default(),
             commits: HashMap::new(),
-            readmes: HashMap::new(),
             reviews: Vec::new(),
             tracker_config: TrackerConfig::default(),
             issues: Vec::new(),

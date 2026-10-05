@@ -203,11 +203,13 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
             }
             let path = state.repo(&repo)?.path;
             let items = items(state, config)?;
-            if let Some(alias) = alias {
-                items.set_alias(&path, &alias)?;
-            }
-            if let Some(workspace) = workspace {
-                items.set_repo_workspace(&path, &workspace)?;
+            items.update_repo(&path, alias.as_deref(), workspace.as_deref())?;
+            // The alias is saved either way: a tab whose session is gone gets the new name
+            // when reopened.
+            if alias.is_some()
+                && let Err(err) = items.rename_repo_tabs(&path)
+            {
+                eprintln!("atelier: could not rename the tabs: {err:#}");
             }
             Ok(())
         }
@@ -232,9 +234,10 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
         }
         Command::Carnet(command) => {
             let root = config.require_carnet_root()?;
-            let items = items(state, config)?;
+            let names = crate::carnet::Names::new(config.ticket_pattern())?;
             match command {
                 Carnet::New { name, workspace } => {
+                    let items = items(state, config)?;
                     // The workspace given, which must exist, else the current session's when
                     // it is one, else the default workspace.
                     if let Some(workspace) = &workspace {
@@ -246,7 +249,6 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
                     println!("created {} in {workspace}", path.display());
                 }
                 Carnet::Ls { closed } => {
-                    let names = crate::carnet::Names::new(config.ticket_pattern())?;
                     for carnet in crate::carnet::scan(&root, &names)? {
                         if closed || !carnet.closed {
                             println!(
@@ -261,7 +263,8 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
                 Carnet::Search { text } => crate::carnet::search(&System, &root, &text)?,
                 Carnet::Path { key } => {
                     let dir = std::env::current_dir()?;
-                    println!("{}", items.carnet_path(key.as_deref(), &dir)?.display());
+                    let path = crate::carnet::path_for(state, &names, &root, key.as_deref(), &dir)?;
+                    println!("{}", path.display());
                 }
             }
             Ok(())

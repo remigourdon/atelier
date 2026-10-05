@@ -250,12 +250,14 @@ mod tests {
         for key in [key('G'), enter, key('j')] {
             update(&mut model, Action::Key(key));
         }
-        let readme =
+        let text =
             "+++\nsummary = \"hidden\"\n+++\n# 2026-10-02-ideas\n\nWhat I found **so far**.\n";
-        update(
-            &mut model,
-            Action::Readme("/data/2026-10-02-ideas".into(), Some(readme.into())),
-        );
+        let listed = (model.snapshot.work.iter_mut()).chain(&mut model.snapshot.carnets);
+        for work in listed.filter(|work| work.path.ends_with("2026-10-02-ideas")) {
+            if let WorkKind::Carnet { readme, .. } = &mut work.kind {
+                *readme = Some(text.into());
+            }
+        }
         model.schedule.finish_all();
         insta::assert_snapshot!(render(&model, 120, 30));
     }
