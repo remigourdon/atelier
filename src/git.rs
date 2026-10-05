@@ -70,14 +70,59 @@ fn parse_gone(refs: &str) -> HashSet<String> {
         .collect()
 }
 
-/// The last commits at `path`, one line each.
-pub fn log(runner: &dyn Runner, path: &Path) -> Result<Vec<String>> {
+/// A commit as the main view lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Commit {
+    pub sha: String,
+    pub subject: String,
+    /// When it was committed, relative to now: `2 hours ago`.
+    pub age: String,
+    pub author: String,
+}
+
+#[cfg(test)]
+impl Commit {
+    /// A commit made two hours ago by R.
+    pub fn fake(sha: &str, subject: &str) -> Self {
+        Self {
+            sha: sha.into(),
+            subject: subject.into(),
+            age: "2 hours ago".into(),
+            author: "R".into(),
+        }
+    }
+}
+
+/// The last commits at `path`.
+pub fn log(runner: &dyn Runner, path: &Path) -> Result<Vec<Commit>> {
     let path = path.to_string_lossy();
     let log = runner.output(
         "git",
-        &["-C", &path, "log", "-n", "20", "--format=%h %s (%cr, %an)"],
+        &[
+            "-C",
+            &path,
+            "log",
+            "-n",
+            "20",
+            "--format=%h%x00%s%x00%cr%x00%an",
+        ],
     )?;
-    Ok(log.lines().map(Into::into).collect())
+    Ok(parse_log(&log))
+}
+
+/// `log` lines of `<sha>\0<subject>\0<age>\0<author>`.
+fn parse_log(log: &str) -> Vec<Commit> {
+    (log.lines())
+        .filter_map(|line| {
+            let mut fields = line.splitn(4, '\0').map(str::to_owned);
+            Some(Commit {
+                sha: fields.next()?,
+                subject: fields.next()?,
+                age: fields.next()?,
+                author: fields.next()?,
+            })
+        })
+        .collect()
 }
 
 pub fn init(runner: &dyn Runner, path: &Path) -> Result<()> {
@@ -131,6 +176,35 @@ mod tests {
         assert_eq!(
             fake.calls(),
             ["git -C /r for-each-ref refs/heads --format=%(refname:short)%00%(upstream:track)"]
+        );
+    }
+
+    #[test]
+    fn log_splits_each_commit_into_its_fields() {
+        let log =
+            "abc1234\0Add login\0two hours ago\0R\ndef5678\0Fix (a, b)\0three days ago\0Ana\nodd";
+        let fake = Fake::default().always("git", Some(log));
+        let commits = super::log(&fake, Path::new("/r")).unwrap();
+        assert_eq!(
+            commits,
+            [
+                Commit {
+                    sha: "abc1234".into(),
+                    subject: "Add login".into(),
+                    age: "two hours ago".into(),
+                    author: "R".into(),
+                },
+                Commit {
+                    sha: "def5678".into(),
+                    subject: "Fix (a, b)".into(),
+                    age: "three days ago".into(),
+                    author: "Ana".into(),
+                },
+            ]
+        );
+        assert_eq!(
+            fake.calls(),
+            ["git -C /r log -n 20 --format=%h%x00%s%x00%cr%x00%an"]
         );
     }
 

@@ -3,7 +3,7 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, close_tabs, pair, tab_mark};
+use super::{ListKind, close_tabs, pair, subtle, tab_mark};
 use crate::reviews::{Review, Role};
 use crate::state::Repo;
 use crate::tui::app::{Cmd, Effect, Feed, Job, Kind, List, Model, Source, Work};
@@ -167,19 +167,20 @@ impl ListKind for Reviews {
             pair("Author", review.author.clone()),
             pair("Branch", format!("{} → {}", review.branch, review.base)),
             pair("Status", status(review, palette)),
-            pair("Updated", review.updated_at.clone()),
+            pair("Updated", subtle(review.updated_at.clone(), palette)),
             pair("URL", review.url.clone()),
             pair("Repo", repo),
             pair(
                 "Worktree",
-                model
-                    .review_work(review)
-                    .map_or(Line::from("none: Space checks it out"), |work| {
+                model.review_work(review).map_or(
+                    subtle("none: Space checks it out", palette).into(),
+                    |work| {
                         Line::from(vec![
                             tab_mark(work.tab, palette),
                             Span::raw(work.path().display().to_string()),
                         ])
-                    }),
+                    },
+                ),
             ),
         ]
     }

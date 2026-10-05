@@ -3,7 +3,7 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, close_tabs, kind, pair, paths, plan, tab_mark, tab_word, tag_style};
+use super::{ListKind, close_tabs, kind, pair, paths, plan, subtle, tab_mark, tab_word, tag_style};
 use crate::finish::Scope;
 use crate::issues::{Issue, State};
 use crate::state::Repo;
@@ -202,7 +202,7 @@ impl ListKind for Issues {
                 Span::styled(issue.labels.join(", "), tag_style(palette)),
             ),
             pair("Assignees", issue.assignees.join(", ")),
-            pair("Updated", issue.updated_at.clone()),
+            pair("Updated", subtle(issue.updated_at.clone(), palette)),
             pair("URL", issue.url.clone().unwrap_or_default()),
             pair("Project", issue.project.clone()),
         ];
@@ -211,7 +211,8 @@ impl ListKind for Issues {
         }
         let work = model.issue_work(issue);
         if work.is_empty() {
-            pairs.push(pair("Worktree", "none: Space or n creates one"));
+            let none = subtle("none: Space or n creates one", palette);
+            pairs.push(pair("Worktree", none));
         }
         pairs.extend(work.into_iter().map(|work| {
             let line = vec![

@@ -12,6 +12,7 @@ pub use super::lists::work::Row;
 use super::schedule::Schedule;
 use crate::carnet::Stamp;
 use crate::finish::{Plan, Scope, Step};
+use crate::git::Commit;
 use crate::issues::{self, Issue, TrackerConfig};
 pub use crate::items::{Removal, Snapshot, Work, WorkKind};
 use crate::process::Logged;
@@ -347,7 +348,7 @@ pub enum Action {
         full: bool,
         log: Vec<Logged>,
     },
-    Commits(PathBuf, Vec<String>),
+    Commits(PathBuf, Vec<Commit>),
     Readme(Readme),
     /// A carnet search's hit lines by carnet, `None` when it failed.
     Searched {
@@ -674,7 +675,7 @@ pub struct Model {
     pub log: Vec<Logged>,
     /// What is loading, and when to refresh.
     pub schedule: Schedule,
-    pub commits: HashMap<PathBuf, Vec<String>>,
+    pub commits: HashMap<PathBuf, Vec<Commit>>,
     /// The selected carnet's README, the only one kept, shown until read again.
     pub readme: Option<Readme>,
     /// Both providers' reviews in both roles, most recently updated first.

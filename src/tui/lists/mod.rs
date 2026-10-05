@@ -8,6 +8,7 @@ mod reviews;
 pub mod work;
 mod workspaces;
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 
 use ratatui::style::Style;
@@ -126,6 +127,11 @@ fn kind(work: &Work) -> &'static str {
 
 fn pair(key: &str, value: impl Into<Line<'static>>) -> (String, Line<'static>) {
     (key.to_owned(), value.into())
+}
+
+/// Secondary text, such as a placeholder or a timestamp, in the style guide's subtle colour.
+pub(super) fn subtle(text: impl Into<Cow<'static, str>>, palette: &Palette) -> Span<'static> {
+    Span::styled(text, Style::new().fg(palette.dim))
 }
 
 /// A carnet's tickets and an issue's labels.
