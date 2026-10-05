@@ -293,9 +293,10 @@ fn selected(model: &Model) -> Option<&Work> {
 
 /// The selected carnet's README, rendered once read.
 fn readme(model: &Model) -> Option<Text<'_>> {
-    let readme = model.readmes.get(selected(model)?.path())?;
+    let path = selected(model)?.path();
+    let readme = (model.readme.as_ref()).filter(|readme| readme.path == *path)?;
     Some(tui_markdown::from_str(crate::carnet::body(
-        readme.as_deref()?,
+        readme.text.as_deref()?,
     )))
 }
 

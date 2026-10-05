@@ -165,8 +165,8 @@ impl Schedule {
         }
     }
 
-    /// Lists the due feeds that are `ready`. A feed still listing keeps its turn, so `R` is
-    /// not lost.
+    /// Lists the due feeds that are `ready`. A feed still listing, or with nothing to list
+    /// yet (before the first snapshot), keeps its turn, so `R` is not lost.
     fn fetch(&mut self, ready: impl Fn(Feed) -> bool) -> Vec<Job> {
         let mut jobs = Vec::new();
         for feed in Feed::ALL {
@@ -174,8 +174,8 @@ impl Schedule {
             if due == Due::No || !ready(feed) || self.is_loading(Source::Feed(feed)) {
                 continue;
             }
-            self.due.insert(feed, Due::No);
             if let Some(keys) = self.keys.get(&feed).filter(|keys| !keys.is_empty()) {
+                self.due.insert(feed, Due::No);
                 jobs.push(Job::Fetch {
                     feed,
                     keys: keys.clone(),
@@ -246,6 +246,19 @@ mod tests {
             jobs.extend(start(schedule, started));
         }
         jobs
+    }
+
+    #[test]
+    fn r_before_the_first_snapshot_lists_every_feed_once_it_arrives() {
+        let mut schedule = Schedule::default();
+        let jobs = schedule.refresh(true);
+        assert!(fetches(&jobs).is_empty(), "nothing to list yet");
+        start(&mut schedule, jobs);
+        schedule.finish_all();
+        assert_eq!(
+            fetches(&schedule.loaded(keys())),
+            [(GH, true), (LAB, true), (ISSUES, true)]
+        );
     }
 
     #[test]

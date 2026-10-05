@@ -424,11 +424,6 @@ impl State {
         self.items_where("1", [])
     }
 
-    /// The recorded carnets, by path.
-    pub fn carnets(&self) -> Result<Vec<Item>> {
-        self.items_where("kind = ?", [ItemKind::Carnet.as_str()])
-    }
-
     /// Today's local date, `YYYY-MM-DD`.
     pub fn today(&self) -> Result<String> {
         Ok(self

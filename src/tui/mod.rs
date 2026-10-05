@@ -250,12 +250,14 @@ mod tests {
         for key in [key('G'), enter, key('j')] {
             update(&mut model, Action::Key(key));
         }
-        let readme =
+        let text =
             "+++\nsummary = \"hidden\"\n+++\n# 2026-10-02-ideas\n\nWhat I found **so far**.\n";
-        update(
-            &mut model,
-            Action::Readme("/data/2026-10-02-ideas".into(), Some(readme.into())),
-        );
+        let readme = app::Readme {
+            path: "/data/2026-10-02-ideas".into(),
+            stamp: None,
+            text: Some(text.into()),
+        };
+        update(&mut model, Action::Readme(readme));
         model.schedule.finish_all();
         insta::assert_snapshot!(render(&model, 120, 30));
     }
