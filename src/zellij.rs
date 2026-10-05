@@ -1,5 +1,6 @@
 //! Zellij orchestration: sessions, tabs, the anchor pane, reconcile and tab naming.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -199,6 +200,8 @@ pub struct Zellij<'a> {
     pub here: Option<String>,
     pub layouts: Layouts,
     pub anchor: String,
+    /// Whether `reconcile` already ran: once per value, which lives for one job, hook or command.
+    pub reconciled: Cell<bool>,
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
@@ -323,8 +326,11 @@ impl Zellij<'_> {
             .ok_or_else(|| eyre!("no pane named {} in tab {tab_id} of {session}", self.anchor))
     }
 
-    /// Repairs tab ids changed by session resurrection and forgets closed tabs.
+    /// Repairs tab ids changed by session resurrection and forgets closed tabs, once.
     pub fn reconcile(&self, state: &State) -> Result<()> {
+        if self.reconciled.get() {
+            return Ok(());
+        }
         let tabs = state.tabs()?;
         let sessions: HashSet<&str> = tabs.iter().map(|tab| tab.session.as_str()).collect();
         let mut live = HashMap::new();
@@ -356,6 +362,7 @@ impl Zellij<'_> {
                 None => state.remove_tab(&tab.path)?,
             }
         }
+        self.reconciled.set(true);
         Ok(())
     }
 
@@ -595,6 +602,7 @@ mod tests {
                 worktree: "W".into(),
             },
             anchor: "editor".into(),
+            reconciled: Default::default(),
         }
     }
 
@@ -727,6 +735,35 @@ mod tests {
         assert_eq!(tabs.len(), 1);
         assert_eq!((tabs[0].tab_id, tabs[0].pane_id.as_str()), (3, "5"));
         assert_eq!(tabs[0].path, alive);
+    }
+
+    #[test]
+    fn reconcile_runs_once_per_value() {
+        let state = state();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        state
+            .add_item(path, ItemKind::Carnet, None, "", "w")
+            .unwrap();
+        state
+            .set_tab(&Tab {
+                path: path.into(),
+                session: "w".into(),
+                tab_id: 1,
+                pane_id: "1".into(),
+            })
+            .unwrap();
+        let fake = Fake::default()
+            .always(
+                "zellij --session w action list-tabs",
+                Some(r#"[{"tab_id":1,"position":0}]"#),
+            )
+            .always("zellij --session w action list-panes", Some("[]"));
+        let zellij = zellij(&fake, None);
+        zellij.reconcile(&state).unwrap();
+        zellij.reconcile(&state).unwrap();
+        let listed = |calls: Vec<String>| calls.iter().filter(|c| c.contains("list-tabs")).count();
+        assert_eq!(listed(fake.calls()), 1);
     }
 
     #[test]

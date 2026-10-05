@@ -166,6 +166,7 @@ fn zellij_for<'a>(config: &Config, runner: &'a dyn Runner) -> Result<Zellij<'a>>
         here: zellij::current_session(),
         layouts: Layouts::resolve(config)?,
         anchor: config.anchor_pane().to_owned(),
+        reconciled: Default::default(),
     })
 }
 
@@ -210,7 +211,12 @@ fn run_state(command: Command, config: &Config, state: &mut State) -> Result<()>
             if alias.is_none() && workspace.is_none() {
                 bail!("provide --alias, --workspace, or both");
             }
-            state.update_repo(&repo, alias.as_deref(), workspace.as_deref())
+            let path = state.repo(&repo)?.path;
+            state.update_repo(&repo, alias.as_deref(), workspace.as_deref())?;
+            if alias.is_some() {
+                zellij_for(config, &System)?.sync_names(state, &path)?;
+            }
+            Ok(())
         }
         Command::Rm { repo } => {
             let path = state.repo(&repo)?.path;

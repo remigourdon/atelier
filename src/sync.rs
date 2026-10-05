@@ -33,7 +33,8 @@ pub fn canonical(path: &Path) -> PathBuf {
 }
 
 /// Lists every repo's worktrees, records the unknown ones in their repo's default workspace
-/// with the group their branch names, and forgets items whose worktree is gone.
+/// with the group their branch names, and forgets the worktrees a listing no longer names and
+/// the carnets whose folder is gone.
 pub fn sync(state: &State, runner: &dyn Runner, ticket: &Regex, full: bool) -> Result<Synced> {
     let mut synced = Synced::default();
     let mut listed = HashSet::new();
@@ -72,7 +73,11 @@ pub fn sync(state: &State, runner: &dyn Runner, ticket: &Regex, full: bool) -> R
     }
     for item in state.items()? {
         // A carnet whose folder is gone was deleted on purpose.
-        if !listed.contains(&item.path) && !item.path.exists() {
+        let gone = match item.kind {
+            ItemKind::Worktree => !listed.contains(&item.path),
+            ItemKind::Carnet => !item.path.exists(),
+        };
+        if gone {
             state.remove_item(&item.path)?;
         }
     }
@@ -142,6 +147,24 @@ mod tests {
         assert!(state.item("/r.gone").unwrap().is_none());
         sync(&state, &fake, &ticket(), true).unwrap();
         assert!(fake.calls().iter().any(|call| call.ends_with("--full")));
+    }
+
+    #[test]
+    fn forgets_unlisted_worktrees_whose_folder_remains() {
+        let state = state();
+        let dir = tempfile::tempdir().unwrap();
+        state
+            .add_item(
+                dir.path(),
+                ItemKind::Worktree,
+                Some(Path::new("/r")),
+                "",
+                "default",
+            )
+            .unwrap();
+        let fake = Fake::default().always("wt -C /r", Some(LISTING));
+        sync(&state, &fake, &ticket(), false).unwrap();
+        assert!(state.item(dir.path()).unwrap().is_none());
     }
 
     #[test]

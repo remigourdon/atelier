@@ -247,6 +247,7 @@ mod tests {
                     worktree: "W".into(),
                 },
                 anchor: "editor".into(),
+                reconciled: Default::default(),
             };
             let ticket = Config::default().ticket_regex().unwrap();
             handle(
