@@ -3,7 +3,7 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, pair, plan};
+use super::{ListKind, pair, plan, subtle};
 use crate::finish::Scope;
 use crate::tui::app::{Action, Effect, Job, Kind, List, Model, Submit};
 use crate::tui::update::{confirm, run, update};
@@ -104,7 +104,7 @@ impl ListKind for Workspaces {
                 if model.snapshot.here.as_deref() == Some(name) {
                     Span::styled("current", Style::new().fg(palette.accent))
                 } else {
-                    Span::raw("other")
+                    subtle("other", palette)
                 },
             ),
             pair("Worktrees", (work.len() - carnets).to_string()),

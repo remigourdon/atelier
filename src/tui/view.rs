@@ -10,9 +10,11 @@ use super::app::{
     Cmd, Focus, KEYMAP, List, Model, Panel, Popup, Screen, Source, Work, popup_hints,
 };
 use super::lists;
+use super::markdown::Markdown;
 use super::widgets;
 use crate::config::Icons;
 use crate::finish::Signal;
+use crate::git::Commit;
 
 /// Below this width the main view is hidden until `+`.
 pub const NARROW: u16 = 100;
@@ -23,6 +25,8 @@ const LOG_HEIGHT: u16 = 8;
 pub struct Palette {
     pub accent: Color,
     pub text: Color,
+    /// The keys of the main view's detail.
+    pub label: Color,
     pub dim: Color,
     pub selection: Color,
     pub ok: Color,
@@ -33,6 +37,10 @@ pub struct Palette {
     pub changes_requested: Color,
     /// A review's required approval is not given yet.
     pub approval_pending: Color,
+    /// A list's filter, as it is typed and once applied.
+    pub filter: Color,
+    /// How a carnet's README is drawn.
+    pub markdown: Markdown,
     pub glyphs: Glyphs,
 }
 
@@ -124,14 +132,17 @@ impl Palette {
             glyphs: Glyphs::new(icons),
             accent: colors.mauve.into(),
             text: colors.text.into(),
+            label: colors.subtext0.into(),
             dim: colors.overlay1.into(),
             selection: colors.surface0.into(),
             ok: colors.green.into(),
             error: colors.red.into(),
-            warn: colors.peach.into(),
+            warn: colors.yellow.into(),
             info: colors.blue.into(),
             changes_requested: colors.pink.into(),
             approval_pending: colors.teal.into(),
+            filter: colors.yellow.into(),
+            markdown: Markdown::new(&colors),
         }
     }
 }
@@ -270,7 +281,7 @@ fn render_panel(frame: &mut Frame, model: &Model, palette: &Palette, panel: Pane
     if !filter.is_empty() || model.filtering == Some(list) {
         title.push(Span::styled(
             format!(" /{filter}"),
-            Style::new().fg(palette.warn),
+            Style::new().fg(palette.filter),
         ));
     }
     if rect.height < 3 {
@@ -324,16 +335,18 @@ fn selected(model: &Model) -> Option<&Work> {
 }
 
 /// The selected carnet's README, rendered once read.
-fn readme(model: &Model) -> Option<Text<'_>> {
+fn readme<'a>(model: &'a Model, palette: &Palette) -> Option<Text<'a>> {
     let path = selected(model)?.path();
     let readme = (model.readme.as_ref()).filter(|readme| readme.path == *path)?;
-    Some(tui_markdown::from_str(crate::carnet::body(
-        readme.text.as_deref()?,
-    )))
+    Some(
+        palette
+            .markdown
+            .render(crate::carnet::body(readme.text.as_deref()?)),
+    )
 }
 
 /// The selected worktree's recent commits, once loaded.
-fn commits(model: &Model) -> Option<&Vec<String>> {
+fn commits(model: &Model) -> Option<&Vec<Commit>> {
     model.commits.get(selected(model)?.path())
 }
 
@@ -348,7 +361,7 @@ pub fn main_len(model: &Model) -> usize {
     let palette = Palette::new(catppuccin::PALETTE.mocha, Icons::Unicode);
     detail(model, &palette).len()
         + model.carnet_hits().map_or(0, |hits| hits.len() + 2)
-        + readme(model).map_or(0, |readme| readme.lines.len() + 1)
+        + readme(model, &palette).map_or(0, |readme| readme.lines.len() + 2)
         + commits(model).map_or(0, |commits| commits.len() + 2)
 }
 
@@ -359,40 +372,41 @@ fn render_main(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect) 
     let width = pairs.iter().map(|(key, _)| key.len()).max().unwrap_or(0);
     let mut lines: Vec<Line> = pairs
         .into_iter()
-        .map(|(key, value)| {
-            let key = Span::styled(format!("{key:width$}  "), Style::new().fg(palette.accent));
-            // Each span's own colours, else the text colour.
-            let value = value.spans.into_iter().map(|span| {
-                let style = Style::new().fg(palette.text).patch(span.style);
-                span.style(style)
-            });
-            Line::from_iter(std::iter::once(key).chain(value))
+        .map(|(key, mut value)| {
+            let key = Span::styled(format!("{key:width$}  "), Style::new().fg(palette.label));
+            if value.width() == 0 {
+                value = lists::subtle("none", palette).into();
+            }
+            Line::from_iter(std::iter::once(key).chain(value.spans))
         })
         .collect();
-    if let Some(hits) = model.carnet_hits() {
+    let section = |lines: &mut Vec<Line>, title| {
         lines.push(Line::raw(""));
-        lines.push(Line::styled(
-            "Matches",
-            Style::new().fg(palette.accent).bold(),
-        ));
+        lines.push(Line::styled(title, Style::new().fg(palette.accent).bold()));
+    };
+    if let Some(hits) = model.carnet_hits() {
+        section(&mut lines, "Matches");
         lines.extend(hits.iter().map(|hit| Line::raw(hit.as_str())));
     }
-    if let Some(readme) = readme(model) {
-        lines.push(Line::raw(""));
+    if let Some(readme) = readme(model, palette) {
+        section(&mut lines, "README");
         lines.extend(readme.lines);
     }
     if let Some(commits) = commits(model) {
-        lines.push(Line::raw(""));
-        lines.push(Line::styled(
-            "Recent commits",
-            Style::new().fg(palette.accent).bold(),
-        ));
-        lines.extend(commits.iter().map(|commit| Line::raw(commit.as_str())));
+        section(&mut lines, "Recent commits");
+        let dim = Style::new().fg(palette.dim);
+        lines.extend(commits.iter().map(|commit| {
+            Line::from(vec![
+                Span::styled(format!("{} ", commit.sha), dim),
+                Span::raw(commit.subject.as_str()),
+                Span::styled(format!(" ({}, {})", commit.age, commit.author), dim),
+            ])
+        }));
     }
-    frame.render_widget(
-        Paragraph::new(lines).block(block).scroll(model.scroll),
-        rect,
-    );
+    // What sets no colour of its own is text.
+    let text = Text::from(lines).style(Style::new().fg(palette.text));
+    let paragraph = Paragraph::new(text).block(block).scroll(model.scroll);
+    frame.render_widget(paragraph, rect);
 }
 
 fn render_log(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect) {
@@ -424,7 +438,7 @@ fn render_hints(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect)
                 model.title(list).to_lowercase(),
                 popup_hints(Popup::Filter)
             ),
-            Style::new().fg(palette.warn),
+            Style::new().fg(palette.filter),
         ));
     } else {
         let active = model.active();

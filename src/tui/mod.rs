@@ -3,6 +3,7 @@
 mod app;
 mod jobs;
 mod lists;
+mod markdown;
 mod schedule;
 mod update;
 mod view;
@@ -131,6 +132,7 @@ mod tests {
     use super::update::update;
     use super::*;
     use crate::config::Icons;
+    use crate::git::Commit;
 
     #[test]
     fn base64_pads() {
@@ -165,7 +167,7 @@ mod tests {
         update(&mut model, Action::Key(key('j')));
         update(
             &mut model,
-            Action::Commits(path, vec!["abc1234 Add login (2 hours ago, R)".into()]),
+            Action::Commits(path, vec![Commit::fake("abc1234", "Add login")]),
         );
         model.schedule.finish_all();
         model.log.push(crate::process::Logged {
@@ -261,6 +263,87 @@ mod tests {
         update(&mut model, Action::Readme(readme));
         model.schedule.finish_all();
         insta::assert_snapshot!(render(&model, 120, 30));
+    }
+
+    /// The style of the first cell of `text`'s first occurrence on screen.
+    fn style_of(buffer: &ratatui::buffer::Buffer, text: &str) -> ratatui::style::Style {
+        let width = buffer.area.width as usize;
+        let chars: Vec<char> = text.chars().collect();
+        let cells = &buffer.content;
+        let at = (0..cells.len())
+            .find(|&start| {
+                start % width + chars.len() <= width
+                    && (chars.iter().enumerate())
+                        .all(|(i, c)| cells[start + i].symbol() == c.to_string())
+            })
+            .unwrap_or_else(|| panic!("{text:?} is not on screen"));
+        cells[at].style()
+    }
+
+    fn draw(model: &Model, palette: &Palette) -> ratatui::buffer::Buffer {
+        let (width, height) = model.size;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| view::render(frame, model, palette))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn the_readme_reads_in_catppuccin_under_its_label() {
+        use ratatui::style::{Color, Modifier};
+        let mut model = update::tests::with_carnets(loaded(120, 30));
+        let enter = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter);
+        for key in [key('G'), enter, key('j')] {
+            update(&mut model, Action::Key(key));
+        }
+        let text = "# 2026-10-02-ideas\n\nWhat I found **so far**, in `notes.md`.\n";
+        let readme = app::Readme {
+            path: "/data/2026-10-02-ideas".into(),
+            stamp: None,
+            text: Some(text.into()),
+        };
+        update(&mut model, Action::Readme(readme));
+        model.schedule.finish_all();
+        let palette = Palette::new(catppuccin::PALETTE.mocha, Icons::Unicode);
+        let colors = catppuccin::PALETTE.mocha.colors;
+        let buffer = draw(&model, &palette);
+        let label = style_of(&buffer, "README");
+        assert_eq!(label.fg, Some(palette.accent));
+        assert!(label.add_modifier.contains(Modifier::BOLD));
+        let heading = style_of(&buffer, "# 2026-10-02-ideas");
+        assert_eq!(heading.fg, Some(colors.red.into()), "the rainbow's first");
+        assert_eq!(heading.bg, Some(Color::Reset), "no background");
+        assert_eq!(style_of(&buffer, "What").fg, Some(palette.text));
+        let code = style_of(&buffer, "notes.md");
+        assert_eq!(code.fg, Some(colors.maroon.into()));
+        assert_eq!(code.bg, Some(colors.mantle.into()));
+        assert_eq!(style_of(&buffer, "Tickets").fg, Some(palette.label));
+        assert_eq!(
+            style_of(&buffer, "Tickets    none").fg,
+            Some(palette.label),
+            "an empty value reads none"
+        );
+        assert_eq!(style_of(&buffer, "none").fg, Some(palette.dim));
+    }
+
+    #[test]
+    fn commits_and_counts_of_zero_recede_and_warnings_are_yellow() {
+        let mut model = loaded(120, 30);
+        model.snapshot.work[1].tree_mut().upstream = Some((2, 0));
+        let palette = Palette::new(catppuccin::PALETTE.mocha, Icons::Unicode);
+        let buffer = draw(&model, &palette);
+        assert_eq!(palette.warn, catppuccin::PALETTE.mocha.colors.yellow.into());
+        assert_eq!(
+            style_of(&buffer, "↓3").fg,
+            Some(palette.warn),
+            "main is behind"
+        );
+        assert_eq!(style_of(&buffer, "↑2").fg, Some(palette.text));
+        assert_eq!(style_of(&buffer, "↓0").fg, Some(palette.dim));
+        assert_eq!(style_of(&buffer, "abc1234 Add").fg, Some(palette.dim));
+        assert_eq!(style_of(&buffer, "Add login").fg, Some(palette.text));
+        assert_eq!(style_of(&buffer, "(2 hours ago, R)").fg, Some(palette.dim));
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, carnets, kind, pair, paths, plan, tab_detail, tab_mark};
+use super::{ListKind, carnets, kind, pair, paths, plan, subtle, tab_detail, tab_mark};
 use crate::finish::{self, Scope, Signal};
 use crate::tui::app::{
     Action, Cmd, Effect, Job, Kind, List, MenuEntry, Modal, Model, Removal, Submit, Work, WorkKind,
@@ -295,12 +295,18 @@ impl ListKind for WorkList {
                 }
                 status.push(Span::styled(status_text, status_style(tree, palette)));
                 let upstream = match tree.upstream {
-                    Some((ahead, behind)) => {
-                        let behind = self::behind(tree, palette)
-                            .unwrap_or_else(|| Span::raw(format!("↓{behind}")));
-                        Line::from(vec![Span::raw(format!("↑{ahead} ")), behind])
+                    // Counts of zero recede.
+                    Some((ahead, _)) => {
+                        let ahead = if ahead > 0 {
+                            Span::raw(format!("↑{ahead}"))
+                        } else {
+                            subtle("↑0", palette)
+                        };
+                        let behind =
+                            self::behind(tree, palette).unwrap_or_else(|| subtle("↓0", palette));
+                        Line::from(vec![ahead, Span::raw(" "), behind])
                     }
-                    None => Line::from("none"),
+                    None => subtle("none", palette).into(),
                 };
                 let mut pairs = vec![
                     pair("Repo", repo_name.clone()),
@@ -313,10 +319,11 @@ impl ListKind for WorkList {
                     pair("Upstream", upstream),
                     pair(
                         "Commit",
-                        format!(
-                            "{} {} ({})",
-                            tree.short_sha, tree.subject, tree.committed_at
-                        ),
+                        vec![
+                            subtle(format!("{} ", tree.short_sha), palette),
+                            Span::raw(tree.subject.clone()),
+                            subtle(format!(" ({})", tree.committed_at), palette),
+                        ],
                     ),
                 ];
                 if let Some(ci) = &tree.ci {

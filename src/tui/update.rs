@@ -835,6 +835,7 @@ pub mod tests {
     use super::*;
     use crate::carnet::Stamp;
     use crate::finish::{self, Scope, Step};
+    use crate::git::Commit;
     use crate::reviews::{Review, Role};
     use crate::state::Repo;
     use crate::worktrunk::{Forge, Worktree};
@@ -1057,7 +1058,10 @@ pub mod tests {
         );
         update(
             &mut model,
-            Action::Commits("/src/api.ABC-1-login".into(), vec!["abc x".into()]),
+            Action::Commits(
+                "/src/api.ABC-1-login".into(),
+                vec![Commit::fake("abc", "x")],
+            ),
         );
         assert_eq!(
             press(&mut model, "j"),
@@ -1707,7 +1711,9 @@ pub mod tests {
         let mut model = model();
         model.size = (120, 12);
         press(&mut model, "j");
-        let commits = (0..20).map(|n| format!("commit {n}")).collect();
+        let commits = (0..20)
+            .map(|n| Commit::fake("abc1234", &format!("commit {n}")))
+            .collect();
         update(
             &mut model,
             Action::Commits("/src/api.ABC-1-login".into(), commits),
@@ -2417,7 +2423,7 @@ pub mod tests {
             effects.contains(&Effect::Run(Job::Commits(path.clone()))),
             "{effects:?}"
         );
-        let commits = vec!["abc1234 Note the first lead".to_owned()];
+        let commits = vec![Commit::fake("abc1234", "Note the first lead")];
         update(&mut model, Action::Commits(path.clone(), commits.clone()));
         model.schedule.finish_all();
         let snapshot = Ok(model.snapshot.clone());
