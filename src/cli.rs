@@ -83,13 +83,10 @@ enum Command {
 enum Ws {
     /// Create a workspace.
     Add { name: String },
-    /// Remove an unused workspace.
+    /// Remove a workspace that owns no worktree; its carnets move to the default workspace.
     Rm {
         #[arg(add = ArgValueCandidates::new(complete_workspaces))]
         name: String,
-        /// Forget the carnets it owns; their folders stay on disk.
-        #[arg(long)]
-        forget_carnets: bool,
     },
     /// List workspaces.
     Ls,
@@ -97,20 +94,26 @@ enum Ws {
 
 #[derive(Subcommand)]
 enum Carnet {
-    /// Create a carnet `<root>/YYYY-MM-DD-[KEY-]<name>`: a git repo with a README.
+    /// Create a carnet `<root>/YYYY-MM-DD-<name>`: a git repo with a README.
     New {
         name: String,
         /// Its workspace (default: the current session's, else the default workspace).
         #[arg(short, long, add = ArgValueCandidates::new(complete_workspaces))]
         workspace: Option<String>,
     },
-    /// Record a dated git repo directly under the root as a carnet.
-    Add {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Its workspace (default: the current session's, else the default workspace).
-        #[arg(short, long, add = ArgValueCandidates::new(complete_workspaces))]
-        workspace: Option<String>,
+    /// List open carnets, newest first: folder, tickets and summary.
+    Ls {
+        /// Include closed carnets.
+        #[arg(long)]
+        closed: bool,
+    },
+    /// Search every carnet for a text with ripgrep.
+    Search { text: String },
+    /// Print the path of the newest open carnet with a ticket.
+    Path {
+        /// The ticket key (default: the group of the worktree or carnet holding the current
+        /// directory).
+        key: Option<String>,
     },
 }
 
@@ -169,16 +172,7 @@ fn items<'a>(state: &'a State, config: &'a Config) -> Result<Items<'a>> {
 fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
     match command {
         Command::Ws(Ws::Add { name }) => state.add_workspace(&name),
-        Command::Ws(Ws::Rm {
-            name,
-            forget_carnets,
-        }) => {
-            let forget = match forget_carnets {
-                true => state.workspace_carnets(&name)?,
-                false => Vec::new(),
-            };
-            items(state, config)?.remove_workspace(&name, &forget)
-        }
+        Command::Ws(Ws::Rm { name }) => items(state, config)?.remove_workspace(&name),
         Command::Ws(Ws::Ls) => {
             for name in state.workspaces()? {
                 println!("{name}");
@@ -238,26 +232,36 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
         }
         Command::Carnet(command) => {
             let root = config.require_carnet_root()?;
-            let names = crate::carnet::Names::new(config.ticket_pattern())?;
             let items = items(state, config)?;
-            // The workspace given, which must exist, else the current session's when it is
-            // one, else the default workspace.
-            let placed = |workspace: Option<String>| -> Result<String> {
-                if let Some(workspace) = &workspace {
-                    state.require_workspace(workspace)?;
-                }
-                Ok(items.workspace(workspace.as_deref(), state.default_workspace()))
-            };
             match command {
                 Carnet::New { name, workspace } => {
-                    let workspace = placed(workspace)?;
+                    // The workspace given, which must exist, else the current session's when
+                    // it is one, else the default workspace.
+                    if let Some(workspace) = &workspace {
+                        state.require_workspace(workspace)?;
+                    }
+                    let workspace =
+                        items.workspace(workspace.as_deref(), state.default_workspace());
                     let path = items.create_carnet(&name, &workspace, "")?;
                     println!("created {} in {workspace}", path.display());
                 }
-                Carnet::Add { path, workspace } => {
-                    let workspace = placed(workspace)?;
-                    let path = crate::carnet::add(state, &names, &root, &path, &workspace)?;
-                    println!("recorded {} in {workspace}", path.display());
+                Carnet::Ls { closed } => {
+                    let names = crate::carnet::Names::new(config.ticket_pattern())?;
+                    for carnet in crate::carnet::scan(&root, &names)? {
+                        if closed || !carnet.closed {
+                            println!(
+                                "{}\t{}\t{}",
+                                state::dir_name(&carnet.path),
+                                carnet.tickets.join(","),
+                                carnet.summary
+                            );
+                        }
+                    }
+                }
+                Carnet::Search { text } => crate::carnet::search(&System, &root, &text)?,
+                Carnet::Path { key } => {
+                    let dir = std::env::current_dir()?;
+                    println!("{}", items.carnet_path(key.as_deref(), &dir)?.display());
                 }
             }
             Ok(())

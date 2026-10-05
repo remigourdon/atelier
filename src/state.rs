@@ -221,9 +221,8 @@ impl State {
         Ok(())
     }
 
-    /// Removes an unused workspace, forgetting the carnets in `forget` and keeping their
-    /// folders. It fails while it owns any other carnet, so none is forgotten unseen.
-    pub fn remove_workspace(&self, name: &str, forget: &[PathBuf]) -> Result<()> {
+    /// Removes a workspace that owns no worktree, moving its carnets to the default workspace.
+    pub fn remove_workspace(&self, name: &str) -> Result<()> {
         if name == self.default_workspace {
             bail!("{name} is the default workspace and cannot be removed");
         }
@@ -244,29 +243,14 @@ impl State {
         if used("SELECT 1 FROM items WHERE workspace = ? AND kind <> 'carnet'")? {
             bail!("{name} owns worktrees");
         }
-        let carnets = self.workspace_carnets(name)?;
-        let unlisted: Vec<String> = (carnets.iter())
-            .filter(|path| !forget.contains(path))
-            .map(|path| path.display().to_string())
-            .collect();
-        if !unlisted.is_empty() {
-            bail!("{name} owns carnets: {}", unlisted.join(", "));
-        }
         let transaction = self.db.unchecked_transaction()?;
-        for path in &carnets {
-            transaction.execute("DELETE FROM items WHERE path = ?", [text(path)])?;
-        }
+        transaction.execute(
+            "UPDATE items SET workspace = ? WHERE workspace = ?",
+            [&self.default_workspace, name],
+        )?;
         transaction.execute("DELETE FROM workspaces WHERE name = ?", [name])?;
         transaction.commit()?;
         Ok(())
-    }
-
-    /// The carnets `workspace` owns, by path.
-    pub fn workspace_carnets(&self, workspace: &str) -> Result<Vec<PathBuf>> {
-        Ok((self.carnets()?.into_iter())
-            .filter(|carnet| carnet.workspace == workspace)
-            .map(|carnet| carnet.path)
-            .collect())
     }
 
     pub fn repos(&self) -> Result<Vec<Repo>> {
@@ -731,10 +715,10 @@ mod tests {
     #[test]
     fn default_workspace_cannot_be_removed() {
         let state = fresh();
-        assert!(state.remove_workspace("default", &[]).is_err());
+        assert!(state.remove_workspace("default").is_err());
         state.add_workspace("w").unwrap();
-        state.remove_workspace("w", &[]).unwrap();
-        assert!(state.remove_workspace("w", &[]).is_err());
+        state.remove_workspace("w").unwrap();
+        assert!(state.remove_workspace("w").is_err());
     }
 
     #[test]
@@ -744,7 +728,7 @@ mod tests {
         state.add_repo("/r", None, "w").unwrap();
         assert!(
             state
-                .remove_workspace("w", &[])
+                .remove_workspace("w")
                 .unwrap_err()
                 .to_string()
                 .contains("repo default")
@@ -755,7 +739,7 @@ mod tests {
             .unwrap();
         assert!(
             state
-                .remove_workspace("w", &[])
+                .remove_workspace("w")
                 .unwrap_err()
                 .to_string()
                 .contains("owns worktrees")
@@ -763,38 +747,15 @@ mod tests {
     }
 
     #[test]
-    fn a_workspace_owning_carnets_is_removed_only_forgetting_them() {
+    fn removing_a_workspace_moves_its_carnets_to_the_default_one() {
         let state = fresh();
         state.add_workspace("w").unwrap();
         state
             .add_item("/c1", ItemKind::Carnet, None, "", "w")
             .unwrap();
-        state
-            .add_item("/c2", ItemKind::Carnet, None, "", "default")
-            .unwrap();
-        assert_eq!(
-            state.workspace_carnets("w").unwrap(),
-            [PathBuf::from("/c1")]
-        );
-        let error = state.remove_workspace("w", &[]).unwrap_err().to_string();
-        assert!(error.contains("owns carnets: /c1"), "{error}");
-        state
-            .add_item("/c3", ItemKind::Carnet, None, "", "w")
-            .unwrap();
-        let error = (state.remove_workspace("w", &["/c1".into()]).unwrap_err()).to_string();
-        assert!(
-            error.contains("owns carnets: /c3"),
-            "one recorded since: {error}"
-        );
-        assert!(
-            state.item("/c1").unwrap().is_some(),
-            "nothing forgotten on failure"
-        );
-        let forget = state.workspace_carnets("w").unwrap();
-        state.remove_workspace("w", &forget).unwrap();
+        state.remove_workspace("w").unwrap();
         assert!(!state.has_workspace("w").unwrap());
-        assert_eq!(state.item("/c1").unwrap(), None);
-        assert!(state.item("/c2").unwrap().is_some());
+        assert_eq!(state.require_item("/c1").unwrap().workspace, "default");
     }
 
     #[test]

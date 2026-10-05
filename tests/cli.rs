@@ -34,6 +34,11 @@ impl Home {
             .env("XDG_CONFIG_HOME", self.path("config"))
             .env("XDG_STATE_HOME", self.path("state"))
             .env("XDG_CACHE_HOME", self.path("cache"))
+            // Atelier commits carnet READMEs.
+            .env("GIT_AUTHOR_NAME", "me")
+            .env("GIT_AUTHOR_EMAIL", "me@example.com")
+            .env("GIT_COMMITTER_NAME", "me")
+            .env("GIT_COMMITTER_EMAIL", "me@example.com")
             .env_remove("ZELLIJ")
             .env_remove("ZELLIJ_SESSION_NAME")
             .env_remove("ZELLIJ_PANE_ID");
@@ -140,9 +145,11 @@ fn baseline_database_is_read_and_extended() {
     assert_eq!(home.ok(&["ws", "ls"]), "conf\ndefault\nvrac\n");
     assert_eq!(home.ok(&["ls"]), "configue\tconf\t/home/me/configue\n");
     assert!(home.fails(&["ws", "rm", "conf"]).contains("repo default"));
-    assert!(
-        home.fails(&["ws", "rm", "vrac"])
-            .contains("owns carnets: /home/me/Data/2026-09-30-notes")
+    home.ok(&["ws", "rm", "vrac"]);
+    assert_eq!(
+        home.ok(&["ws", "ls"]),
+        "conf\ndefault\n",
+        "its carnets moved"
     );
     home.ok(&["ws", "add", "new"]);
     home.ok(&["ws", "rm", "new"]);
@@ -200,7 +207,7 @@ fn shell_init_fish_wraps_wt() {
 }
 
 #[test]
-fn carnets_are_created_and_added_once_a_root_is_configured() {
+fn carnets_are_folders_under_the_configured_root() {
     let home = Home::new();
     assert!(
         home.fails(&["carnet", "new", "notes"])
@@ -223,30 +230,55 @@ fn carnets_are_created_and_added_once_a_root_is_configured() {
         home.path("Data").canonicalize().unwrap()
     );
     assert!(path.to_string_lossy().ends_with("-ABC-1-slow-login"));
-    assert!(path.join("README.md").exists());
-    assert!(path.join(".git").exists());
+    let readme = std::fs::read_to_string(path.join("README.md")).unwrap();
+    assert!(
+        readme.starts_with("+++\ntickets = [\"ABC-1\"]\n"),
+        "{readme}"
+    );
+    let log = Command::new("git")
+        .args(["log", "--format=%s"])
+        .current_dir(path)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&log.stdout), "Create carnet\n");
 
-    let outside = home.git_repo("2026-01-01-outside");
-    assert!(
-        home.fails(&["carnet", "add", &outside])
-            .contains("not directly under")
-    );
-    let folder = home.git_repo("Data/2026-01-02-ORD-7-old-notes");
-    assert!(
-        home.fails(&["carnet", "add", &folder, "-w", "nope"])
-            .contains("unknown workspace")
-    );
-    home.ok(&["ws", "add", "w"]);
+    home.git_repo("Data/2026-01-02-ORD-7-old-notes");
+    let closed = home.git_repo("Data/2026-01-03-done");
+    std::fs::write(
+        Path::new(&closed).join("README.md"),
+        "+++\ntickets = [\"ORD-7\"]\nclosed = true\nsummary = \"Fixed\"\n+++\n",
+    )
+    .unwrap();
+    home.git_repo("Data/undated");
+    let name = path.file_name().unwrap().to_string_lossy();
     assert_eq!(
-        home.ok(&["carnet", "add", &folder, "-w", "w"]),
-        format!("recorded {folder} in w\n")
+        home.ok(&["carnet", "ls"]),
+        format!("{name}\tABC-1\t\n2026-01-02-ORD-7-old-notes\tORD-7\t\n")
     );
     assert!(
-        home.fails(&["carnet", "add", &folder])
-            .contains("already recorded")
+        home.ok(&["carnet", "ls", "--closed"])
+            .contains("2026-01-03-done\tORD-7\tFixed\n")
     );
-    assert!(home.fails(&["ws", "rm", "w"]).contains("owns carnets"));
-    home.ok(&["ws", "rm", "w", "--forget-carnets"]);
-    assert!(Path::new(&folder).exists());
-    home.ok(&["carnet", "add", &folder]);
+
+    assert_eq!(
+        home.ok(&["carnet", "path", "ORD-7"]),
+        format!(
+            "{}\n",
+            home.path("Data/2026-01-02-ORD-7-old-notes")
+                .canonicalize()
+                .unwrap()
+                .display()
+        )
+    );
+    let missing = home.run(&["carnet", "path", "XYZ-9"]);
+    assert!(!missing.status.success() && missing.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("atelier carnet new"));
+
+    let search = home
+        .command(&["carnet", "search", "x"])
+        .env("PATH", "")
+        .output()
+        .unwrap();
+    assert!(!search.status.success());
+    assert!(String::from_utf8_lossy(&search.stderr).contains("needs ripgrep (rg) on PATH"));
 }
