@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use ratatui::text::Line;
 
-use super::app::{Effect, Kind, List, Model, Work};
+use super::app::{Cmd, Effect, Kind, List, Model, Work};
 use super::view::Palette;
 
 /// A kind of list. Methods take the `List`, so the issue sections share one implementation;
@@ -53,13 +53,8 @@ pub trait ListKind: Sync {
     fn remove(&self, _model: &mut Model, _list: List) -> Vec<Effect> {
         Vec::new()
     }
-    fn close(&self, _model: &mut Model, _list: List) -> Vec<Effect> {
-        Vec::new()
-    }
-    fn close_carnet(&self, _model: &mut Model, _list: List) -> Vec<Effect> {
-        Vec::new()
-    }
-    fn pull(&self, _model: &mut Model, _list: List) -> Vec<Effect> {
+    /// A command only some lists act on, such as `x`, `c` or `p`; the others ignore it.
+    fn command(&self, _model: &mut Model, _list: List, _cmd: Cmd) -> Vec<Effect> {
         Vec::new()
     }
     fn copy_path(&self, _model: &Model, _list: List) -> Option<String> {

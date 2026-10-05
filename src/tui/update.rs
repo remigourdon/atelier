@@ -646,9 +646,9 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
         Cmd::Edit => return lists::of(list).edit(model, list),
         Cmd::Move => return lists::of(list).move_to(model, list),
         Cmd::Remove => return lists::of(list).remove(model, list),
-        Cmd::Close => return lists::of(list).close(model, list),
-        Cmd::CloseCarnet => return lists::of(list).close_carnet(model, list),
-        Cmd::Pull => return lists::of(list).pull(model, list),
+        Cmd::Close | Cmd::CloseCarnet | Cmd::Pull => {
+            return lists::of(list).command(model, list, cmd);
+        }
         Cmd::Browse => {
             return match lists::of(list).url(model, list) {
                 Some(url) => vec![run(model, Job::Browse(url))],

@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 
 use super::{ListKind, kind, pair, paths};
 use crate::tui::app::{
-    Action, Effect, Job, Kind, List, MenuEntry, Modal, Model, Removal, Submit, Work, WorkKind,
+    Action, Cmd, Effect, Job, Kind, List, MenuEntry, Modal, Model, Removal, Submit, Work, WorkKind,
 };
 use crate::tui::update::{confirm, note, run, update, workspace_menu};
 use crate::tui::view::{Palette, icon};
@@ -468,26 +468,23 @@ impl ListKind for WorkList {
         confirm(model, "Remove".into(), lines, Job::Remove(removals))
     }
 
-    /// Closes the open tabs of the selection.
-    fn close(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        let open: Vec<_> = (model.targets().into_iter())
-            .filter(|work| work.tab)
-            .collect();
-        run_on(model, paths(&open), Job::Close)
-    }
-
-    fn close_carnet(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        let carnets: Vec<_> = (model.targets().into_iter())
-            .filter(|work| work.is_carnet())
-            .collect();
-        run_on(model, paths(&carnets), Job::CloseCarnet)
-    }
-
-    fn pull(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        let trees: Vec<_> = (model.targets().into_iter())
-            .filter(|work| work.tree().is_some())
-            .collect();
-        run_on(model, paths(&trees), Job::Pull)
+    /// `x` closes the selection's open tabs, `c` its carnets, `p` pulls its worktrees.
+    fn command(&self, model: &mut Model, _list: List, cmd: Cmd) -> Vec<Effect> {
+        let targets = model.targets().into_iter();
+        let (targets, job): (Vec<_>, fn(_) -> _) = match cmd {
+            Cmd::Close => (targets.filter(|work| work.tab).collect(), Job::Close),
+            Cmd::CloseCarnet => (
+                targets.filter(|work| work.is_carnet()).collect(),
+                Job::CloseCarnet,
+            ),
+            Cmd::Pull => (
+                targets.filter(|work| work.tree().is_some()).collect(),
+                Job::Pull,
+            ),
+            _ => return Vec::new(),
+        };
+        let paths = paths(&targets);
+        run_on(model, paths, job)
     }
 
     /// The item's path, or the group's name.

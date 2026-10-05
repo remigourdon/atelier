@@ -257,7 +257,7 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
   - `carnet::body(readme)` strips the front matter for rendering.
 - **Since step 4:**
   - Add `List::Carnets` to `Panel::tabs` and `lists::of`, and a new `lists/carnets.rs` implementing `ListKind`; add `Kind::Carnets`, which its `kind()` returns.
-  - The trait's `new` is called `create`. Beyond the plan's sketch it has `kind`, `empty` (the empty-list message), `enter`, `close`, `close_carnet` and `pull`. `c` dispatches to `close_carnet`, which the Carnets list implements as the toggle.
+  - The trait holds only what every list can have. Its `new` is called `create`, and beyond the plan's sketch it has `kind`, `empty` (the empty-list message) and `enter`. Keys that only some lists act on (`x`, `c`, `p`) go to `ListKind::command(model, list, cmd)`, which Work matches on and the others ignore. The Carnets list handles `c` there as the toggle; rename `Cmd::CloseCarnet` to match, since it no longer only closes. `s` goes through `command` too.
   - A list's `Model` accessors live in its module, in an `impl Model` block, as `work.rs` does for `work_rows` and `targets`. `Keep` restores each list's selection through `ids`, so the Carnets list only needs a stable one, its path.
   - The main view's README and commits come from `work::selected`, and `update::commits` fetches them for the Work row only. The Carnets list needs the same for its selected carnet.
 
