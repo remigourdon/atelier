@@ -309,7 +309,7 @@ pub fn render(context: &Context) -> String {
         );
     }
     if !context.worktrees.is_empty() {
-        line("worktrees", String::new());
+        let _ = writeln!(out, "worktrees");
         for tree in &context.worktrees {
             let mark = if tree.current { '*' } else { ' ' };
             let branch = tree.branch.as_deref().unwrap_or("?");
@@ -328,7 +328,7 @@ pub fn render(context: &Context) -> String {
         }
     }
     if !context.carnets.is_empty() {
-        let _ = writeln!(out, "{:<10}", "carnets");
+        let _ = writeln!(out, "carnets");
         for carnet in &context.carnets {
             let mark = if context.carnet.as_ref() == Some(&carnet.path) {
                 '*'
