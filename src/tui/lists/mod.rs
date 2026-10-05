@@ -12,8 +12,10 @@ use std::path::PathBuf;
 
 use ratatui::text::Line;
 
-use super::app::{Cmd, Effect, Kind, List, Model, Work};
+use super::app::{Cmd, Effect, Job, Kind, List, Model, Work};
+use super::update::run;
 use super::view::Palette;
+use crate::finish::Scope;
 
 /// A kind of list. Methods take the `List`, so the issue sections share one implementation;
 /// operations a list doesn't support do nothing.
@@ -58,6 +60,10 @@ pub trait ListKind: Sync {
     fn remove(&self, _model: &mut Model, _list: List) -> Vec<Effect> {
         Vec::new()
     }
+    /// `f`: fetches, then shows the finish plan of what the selection covers.
+    fn finish(&self, _model: &mut Model, _list: List) -> Vec<Effect> {
+        Vec::new()
+    }
     /// `Esc` on the list, once its filter is clear; `false` when it does nothing.
     fn back(&self, _model: &mut Model, _list: List) -> bool {
         false
@@ -87,6 +93,12 @@ pub fn of(list: List) -> &'static dyn ListKind {
         List::ToReview | List::Mine => &reviews::Reviews,
         List::Section(_) => &issues::Issues,
     }
+}
+
+/// Fetches the repos `scope` may touch, then builds its plan.
+fn plan(model: &mut Model, scope: Scope) -> Vec<Effect> {
+    let repos = scope.repos(&model.snapshot);
+    vec![run(model, Job::Plan { scope, repos })]
 }
 
 fn paths(works: &[&Work]) -> Vec<PathBuf> {

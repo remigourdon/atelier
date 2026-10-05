@@ -12,6 +12,7 @@ use super::app::{
 use super::lists;
 use super::widgets;
 use crate::config::Icons;
+use crate::finish::Signal;
 
 /// Below this width the main view is hidden until `+`.
 pub const NARROW: u16 = 100;
@@ -43,6 +44,9 @@ pub struct Glyphs {
     pub closed: &'static str,
     pub folded: &'static str,
     pub unfolded: &'static str,
+    /// A finished worktree's mark: integrated, or its upstream gone.
+    pub integrated: &'static str,
+    pub gone: &'static str,
     pub spinner: [&'static str; 4],
 }
 
@@ -61,10 +65,13 @@ impl Glyphs {
                 closed: "○",
                 folded: "▸",
                 unfolded: "▾",
+                integrated: "⊂",
+                gone: "⊘",
                 spinner,
             },
             // Nerd Fonts: fa-desktop, oct-repo, dev-git_branch, fa-book, oct-git_pull_request,
-            // oct-issue_opened, fa-circle, fa-circle_o, fa-folder, fa-folder_open.
+            // oct-issue_opened, fa-circle, fa-circle_o, fa-folder, fa-folder_open, oct-git_merge,
+            // fa-chain_broken.
             Icons::Nerd => Self {
                 workspace: "\u{f108}",
                 repo: "\u{f401}",
@@ -76,8 +83,20 @@ impl Glyphs {
                 closed: "\u{f10c}",
                 folded: "\u{f07b}",
                 unfolded: "\u{f07c}",
+                integrated: "\u{f419}",
+                gone: "\u{f127}",
                 spinner,
             },
+        }
+    }
+}
+
+impl Glyphs {
+    /// A finished worktree's mark.
+    pub fn signal(&self, signal: Signal) -> &'static str {
+        match signal {
+            Signal::Integrated => self.integrated,
+            Signal::Gone => self.gone,
         }
     }
 }

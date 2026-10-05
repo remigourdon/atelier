@@ -3,7 +3,8 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, kind, pair, paths};
+use super::{ListKind, kind, pair, paths, plan};
+use crate::finish::Scope;
 use crate::issues::{Issue, State};
 use crate::state::Repo;
 use crate::tui::app::{
@@ -230,6 +231,19 @@ impl ListKind for Issues {
             Some(issue) => ask_start(model, issue),
             None => Vec::new(),
         }
+    }
+
+    /// The issue's linked work: the worktrees in its group and the carnets whose first ticket
+    /// it is.
+    fn finish(&self, model: &mut Model, _list: List) -> Vec<Effect> {
+        let Some(issue) = model.issue() else {
+            return Vec::new();
+        };
+        let scope = Scope::Issue {
+            key: issue.key.clone(),
+            state: issue.state.label().to_lowercase(),
+        };
+        plan(model, scope)
     }
 
     fn url(&self, model: &Model, _list: List) -> Option<String> {

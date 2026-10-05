@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, carnets, kind, pair, paths};
+use super::{ListKind, carnets, kind, pair, paths, plan};
+use crate::finish::{self, Scope};
 use crate::tui::app::{
     Action, Cmd, Effect, Job, Kind, List, MenuEntry, Modal, Model, Removal, Submit, Work, WorkKind,
 };
@@ -251,6 +252,11 @@ impl ListKind for WorkList {
                             Style::new().fg(palette.warn),
                         ));
                     }
+                    // Finished: dimmed, with why.
+                    if let Some(signal) = finish::signal(work) {
+                        spans.push(Span::raw(format!(" {}", glyphs.signal(signal))));
+                        spans = spans.into_iter().map(|span| span.style(dim)).collect();
+                    }
                     Line::from(spans)
                 }
             })
@@ -275,7 +281,7 @@ impl ListKind for WorkList {
                     } => (repo_name, tree),
                     WorkKind::Carnet { .. } => return carnets::detail(work),
                 };
-                vec![
+                let mut pairs = vec![
                     pair("Repo", repo_name.clone()),
                     pair("Branch", work.branch()),
                     pair("Path", tree.path.display().to_string()),
@@ -303,7 +309,14 @@ impl ListKind for WorkList {
                             tree.short_sha, tree.subject, tree.committed_at
                         ),
                     ),
-                ]
+                ];
+                if let Some(signal) = finish::signal(work) {
+                    pairs.push(pair(
+                        "Finished",
+                        format!("{} (f to finish)", signal.label()),
+                    ));
+                }
+                pairs
             }
             None => Vec::new(),
         }
@@ -455,6 +468,24 @@ impl ListKind for WorkList {
         }
         let removals = removable.into_iter().map(|(_, removal)| removal).collect();
         confirm(model, "Remove".into(), lines, Job::Remove(removals))
+    }
+
+    /// The selection's whole groups, and its items in no group on their own.
+    fn finish(&self, model: &mut Model, _list: List) -> Vec<Effect> {
+        let targets = model.targets();
+        if targets.is_empty() {
+            return Vec::new();
+        }
+        let mut groups: Vec<String> = Vec::new();
+        let mut items = Vec::new();
+        for work in targets {
+            if work.group.is_empty() {
+                items.push(work.path.clone());
+            } else if !groups.contains(&work.group) {
+                groups.push(work.group.clone());
+            }
+        }
+        plan(model, Scope::Work { groups, items })
     }
 
     /// `x` closes the selection's open tabs, `c` its carnets, `p` pulls its worktrees.
