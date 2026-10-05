@@ -7,7 +7,7 @@ use super::{ListKind, kind, pair, paths};
 use crate::issues::{Issue, State};
 use crate::state::Repo;
 use crate::tui::app::{
-    Action, Effect, Job, Kind, List, MenuEntry, Modal, Model, Source, Submit, Work,
+    Action, Effect, Feed, Job, Kind, List, MenuEntry, Modal, Model, Source, Submit, Work,
 };
 use crate::tui::update::{note, run};
 use crate::tui::view::{Palette, icon};
@@ -202,7 +202,8 @@ impl ListKind for Issues {
     }
 
     fn empty(&self, model: &Model, _list: List) -> &'static str {
-        if (model.loading.keys()).any(|source| matches!(source, Source::Issues(_))) {
+        if (model.schedule.loading()).any(|source| matches!(source, Source::Feed(Feed::Issues(_))))
+        {
             "loading…"
         } else if model.tracker_config.scopes().is_empty() {
             "no [tracker] configured"

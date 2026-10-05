@@ -6,7 +6,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
-use super::app::{Cmd, Focus, KEYMAP, List, Model, Panel, Popup, Screen, Work, popup_hints};
+use super::app::{
+    Cmd, Focus, KEYMAP, List, Model, Panel, Popup, Screen, Source, Work, popup_hints,
+};
 use super::lists;
 use super::widgets;
 use crate::config::Icons;
@@ -400,7 +402,7 @@ fn render_hints(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect)
             spans.push(Span::raw(format!(" {}", short_help(binding.help))));
         }
     }
-    let loading: Vec<&str> = model.loading.keys().map(|source| source.label()).collect();
+    let loading: Vec<&str> = model.schedule.loading().map(Source::label).collect();
     let [left, right] = Layout::horizontal([
         Constraint::Fill(1),
         Constraint::Length(if loading.is_empty() {

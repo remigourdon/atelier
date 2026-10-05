@@ -11,9 +11,9 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use super::app::{
-    Action, Binding, Cmd, Due, Effect, FAST_REFRESH, FULL_REFRESH, Focus, Job, KEYMAP, List,
-    MenuEntry, Modal, Model, On, Panel, Popup, PopupCmd, Row, Screen, Search, Snapshot, Source,
-    Submit, Work, WorkKind, lookup, popup_lookup,
+    Action, Binding, Cmd, Effect, Feed, Focus, Job, KEYMAP, List, MenuEntry, Modal, Model, On,
+    Panel, Popup, PopupCmd, Row, Rows, Screen, Search, Snapshot, Source, Submit, Work, WorkKind,
+    lookup, popup_lookup,
 };
 use super::lists;
 use super::view::{areas, main_len, offset};
@@ -24,18 +24,22 @@ use crate::worktrunk;
 pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
     match action {
         Action::Key(key) => {
-            model.idle = 0;
+            model.schedule.input();
             key_press(model, key)
         }
         Action::Mouse(mouse) => {
-            model.idle = 0;
+            model.schedule.input();
             mouse_event(model, mouse)
         }
         Action::Resize(width, height) => {
             model.size = (width, height);
             Vec::new()
         }
-        Action::Tick => tick(model),
+        Action::Tick => {
+            model.frame = model.frame.wrapping_add(1);
+            let jobs = model.schedule.tick();
+            start(model, jobs)
+        }
         Action::Cmd(cmd) => command(model, cmd),
         Action::Run(job) => vec![run(model, job)],
         Action::Ask {
@@ -62,7 +66,7 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
             full,
             log,
         } => {
-            done(model, Source::Wt);
+            let mut effects = done(model, Source::Wt);
             model.push_log(log);
             match snapshot {
                 Ok(snapshot) => {
@@ -71,94 +75,67 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
                     model.loaded = true;
                     keep.restore(model);
                     drop_stale(model, &old, full);
-                    let mut effects = commits(model);
-                    effects.extend(fetch_reviews(model));
-                    effects.extend(fetch_issues(model));
-                    effects
+                    effects.extend(commits(model));
+                    effects.extend(fetch(model));
                 }
-                Err(error) => {
-                    model.push_log([Logged {
-                        command: "refresh".into(),
-                        error: Some(error),
-                    }]);
-                    Vec::new()
-                }
+                Err(error) => model.push_log([Logged {
+                    command: "refresh".into(),
+                    error: Some(error),
+                }]),
             }
+            effects
         }
         Action::Commits(path, lines) => {
-            done(model, Source::Git);
             model.commits.insert(path, lines);
-            Vec::new()
+            done(model, Source::Git)
         }
         Action::Readme(path, readme) => {
-            done(model, Source::Git);
             model.readmes.insert(path, readme);
-            Vec::new()
+            done(model, Source::Git)
         }
         Action::Searched { text, hits, log } => {
-            done(model, Source::Run);
+            let mut effects = done(model, Source::Run);
             model.push_log(log);
-            let Some(hits) = hits else {
-                return Vec::new();
-            };
-            let keep = Keep::of(model);
-            model.search = Some(Search { text, hits });
-            keep.restore(model);
-            model.scroll = (0, 0);
-            commits(model)
+            if let Some(hits) = hits {
+                let keep = Keep::of(model);
+                model.search = Some(Search { text, hits });
+                keep.restore(model);
+                model.scroll = (0, 0);
+                effects.extend(commits(model));
+            }
+            effects
         }
-        Action::Reviews {
-            provider,
-            reviews,
-            log,
-        } => {
-            done(model, Source::Reviews(provider));
+        Action::Fetched { feed, rows, log } => {
+            let effects = done(model, Source::Feed(feed));
             model.push_log(log);
-            match reviews {
-                Ok(reviews) => {
+            match rows {
+                Ok(rows) => {
                     let keep = Keep::of(model);
-                    model.reviews.retain(|review| review.provider != provider);
-                    model.reviews.extend(reviews);
-                    model
-                        .reviews
-                        .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                    match rows {
+                        Rows::Reviews(reviews) => {
+                            (model.reviews).retain(|review| Feed::Reviews(review.provider) != feed);
+                            model.reviews.extend(reviews);
+                            (model.reviews).sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                        }
+                        Rows::Issues(issues) => {
+                            (model.issues).retain(|issue| Feed::Issues(issue.tracker) != feed);
+                            model.issues.extend(issues);
+                            model.issues.sort_by_key(|issue| issue.tracker);
+                        }
+                    }
                     keep.restore(model);
                 }
                 Err(error) => model.push_log([Logged {
-                    command: format!("{} reviews", provider.cli()),
+                    command: feed.what(),
                     error: Some(error),
                 }]),
             }
-            Vec::new()
-        }
-        Action::Issues {
-            tracker,
-            issues,
-            log,
-        } => {
-            done(model, Source::Issues(tracker));
-            model.push_log(log);
-            match issues {
-                Ok(issues) => {
-                    let keep = Keep::of(model);
-                    model.issues.retain(|issue| issue.tracker != tracker);
-                    model.issues.extend(issues);
-                    model.issues.sort_by_key(|issue| issue.tracker);
-                    keep.restore(model);
-                }
-                Err(error) => model.push_log([Logged {
-                    command: format!("{} issues", tracker.cli()),
-                    error: Some(error),
-                }]),
-            }
-            Vec::new()
+            effects
         }
         Action::Finished { job, log, error } => {
-            done(model, job.source());
+            let mut effects = done(model, job.source());
             if let Job::Pull(paths) = &job {
-                for path in paths {
-                    model.pulling.remove(path);
-                }
+                model.schedule.pulled(paths);
             }
             let logged_error = log.iter().rev().find_map(|entry| entry.error.clone());
             model.push_log(log);
@@ -170,39 +147,35 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
                     error: Some(error),
                 }]);
             }
-            vec![run(model, Job::Refresh { full: false })]
+            if job.changes_items() {
+                let jobs = model.schedule.changed();
+                effects.extend(start(model, jobs));
+            }
+            effects
         }
     }
 }
 
 /// Starts a job, showing its loading indicator.
 pub(super) fn run(model: &mut Model, job: Job) -> Effect {
-    *model.loading.entry(job.source()).or_default() += 1;
-    if let Job::Pull(paths) = &job {
-        model.pulling.extend(paths.iter().cloned());
-    }
-    if let Job::Refresh { full } = job {
-        model.since_refresh = 0;
-        if full {
-            model.since_full = 0;
-            for due in [&mut model.reviews_due, &mut model.issues_due] {
-                if *due == Due::No {
-                    *due = Due::Cached;
-                }
-            }
-        }
-    }
+    model.schedule.started(&job);
     Effect::Run(job)
 }
 
-/// Lists each provider's reviews on the hosts of the registered repos, once a listing that
-/// asked for them has found those hosts.
-fn fetch_reviews(model: &mut Model) -> Vec<Effect> {
-    let due = std::mem::replace(&mut model.reviews_due, Due::No);
-    if due == Due::No {
-        return Vec::new();
-    }
-    let mut jobs = Vec::new();
+fn start(model: &mut Model, jobs: Vec<Job>) -> Vec<Effect> {
+    jobs.into_iter().map(|job| run(model, job)).collect()
+}
+
+/// A job of `source` finished: starts the refresh it held back.
+fn done(model: &mut Model, source: Source) -> Vec<Effect> {
+    let jobs = model.schedule.finished(source);
+    start(model, jobs)
+}
+
+/// Lists the due feeds: each provider's reviews on the hosts of the registered repos, and each
+/// tracker's issues in its configured scopes. A provider with no host lists none.
+fn fetch(model: &mut Model) -> Vec<Effect> {
+    let mut keys = Vec::new();
     for provider in Provider::ALL {
         let mut hosts: Vec<String> = (model.snapshot.forges.values())
             .filter(|forge| Provider::from_name(&forge.provider) == Some(provider))
@@ -212,76 +185,13 @@ fn fetch_reviews(model: &mut Model) -> Vec<Effect> {
         hosts.dedup();
         if hosts.is_empty() {
             model.reviews.retain(|review| review.provider != provider);
-        } else {
-            jobs.push(Job::Reviews {
-                provider,
-                hosts,
-                force: due == Due::Fresh,
-            });
         }
+        keys.push((Feed::Reviews(provider), hosts));
     }
-    let (effects, due) = run_due(model, due, jobs);
-    model.reviews_due = due;
-    effects
-}
-
-/// Lists each tracker's issues in its configured scopes, once a listing asked for them.
-fn fetch_issues(model: &mut Model) -> Vec<Effect> {
-    let due = std::mem::replace(&mut model.issues_due, Due::No);
-    if due == Due::No {
-        return Vec::new();
-    }
-    let jobs = (model.tracker_config.scopes().into_iter())
-        .map(|(tracker, scopes)| Job::Issues {
-            tracker,
-            scopes,
-            force: due == Due::Fresh,
-        })
-        .collect();
-    let (effects, due) = run_due(model, due, jobs);
-    model.issues_due = due;
-    effects
-}
-
-/// Starts the due listings whose source is idle, and returns what is still due: a source still
-/// listing gets its turn at the next listing, so `R` is not lost.
-fn run_due(model: &mut Model, due: Due, jobs: Vec<Job>) -> (Vec<Effect>, Due) {
-    let mut effects = Vec::new();
-    let mut busy = false;
-    for job in jobs {
-        if model.loading.contains_key(&job.source()) {
-            busy = true;
-        } else {
-            effects.push(run(model, job));
-        }
-    }
-    (effects, if busy { due } else { Due::No })
-}
-
-fn done(model: &mut Model, source: Source) {
-    if let Some(count) = model.loading.get_mut(&source) {
-        *count -= 1;
-        if *count == 0 {
-            model.loading.remove(&source);
-        }
-    }
-}
-
-fn tick(model: &mut Model) -> Vec<Effect> {
-    model.frame = model.frame.wrapping_add(1);
-    model.idle += 1;
-    model.since_refresh += 1;
-    model.since_full += 1;
-    if model.loading.contains_key(&Source::Wt) {
-        return Vec::new();
-    }
-    if model.since_full >= FULL_REFRESH {
-        vec![run(model, Job::Refresh { full: true })]
-    } else if model.idle >= FAST_REFRESH && model.since_refresh >= FAST_REFRESH {
-        vec![run(model, Job::Refresh { full: false })]
-    } else {
-        Vec::new()
-    }
+    let scopes = model.tracker_config.scopes().into_iter();
+    keys.extend(scopes.map(|(tracker, scopes)| (Feed::Issues(tracker), scopes)));
+    let jobs = model.schedule.loaded(keys);
+    start(model, jobs)
 }
 
 /// Each list's selection, kept by its row's identity across a refresh.
@@ -709,9 +619,8 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
         Cmd::Filter if !in_main => model.filtering = Some(list),
         Cmd::Filter => {}
         Cmd::Refresh => {
-            model.reviews_due = Due::Fresh;
-            model.issues_due = Due::Fresh;
-            return vec![run(model, Job::Refresh { full: true })];
+            let jobs = model.schedule.refresh(true);
+            return start(model, jobs);
         }
         Cmd::Menu => {
             let here = |binding: &&Binding| matches!(binding.on, On::Lists(lists) if lists.contains(&list.kind()));
@@ -964,7 +873,7 @@ pub mod tests {
                 log: Vec::new(),
             },
         );
-        model.loading.clear();
+        model.schedule.finish_all();
         model
     }
 
@@ -1167,7 +1076,7 @@ pub mod tests {
                 group: "ABC-1".into(),
             }]
         );
-        assert!(model.loading.contains_key(&Source::Run));
+        assert!(model.schedule.is_loading(Source::Run));
     }
 
     #[test]
@@ -1367,14 +1276,42 @@ pub mod tests {
         );
         assert_eq!(effects, [Effect::Run(Job::Refresh { full: false })]);
         assert_eq!(model.log.len(), 1);
-        assert_eq!(model.loading.keys().collect::<Vec<_>>(), [&Source::Wt]);
+        assert_eq!(model.schedule.loading().collect::<Vec<_>>(), [Source::Wt]);
+        press(&mut model, "x");
+        let finished = |job| Action::Finished {
+            job,
+            log: Vec::new(),
+            error: None,
+        };
+        let close = finished(Job::Close(vec!["/src/api".into()]));
+        assert!(
+            update(&mut model, close).is_empty(),
+            "the refresh in flight holds the next one back"
+        );
+        assert_eq!(
+            update(
+                &mut model,
+                finished(Job::Browse("https://forge/api".into()))
+            ),
+            [],
+            "browsing changes nothing to refresh"
+        );
+        let effects = update(
+            &mut model,
+            Action::Loaded {
+                snapshot: Ok(snapshot()),
+                full: false,
+                log: Vec::new(),
+            },
+        );
+        assert_eq!(effects, [Effect::Run(Job::Refresh { full: false })]);
     }
 
     #[test]
     fn pulling_rows_spin_until_their_job_finishes() {
         let mut model = model();
         press(&mut model, " ");
-        model.loading.clear();
+        model.schedule.finish_all();
         assert!(!model.animating());
         let jobs = jobs(press(&mut model, "p"));
         let paths = vec![
@@ -1382,7 +1319,7 @@ pub mod tests {
             PathBuf::from("/src/web.ABC-1-form"),
         ];
         assert_eq!(jobs, [Job::Pull(paths.clone())]);
-        assert!(paths.iter().all(|path| model.pulling.contains(path)));
+        assert!(paths.iter().all(|path| model.schedule.is_pulling(path)));
         assert!(model.animating());
         let frame = model.frame;
         update(&mut model, Action::Tick);
@@ -1395,27 +1332,7 @@ pub mod tests {
                 error: None,
             },
         );
-        assert!(model.pulling.is_empty());
-    }
-
-    #[test]
-    fn timers_refresh_fast_when_idle_and_fully_every_five_minutes() {
-        let mut model = model();
-        for _ in 0..FAST_REFRESH - 1 {
-            assert!(update(&mut model, Action::Tick).is_empty());
-        }
-        assert_eq!(
-            update(&mut model, Action::Tick),
-            [Effect::Run(Job::Refresh { full: false })]
-        );
-        assert!(update(&mut model, Action::Tick).is_empty(), "one in flight");
-        model.loading.clear();
-        model.since_full = FULL_REFRESH - 1;
-        press(&mut model, "j");
-        assert_eq!(
-            jobs(update(&mut model, Action::Tick)),
-            [Job::Refresh { full: true }]
-        );
+        assert!(!model.animating());
     }
 
     #[test]
@@ -1511,7 +1428,7 @@ pub mod tests {
         press(&mut model, "\n");
         assert!(model.modal.is_none());
         assert!(
-            model.loading.contains_key(&Source::Run),
+            model.schedule.is_loading(Source::Run),
             "Space opened the group"
         );
     }
@@ -1538,13 +1455,13 @@ pub mod tests {
     pub fn with_reviews(mut model: Model) -> Model {
         update(
             &mut model,
-            Action::Reviews {
-                provider: Provider::GitHub,
-                reviews: Ok(vec![
+            Action::Fetched {
+                feed: Feed::Reviews(Provider::GitHub),
+                rows: Ok(Rows::Reviews(vec![
                     review(Provider::GitHub, Role::ToReview, 1, "https://forge/other"),
                     review(Provider::GitHub, Role::ToReview, 2, "https://forge/api"),
                     review(Provider::GitHub, Role::Mine, 3, "https://forge/api"),
-                ]),
+                ])),
                 log: Vec::new(),
             },
         );
@@ -1556,7 +1473,7 @@ pub mod tests {
     }
 
     #[test]
-    fn listings_that_ask_for_reviews_fetch_them_per_provider() {
+    fn listings_fetch_the_reviews_of_their_hosts() {
         let mut model = Model::new((120, 40));
         let loaded = |model: &mut Model| {
             jobs(update(
@@ -1568,37 +1485,18 @@ pub mod tests {
                 },
             ))
         };
-        let first = Job::Reviews {
-            provider: Provider::GitHub,
-            hosts: vec!["forge".into()],
+        let first = Job::Fetch {
+            feed: Feed::Reviews(Provider::GitHub),
+            keys: vec!["forge".into()],
             force: false,
         };
-        assert_eq!(
-            loaded(&mut model),
-            std::slice::from_ref(&first),
-            "startup lists them"
-        );
-        model.loading.clear();
+        assert_eq!(loaded(&mut model), [first], "startup lists them");
+        model.schedule.finish_all();
         assert!(loaded(&mut model).is_empty(), "a fast refresh does not");
         press(&mut model, "R");
-        model.loading.clear();
-        let [Job::Reviews { force: true, .. }] = loaded(&mut model)[..] else {
+        model.schedule.finish_all();
+        let [Job::Fetch { force: true, .. }] = loaded(&mut model)[..] else {
             panic!("R lists them past the cache");
-        };
-        model.loading.clear();
-        model.since_full = FULL_REFRESH;
-        update(&mut model, Action::Tick);
-        model.loading.clear();
-        assert_eq!(loaded(&mut model), [first], "so does the full refresh");
-        press(&mut model, "R");
-        assert!(
-            loaded(&mut model).is_empty(),
-            "the full refresh is still listing reviews"
-        );
-        assert_eq!(model.reviews_due, Due::Fresh, "R waits for it");
-        model.loading.clear();
-        let [Job::Reviews { force: true, .. }] = loaded(&mut model)[..] else {
-            panic!("then R lists them past the cache");
         };
     }
 
@@ -1615,9 +1513,9 @@ pub mod tests {
         let gitlab = review(Provider::GitLab, Role::ToReview, 9, "https://lab/x");
         update(
             &mut model,
-            Action::Reviews {
-                provider: Provider::GitLab,
-                reviews: Ok(vec![gitlab]),
+            Action::Fetched {
+                feed: Feed::Reviews(Provider::GitLab),
+                rows: Ok(Rows::Reviews(vec![gitlab])),
                 log: Vec::new(),
             },
         );
@@ -1625,9 +1523,9 @@ pub mod tests {
         assert_eq!(model.review().unwrap().number, 1, "still selected");
         update(
             &mut model,
-            Action::Reviews {
-                provider: Provider::GitHub,
-                reviews: Err("offline".into()),
+            Action::Fetched {
+                feed: Feed::Reviews(Provider::GitHub),
+                rows: Err("offline".into()),
                 log: Vec::new(),
             },
         );
@@ -1727,24 +1625,24 @@ pub mod tests {
         jira.project_url = None;
         update(
             &mut model,
-            Action::Issues {
-                tracker: crate::issues::Tracker::GitHub,
-                issues: Ok(vec![
+            Action::Fetched {
+                feed: Feed::Issues(crate::issues::Tracker::GitHub),
+                rows: Ok(Rows::Issues(vec![
                     issue("api#1", &["ready-for-agent"], false),
                     issue("api#2", &["needs-triage"], false),
                     issue("api#3", &["ready-for-agent"], true),
                     issue("api#4", &[], false),
                     issue("api#5", &["wontfix"], false),
                     issue("api#6", &["enhancement"], false),
-                ]),
+                ])),
                 log: Vec::new(),
             },
         );
         update(
             &mut model,
-            Action::Issues {
-                tracker: crate::issues::Tracker::Jira,
-                issues: Ok(vec![jira]),
+            Action::Fetched {
+                feed: Feed::Issues(crate::issues::Tracker::Jira),
+                rows: Ok(Rows::Issues(vec![jira])),
                 log: Vec::new(),
             },
         );
@@ -1797,13 +1695,13 @@ pub mod tests {
         assert_eq!(model.title(model.active()), "Other");
         update(
             &mut model,
-            Action::Issues {
-                tracker: crate::issues::Tracker::GitHub,
-                issues: Ok(vec![crate::issues::tests::issue(
+            Action::Fetched {
+                feed: Feed::Issues(crate::issues::Tracker::GitHub),
+                rows: Ok(Rows::Issues(vec![crate::issues::tests::issue(
                     "api#1",
                     &["ready-for-agent"],
                     false,
-                )]),
+                )])),
                 log: Vec::new(),
             },
         );
