@@ -194,7 +194,7 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
 
 ## Step 4 — One module per list
 
-- **Status:** todo
+- **Status:** done (#19)
 - **Branch:** `refactor-list-modules`, from `refactor-carnet-record`
 - **Files:** new `src/tui/lists/{mod,workspaces,repos,work,reviews,issues}.rs`; `src/tui/{app,update,view}.rs`
 - **Since step 3:** Work has one more operation, `c` (`Cmd::CloseCarnet`, today an arm in `update::command`), which belongs in `work.rs` like `d`, `x` and `p`. Work's `remove` builds `Removal::of(work)`, which skips carnets and main worktrees. The Work rows hold open carnets only; closed ones are in `Snapshot.carnets`.
@@ -255,6 +255,11 @@ Vocabulary is in [CONTEXT.md](../CONTEXT.md) and the target behaviour in [design
   - `c` is bound to `Cmd::CloseCarnet` for Work, with `hint: NONE`, so it is not yet in the hint bar.
   - `carnet::search_args`, `carnet::search`, `carnet::on_path` and `carnet::NO_RIPGREP` are the CLI's search. Step 5 adds `--no-heading` for its own search.
   - `carnet::body(readme)` strips the front matter for rendering.
+- **Since step 4:**
+  - Add `List::Carnets` to `Panel::tabs` and `lists::of`, and a new `lists/carnets.rs` implementing `ListKind`; add `Kind::Carnets`, which its `kind()` returns.
+  - The trait's `new` is called `create`. Beyond the plan's sketch it has `kind`, `empty` (the empty-list message), `enter`, `close`, `close_carnet` and `pull`. `c` dispatches to `close_carnet`, which the Carnets list implements as the toggle.
+  - A list's `Model` accessors live in its module, in an `impl Model` block, as `work.rs` does for `work_rows` and `targets`. `Keep` restores each list's selection through `ids`, so the Carnets list only needs a stable one, its path.
+  - The main view's README and commits come from `work::selected`, and `update::commits` fetches them for the Work row only. The Carnets list needs the same for its selected carnet.
 
 1. **Panel 2 becomes `Work │ Carnets`.** The sub-tab exists only while carnets are enabled.
 2. **Rows:** every carnet in `Snapshot.carnets`, across all workspaces, newest first. Each row shows its date and name, its tickets, a closed marker, and its summary.
