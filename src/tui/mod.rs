@@ -3,6 +3,7 @@
 mod app;
 mod jobs;
 mod lists;
+mod schedule;
 mod update;
 mod view;
 mod widgets;
@@ -125,7 +126,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use super::app::{Action, Model, WorkKind};
+    use super::app::{Action, Feed, Model, Rows, WorkKind};
     use super::update::update;
     use super::*;
     use crate::config::Icons;
@@ -165,7 +166,7 @@ mod tests {
             &mut model,
             Action::Commits(path, vec!["abc1234 Add login (2 hours ago, R)".into()]),
         );
-        model.loading.clear();
+        model.schedule.finish_all();
         model.log.push(crate::process::Logged {
             command: "git -C /src/api pull --ff-only".into(),
             error: None,
@@ -229,9 +230,9 @@ mod tests {
         issues.extend(parse_gh(tests::GH_CLOSED, false).unwrap());
         update(
             &mut model,
-            Action::Issues {
-                tracker: crate::issues::Tracker::GitHub,
-                issues: Ok(issues),
+            Action::Fetched {
+                feed: Feed::Issues(crate::issues::Tracker::GitHub),
+                rows: Ok(Rows::Issues(issues)),
                 log: Vec::new(),
             },
         );
@@ -255,7 +256,7 @@ mod tests {
             &mut model,
             Action::Readme("/data/2026-10-02-ideas".into(), Some(readme.into())),
         );
-        model.loading.clear();
+        model.schedule.finish_all();
         insta::assert_snapshot!(render(&model, 120, 30));
     }
 
@@ -275,7 +276,7 @@ mod tests {
             *summary = "Login fails after the token refresh".into();
         }
         update(&mut model, Action::Key(key(']')));
-        model.loading.clear();
+        model.schedule.finish_all();
         insta::assert_snapshot!(render(&model, 120, 30));
     }
 

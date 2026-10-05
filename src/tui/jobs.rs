@@ -4,12 +4,12 @@ use std::path::PathBuf;
 
 use color_eyre::eyre::{Report, Result, eyre};
 
-use super::app::{Action, Job};
+use super::app::{Action, Feed, Job, Rows};
 use crate::config::Config;
-use crate::issues::{self, Issue, TrackerConfig};
+use crate::issues::{self, TrackerConfig};
 use crate::items::Items;
 use crate::process::{Logged, Recorder, Runner, System};
-use crate::reviews::{self, Provider, Review, Role};
+use crate::reviews::{self, Role};
 use crate::state::{self, State};
 use crate::zellij::{Layouts, Zellij};
 use crate::{carnet, git};
@@ -101,42 +101,16 @@ pub fn run(context: &Context, job: Job) -> Action {
             }
         }
         // Like refreshes, these run constantly: log only failures.
-        Job::Reviews {
-            provider,
-            hosts,
-            force,
-        } => {
-            let (reviews, log) = match context.state() {
-                Ok(state) => {
-                    let (reviews, log) = reviews(&state, &recorder, provider, &hosts, force);
-                    (Ok(reviews), log)
-                }
-                Err(err) => (Err(err.to_string()), Vec::new()),
-            };
-            Action::Reviews {
-                provider,
-                reviews,
-                log,
-            }
-        }
-        Job::Issues {
-            tracker,
-            scopes,
-            force,
-        } => {
+        Job::Fetch { feed, keys, force } => {
             let config = &context.config.tracker;
-            let (issues, log) = match context.state() {
+            let (rows, log) = match context.state() {
                 Ok(state) => {
-                    let (issues, log) = issues(&state, &recorder, config, tracker, &scopes, force);
-                    (Ok(issues), log)
+                    let (rows, log) = fetch(&state, &recorder, config, feed, &keys, force);
+                    (Ok(rows), log)
                 }
                 Err(err) => (Err(err.to_string()), Vec::new()),
             };
-            Action::Issues {
-                tracker,
-                issues,
-                log,
-            }
+            Action::Fetched { feed, rows, log }
         }
         job => {
             let error = context
@@ -177,53 +151,42 @@ fn fetch_failures(recorder: &Recorder, error: Option<Report>, what: String) -> V
     failed
 }
 
-/// A provider's reviews in both roles on every host, with what failed for the command log.
-fn reviews(
-    state: &State,
-    recorder: &Recorder,
-    provider: Provider,
-    hosts: &[String],
-    force: bool,
-) -> (Vec<Review>, Vec<Logged>) {
-    let mut reviews = Vec::new();
-    let mut log = Vec::new();
-    for host in hosts {
-        let api = provider.reviews(recorder, host.clone());
-        for role in Role::ALL {
-            let (found, error) = reviews::fetch(state, api.as_ref(), role, force);
-            reviews.extend(found);
-            log.extend(fetch_failures(
-                recorder,
-                error,
-                format!("{} reviews", provider.cli()),
-            ));
-        }
-    }
-    (reviews, log)
-}
-
-/// A tracker's issues in every scope, with what failed for the command log.
-fn issues(
+/// A feed's rows in every key, through the cache, with what failed for the command log: each
+/// host's reviews in both roles, or each scope's issues.
+fn fetch(
     state: &State,
     recorder: &Recorder,
     config: &TrackerConfig,
-    tracker: issues::Tracker,
-    scopes: &[String],
+    feed: Feed,
+    keys: &[String],
     force: bool,
-) -> (Vec<Issue>, Vec<Logged>) {
+) -> (Rows, Vec<Logged>) {
+    let mut reviews = Vec::new();
     let mut issues = Vec::new();
     let mut log = Vec::new();
-    for scope in scopes {
-        let api = tracker.issues(recorder, scope.clone(), config);
-        let (found, error) = issues::fetch(state, api.as_ref(), force);
-        issues.extend(found);
-        log.extend(fetch_failures(
-            recorder,
-            error,
-            format!("{} issues", tracker.cli()),
-        ));
+    for key in keys {
+        match feed {
+            Feed::Reviews(provider) => {
+                let api = provider.reviews(recorder, key.clone());
+                for role in Role::ALL {
+                    let (found, error) = reviews::fetch(state, api.as_ref(), role, force);
+                    reviews.extend(found);
+                    log.extend(fetch_failures(recorder, error, feed.what()));
+                }
+            }
+            Feed::Issues(tracker) => {
+                let api = tracker.issues(recorder, key.clone(), config);
+                let (found, error) = issues::fetch(state, api.as_ref(), force);
+                issues.extend(found);
+                log.extend(fetch_failures(recorder, error, feed.what()));
+            }
+        }
     }
-    (issues, log)
+    let rows = match feed {
+        Feed::Reviews(_) => Rows::Reviews(reviews),
+        Feed::Issues(_) => Rows::Issues(issues),
+    };
+    (rows, log)
 }
 
 /// Runs an action job through the item operations.
@@ -234,10 +197,7 @@ fn execute(context: &Context, state: &State, runner: &dyn Runner, job: Job) -> R
         | Job::Commits(_)
         | Job::Readme(_)
         | Job::SearchCarnets(_)
-        | Job::Reviews { .. }
-        | Job::Issues { .. } => {
-            unreachable!("run handles these")
-        }
+        | Job::Fetch { .. } => unreachable!("run handles these"),
         Job::Open(paths) => items.open(&paths),
         Job::Close(paths) => items.close(&paths),
         Job::Pull(paths) => items.pull(&paths),
@@ -305,6 +265,7 @@ mod tests {
 
     use super::*;
     use crate::process::fake::Fake;
+    use crate::reviews::Provider;
 
     #[test]
     fn reviews_cover_every_host_and_role_through_the_cache() {
@@ -315,8 +276,13 @@ mod tests {
             .always("gh api --hostname a", Some(gh))
             .always("gh api --hostname b", None);
         let recorder = Recorder::new(&fake);
+        let config = TrackerConfig::default();
+        let github = Feed::Reviews(Provider::GitHub);
         let hosts = ["a".to_owned(), "b".to_owned()];
-        let (found, log) = reviews(&state, &recorder, Provider::GitHub, &hosts, false);
+        let (Rows::Reviews(found), log) = fetch(&state, &recorder, &config, github, &hosts, false)
+        else {
+            panic!("reviews");
+        };
         assert_eq!(found.len(), 6, "both roles on host a");
         assert_eq!(log.len(), 2, "each failed command on host b, once");
         assert!(
@@ -324,11 +290,11 @@ mod tests {
                 .all(|entry| entry.command.starts_with("gh api --hostname b"))
         );
         assert_eq!(fake.calls().len(), 4);
-        reviews(&state, &recorder, Provider::GitHub, &hosts, false);
+        fetch(&state, &recorder, &config, github, &hosts, false);
         assert_eq!(fake.calls().len(), 6, "only the failed host is asked again");
         let fake = Fake::default().always("gh", Some("not json"));
         let recorder = Recorder::new(&fake);
-        let (_, log) = reviews(&state, &recorder, Provider::GitHub, &["c".into()], false);
+        let (_, log) = fetch(&state, &recorder, &config, github, &["c".into()], false);
         assert_eq!(
             log.len(),
             2,
@@ -355,12 +321,15 @@ mod tests {
         let recorder = Recorder::new(&fake);
         let config = TrackerConfig::default();
         let scopes = ["o/a".to_owned(), "o/b".to_owned()];
-        let github = issues::Tracker::GitHub;
-        let (found, log) = issues(&state, &recorder, &config, github, &scopes, false);
+        let github = Feed::Issues(issues::Tracker::GitHub);
+        let (Rows::Issues(found), log) = fetch(&state, &recorder, &config, github, &scopes, false)
+        else {
+            panic!("issues");
+        };
         assert_eq!(found.len(), 3, "o/a's open issues, and no closed ones");
         assert_eq!(log.len(), 1, "o/b's failed command");
         assert!(log[0].command.ends_with("-f owner=o -f name=b"));
-        issues(&state, &recorder, &config, github, &scopes, false);
+        fetch(&state, &recorder, &config, github, &scopes, false);
         assert_eq!(
             fake.calls().len(),
             4,
@@ -368,8 +337,8 @@ mod tests {
         );
         let fake = Fake::default().always("acli", Some("[{}]"));
         let recorder = Recorder::new(&fake);
-        let jira = issues::Tracker::Jira;
-        let (_, log) = issues(&state, &recorder, &config, jira, &["x".into()], false);
+        let jira = Feed::Issues(issues::Tracker::Jira);
+        let (_, log) = fetch(&state, &recorder, &config, jira, &["x".into()], false);
         assert_eq!(
             log.len(),
             1,

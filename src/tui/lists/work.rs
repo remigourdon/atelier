@@ -218,7 +218,7 @@ impl ListKind for WorkList {
                     } else {
                         "  "
                     };
-                    let marker = if model.pulling.contains(work.path()) {
+                    let marker = if model.schedule.is_pulling(work.path()) {
                         let frame = glyphs.spinner[model.frame % glyphs.spinner.len()];
                         Span::styled(format!("{frame} "), Style::new().fg(palette.info))
                     } else if work.tab {

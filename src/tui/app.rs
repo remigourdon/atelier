@@ -9,6 +9,7 @@ use tui_input::Input;
 use super::lists;
 pub use super::lists::carnets::Search;
 pub use super::lists::work::Row;
+use super::schedule::Schedule;
 use crate::issues::{self, Issue, TrackerConfig};
 pub use crate::items::{Removal, Snapshot, Work, WorkKind};
 use crate::process::Logged;
@@ -148,10 +149,10 @@ pub enum Job {
     RemoveWorkspace(String),
     SwitchWorkspace(String),
     Browse(String),
-    /// Lists my reviews on each host, from the cache unless `force`.
-    Reviews {
-        provider: Provider,
-        hosts: Vec<String>,
+    /// Lists a feed in each of its keys, hosts or scopes, from the cache unless `force`.
+    Fetch {
+        feed: Feed,
+        keys: Vec<String>,
         force: bool,
     },
     /// Checks out a review's branch with `wt switch pr:N` or `mr:N` in its registered repo and
@@ -160,12 +161,6 @@ pub enum Job {
         repo: PathBuf,
         workspace: String,
         review: Box<Review>,
-    },
-    /// Lists a tracker's issues in each scope, from the cache unless `force`.
-    Issues {
-        tracker: issues::Tracker,
-        scopes: Vec<String>,
-        force: bool,
     },
     /// Creates a worktree on `branch` for an issue, in the issue's group.
     Start {
@@ -176,22 +171,51 @@ pub enum Job {
     },
 }
 
-/// Whether the next worktree listing also lists reviews or issues, and whether from the cache.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Due {
-    No,
-    Cached,
-    /// Past the cache, as `R` asks.
-    Fresh,
+/// A remote listing: a provider's reviews or a tracker's issues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Feed {
+    Reviews(Provider),
+    Issues(issues::Tracker),
 }
 
-/// What the hint bar shows as loading: worktree, commit, review and issue listings, or actions.
+impl Feed {
+    pub const ALL: [Feed; 4] = [
+        Feed::Reviews(Provider::GitHub),
+        Feed::Reviews(Provider::GitLab),
+        Feed::Issues(issues::Tracker::GitHub),
+        Feed::Issues(issues::Tracker::Jira),
+    ];
+
+    /// The CLI it is listed through.
+    pub fn cli(self) -> &'static str {
+        match self {
+            Feed::Reviews(provider) => provider.cli(),
+            Feed::Issues(tracker) => tracker.cli(),
+        }
+    }
+
+    /// How the command log names its listing.
+    pub fn what(self) -> String {
+        match self {
+            Feed::Reviews(provider) => format!("{} reviews", provider.cli()),
+            Feed::Issues(tracker) => format!("{} issues", tracker.cli()),
+        }
+    }
+}
+
+/// A feed's listing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Rows {
+    Reviews(Vec<Review>),
+    Issues(Vec<Issue>),
+}
+
+/// What the hint bar shows as loading: worktree, commit and feed listings, or actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Source {
     Wt,
     Git,
-    Reviews(Provider),
-    Issues(issues::Tracker),
+    Feed(Feed),
     Run,
 }
 
@@ -200,8 +224,7 @@ impl Source {
         match self {
             Source::Wt => "wt",
             Source::Git => "git",
-            Source::Reviews(provider) => provider.cli(),
-            Source::Issues(tracker) => tracker.cli(),
+            Source::Feed(feed) => feed.cli(),
             Source::Run => "run",
         }
     }
@@ -213,10 +236,14 @@ impl Job {
         match self {
             Job::Refresh { .. } => Source::Wt,
             Job::Commits(_) | Job::Readme(_) => Source::Git,
-            Job::Reviews { provider, .. } => Source::Reviews(*provider),
-            Job::Issues { tracker, .. } => Source::Issues(*tracker),
+            Job::Fetch { feed, .. } => Source::Feed(*feed),
             _ => Source::Run,
         }
+    }
+
+    /// Whether it changes items, workspaces, repos or tabs, so a refresh shows it once done.
+    pub fn changes_items(&self) -> bool {
+        !matches!(self, Job::Browse(_) | Job::SwitchWorkspace(_))
     }
 }
 
@@ -312,16 +339,10 @@ pub enum Action {
         hits: Option<BTreeMap<PathBuf, Vec<String>>>,
         log: Vec<Logged>,
     },
-    /// A provider's reviews, replacing the ones listed before.
-    Reviews {
-        provider: Provider,
-        reviews: Result<Vec<Review>, String>,
-        log: Vec<Logged>,
-    },
-    /// A tracker's issues, replacing the ones listed before.
-    Issues {
-        tracker: issues::Tracker,
-        issues: Result<Vec<Issue>, String>,
+    /// A feed's rows, replacing the ones it listed before.
+    Fetched {
+        feed: Feed,
+        rows: Result<Rows, String>,
         log: Vec<Logged>,
     },
     Finished {
@@ -564,9 +585,6 @@ pub fn popup_hints(popup: Popup) -> String {
         .join(" · ")
 }
 
-/// Seconds between refreshes: a fast one once idle, a full one regardless.
-pub const FAST_REFRESH: u32 = 10;
-pub const FULL_REFRESH: u32 = 300;
 const LOG_LIMIT: usize = 500;
 
 pub struct Model {
@@ -590,21 +608,17 @@ pub struct Model {
     pub screen: Screen,
     pub show_log: bool,
     pub log: Vec<Logged>,
-    /// Jobs in flight by source.
-    pub loading: BTreeMap<Source, usize>,
+    /// What is loading, and when to refresh.
+    pub schedule: Schedule,
     pub commits: HashMap<PathBuf, Vec<String>>,
     /// Carnets' READMEs, read once selected; `None` when a carnet has none.
     pub readmes: HashMap<PathBuf, Option<String>>,
     /// Both providers' reviews in both roles, most recently updated first.
     pub reviews: Vec<Review>,
-    pub reviews_due: Due,
     /// Where issues come from and their sections.
     pub tracker_config: TrackerConfig,
     /// Every tracker's issues, each source in its own order.
     pub issues: Vec<Issue>,
-    pub issues_due: Due,
-    /// Worktrees with a pull in flight, which show a spinner.
-    pub pulling: HashSet<PathBuf>,
     /// The carnet search narrowing the Carnets list, until `Esc`.
     pub search: Option<Search>,
     /// The spinner's frame, advanced each tick.
@@ -613,10 +627,6 @@ pub struct Model {
     /// The first `g` of `gg`.
     pub pending_g: bool,
     pub size: (u16, u16),
-    /// Seconds since the last input, the last refresh and the last full refresh.
-    pub idle: u32,
-    pub since_refresh: u32,
-    pub since_full: u32,
 }
 
 impl Model {
@@ -636,30 +646,23 @@ impl Model {
             screen: Screen::Normal,
             show_log: true,
             log: Vec::new(),
-            loading: BTreeMap::new(),
+            schedule: Schedule::default(),
             commits: HashMap::new(),
             readmes: HashMap::new(),
             reviews: Vec::new(),
-            // At startup, so the panels fill.
-            reviews_due: Due::Cached,
             tracker_config: TrackerConfig::default(),
             issues: Vec::new(),
-            issues_due: Due::Cached,
-            pulling: HashSet::new(),
             search: None,
             frame: 0,
             modal: None,
             pending_g: false,
             size,
-            idle: 0,
-            since_refresh: 0,
-            since_full: 0,
         }
     }
 
     /// Whether something on screen moves on each tick.
     pub fn animating(&self) -> bool {
-        !self.pulling.is_empty()
+        self.schedule.animating()
     }
 
     /// A panel's sub-tabs. Issues have one per section, then Other while it lists any.

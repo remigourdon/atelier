@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use super::{ListKind, pair};
 use crate::reviews::{Review, Role};
 use crate::state::Repo;
-use crate::tui::app::{Effect, Job, Kind, List, Model, Source, Work};
+use crate::tui::app::{Effect, Feed, Job, Kind, List, Model, Source, Work};
 use crate::tui::update::{note, run};
 use crate::tui::view::{Palette, icon};
 use crate::worktrunk;
@@ -169,7 +169,8 @@ impl ListKind for Reviews {
     }
 
     fn empty(&self, model: &Model, _list: List) -> &'static str {
-        if (model.loading.keys()).any(|source| matches!(source, Source::Reviews(_))) {
+        if (model.schedule.loading()).any(|source| matches!(source, Source::Feed(Feed::Reviews(_))))
+        {
             "loading…"
         } else {
             "nothing here"
