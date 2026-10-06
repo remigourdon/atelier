@@ -77,6 +77,13 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Print one ANSI line for zjstatus about the worktree or carnet holding the current
+    /// directory: its ticket, issue title and worktrunk's cells. Empty outside one.
+    Statusline {
+        /// The columns to fit; the issue title is elided first.
+        #[arg(long, default_value_t = 80)]
+        width: usize,
+    },
     /// Manage carnets, the investigation folders under `[carnets] root`.
     #[command(subcommand)]
     Carnet(Carnet),
@@ -172,6 +179,17 @@ pub fn run() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&context)?);
             } else {
                 print!("{}", context::render(&context));
+            }
+            Ok(())
+        }
+        Command::Statusline { width } => {
+            let config = Config::load()?;
+            // Read-only, as for `context`: drawing a status bar must not create the database.
+            let state = State::read(&state::db_path(), config.default_workspace())?;
+            let dir = std::env::current_dir()?;
+            let line = crate::tui::statusline::line(&state, &config, &System, &dir, width)?;
+            if !line.is_empty() {
+                println!("{line}");
             }
             Ok(())
         }
@@ -293,7 +311,8 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
         | Command::Shell(_)
         | Command::Hook { .. }
         | Command::Tui
-        | Command::Context { .. } => {
+        | Command::Context { .. }
+        | Command::Statusline { .. } => {
             unreachable!()
         }
     }

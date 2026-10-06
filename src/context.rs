@@ -9,11 +9,13 @@ use serde::Serialize;
 
 use crate::carnet::{self, Carnet, Names};
 use crate::config::Config;
+use crate::finish;
+use crate::git;
 use crate::issues::{self, Issue};
 use crate::items::canonical;
 use crate::process::Runner;
 use crate::state::{Item, ItemKind, State, dir_name};
-use crate::worktrunk::{self, Worktree};
+use crate::worktrunk::{self, Decision, Forge, Worktree};
 
 /// What to describe: the item holding a directory, or a ticket key.
 pub enum Target<'a> {
@@ -104,6 +106,34 @@ pub struct Status {
     pub head: Head,
     /// worktrunk's compact status, such as `!?↑`.
     pub symbols: String,
+    /// The branch's CI; only for the worktree holding the directory, from `wt list statusline`.
+    pub ci: Option<CiStatus>,
+    /// Its open review, as worktrunk finds it; only for the worktree holding the directory.
+    pub review: Option<Review>,
+    /// Why it is finished: `integrated`, or `upstream gone`, which is only checked for the
+    /// worktree holding the directory.
+    pub finished: Option<&'static str>,
+}
+
+/// A branch's CI, as worktrunk's CI column reports it.
+#[derive(Debug, Serialize)]
+pub struct CiStatus {
+    /// `passed`, `running`, `failed`, `conflicts`, `error`, `changes requested` or
+    /// `approval pending`.
+    pub state: &'static str,
+    /// The status is of an older commit than local HEAD.
+    pub stale: bool,
+    /// The checks are of the branch's own workflow: it has no review.
+    pub branch_workflow: bool,
+}
+
+/// A branch's open review.
+#[derive(Debug, Serialize)]
+pub struct Review {
+    pub number: Option<u64>,
+    pub url: Option<String>,
+    /// `changes requested`, `approval pending`, `draft` or `approved`.
+    pub decision: Option<&'static str>,
 }
 
 /// Commits ahead of and behind the upstream branch.
@@ -136,6 +166,17 @@ impl From<&Worktree> for Status {
                 committed_at: tree.committed_at.clone(),
             },
             symbols: tree.symbols.clone(),
+            ci: tree.ci.as_ref().map(|ci| CiStatus {
+                state: ci.state.label(),
+                stale: ci.stale,
+                branch_workflow: ci.branch_workflow,
+            }),
+            review: (tree.ci.as_ref().and_then(|ci| ci.review.as_ref())).map(|review| Review {
+                number: review.number,
+                url: review.url.clone(),
+                decision: review.decision.map(Decision::label),
+            }),
+            finished: finish::tree_signal(tree).map(|signal| signal.label()),
         }
     }
 }
@@ -216,6 +257,50 @@ impl Records {
     }
 }
 
+/// The item holding a directory and its group, read as `describe` reads them.
+pub struct Here {
+    pub item: Item,
+    pub group: String,
+    /// The carnet's folder, for a carnet item.
+    pub carnet: Option<Carnet>,
+}
+
+/// The innermost item holding `dir`, `None` when atelier recorded none. Carnets are scanned
+/// only when it is one.
+pub fn here(state: &State, config: &Config, dir: &Path) -> Result<Option<Here>> {
+    let records = Records::read(state)?;
+    let Some(item) = records.containing(dir).cloned() else {
+        return Ok(None);
+    };
+    let carnets = match (item.is_carnet(), config.carnet_root()) {
+        (true, Some(root)) => carnet::scan(&root, &Names::new(config.ticket_pattern())?)?,
+        _ => Vec::new(),
+    };
+    let carnet = carnets.into_iter().find(|carnet| carnet.path == item.path);
+    let group = carnet
+        .as_ref()
+        .map_or(&*item.group, Carnet::group)
+        .to_owned();
+    Ok(Some(Here {
+        item,
+        group,
+        carnet,
+    }))
+}
+
+/// The worktree item holding a directory, from `wt list statusline`, its CI included, and
+/// whether its upstream is gone; or why there is none. worktrunk's CI lookup is the one
+/// network call, cached for a short while in the repo's `.git/wt/`.
+pub fn current_tree(runner: &dyn Runner, item: &Item) -> Result<(Worktree, Option<Forge>), String> {
+    let (mut tree, forge) =
+        worktrunk::statusline(runner, &item.path).map_err(|err| format!("{err:#}"))?;
+    tree.path = canonical(&tree.path);
+    if let (Some(repo), Some(branch)) = (&item.repo, &tree.branch) {
+        tree.gone = git::gone_branches(runner, repo).is_ok_and(|gone| gone.contains(branch));
+    }
+    Ok((tree, forge))
+}
+
 /// Each repo's worktrees from one `wt list`, with canonical paths as the database records
 /// them, or why the listing failed.
 struct Listings(HashMap<PathBuf, Result<Vec<Worktree>, String>>);
@@ -254,7 +339,8 @@ impl Listings {
     }
 }
 
-/// Describes `target`. Only `wt list` runs, once per repo with a worktree to describe.
+/// Describes `target`. Only worktrunk runs: `wt list statusline` for the worktree holding the
+/// directory, and `wt list` once per other repo with a worktree to describe.
 pub fn describe(
     state: &State,
     config: &Config,
@@ -276,8 +362,14 @@ pub fn describe(
         },
     };
     let linked = records.linked(&group);
-    // The current item's repo too, for its branch.
-    let listings = Listings::of(runner, linked.iter().copied().chain(current));
+    let tree = current
+        .filter(|item| item.kind == ItemKind::Worktree)
+        .map(|item| (&item.path, current_tree(runner, item).map(|(tree, _)| tree)));
+    let others = linked.iter().copied();
+    let listings = Listings::of(
+        runner,
+        others.filter(|item| current.is_none_or(|here| here.path != item.path)),
+    );
     let issue = match group.as_str() {
         "" => None,
         key => issues::cached(state, &config.tracker, key)?
@@ -288,14 +380,14 @@ pub fn describe(
             path: item.path.clone(),
             kind: item.kind,
             repo: item.repo.clone(),
-            branch: (listings.find(item).ok()).and_then(|tree| tree.branch.clone()),
+            branch: (tree.as_ref()).and_then(|(_, tree)| tree.as_ref().ok()?.branch.clone()),
         }),
         workspace: current.map(|item| Workspace {
             current: here == Some(item.workspace.as_str()),
             name: item.workspace.clone(),
             session: records.session(&item.path),
         }),
-        worktrees: worktrees(&records, &listings, &linked, current),
+        worktrees: worktrees(&records, &listings, &linked, tree.as_ref()),
         carnets: linked_carnets(&records, &carnets, &group),
         carnet: carnet::newest_open(&carnets, &group).map(|carnet| carnet.path.clone()),
         group: Some(group).filter(|group| !group.is_empty()),
@@ -303,17 +395,22 @@ pub fn describe(
     })
 }
 
-/// The linked worktrees with what `wt list` reports of them.
+/// The linked worktrees with what worktrunk reports of them: the current one's statusline,
+/// the others' `wt list`.
 fn worktrees(
     records: &Records,
     listings: &Listings,
     linked: &[&Item],
-    current: Option<&Item>,
+    current: Option<&(&PathBuf, Result<Worktree, String>)>,
 ) -> Vec<WorktreeInfo> {
     (linked.iter())
         .map(|item| {
             let repo_path = item.repo.clone().unwrap_or_default();
-            let tree = listings.find(item);
+            let here = current.filter(|(path, _)| **path == item.path);
+            let tree = match here {
+                Some((_, tree)) => tree.as_ref().map_err(Clone::clone),
+                None => listings.find(item),
+            };
             WorktreeInfo {
                 path: item.path.clone(),
                 repo: (records.repos.get(&repo_path).cloned())
@@ -322,7 +419,7 @@ fn worktrees(
                 branch: tree.as_ref().ok().and_then(|tree| tree.branch.clone()),
                 workspace: item.workspace.clone(),
                 session: records.session(&item.path),
-                current: current.is_some_and(|current| current.path == item.path),
+                current: here.is_some(),
                 status: tree.as_ref().ok().map(|tree| Status::from(*tree)),
                 error: tree.err(),
             }
@@ -534,7 +631,18 @@ mod tests {
         // worktrunk may report a path through a symlink, as macOS's `/var` is.
         let link = setup.dir.path().join("link");
         std::os::unix::fs::symlink(&setup.tree, &link).unwrap();
+        let statusline = listing(&link, "ABC-1-fix").replace(
+            r#""display""#,
+            r#""checks": {"status": "failed", "source": "pr"},
+                "pr": {"number": 31, "url": "https://github.com/o/api/pull/31", "review": "approved"},
+                "display""#,
+        );
         let fake = Fake::default()
+            .always(
+                &format!("wt -C {}", setup.tree.display()),
+                Some(&statusline),
+            )
+            .always("git -C /a", Some("ABC-1-fix\0[gone]\n"))
             .always("wt -C /a", Some(&listing(&link, "ABC-1-fix")))
             .always("wt -C /b", None);
         let dir = setup.tree.join("src");
@@ -549,10 +657,15 @@ mod tests {
         assert_eq!(
             fake.calls(),
             [
-                "wt -C /a --config-set list.json-schema=2 list --format json",
-                "wt -C /b --config-set list.json-schema=2 list --format json",
+                format!(
+                    "wt -C {} --config-set list.json-schema=2 list statusline --format json",
+                    setup.tree.display()
+                ),
+                "git -C /a for-each-ref refs/heads --format=%(refname:short)%00%(upstream:track)"
+                    .into(),
+                "wt -C /b --config-set list.json-schema=2 list --format json".into(),
             ],
-            "once per repo, never --full"
+            "the current worktree's statusline, then once per other repo, never --full"
         );
         let item = context.item.as_ref().unwrap();
         assert_eq!(item.path, setup.tree);
@@ -609,6 +722,17 @@ mod tests {
             "the issue's fields at its top"
         );
         assert_eq!(json["worktrees"][0]["status"]["upstream"]["ahead"], 1);
+        assert_eq!(
+            json["worktrees"][0]["status"]["ci"],
+            serde_json::json!({"state": "failed", "stale": false, "branch_workflow": false})
+        );
+        assert_eq!(
+            json["worktrees"][0]["status"]["review"],
+            serde_json::json!({
+                "number": 31, "url": "https://github.com/o/api/pull/31", "decision": "approved"
+            })
+        );
+        assert_eq!(json["worktrees"][0]["status"]["finished"], "upstream gone");
 
         let text = render(&context);
         assert!(

@@ -568,11 +568,11 @@ impl ListKind for WorkList {
 }
 
 /// worktrunk's status symbols, such as `!?↑`: warning when the tree is dirty.
-fn symbols(tree: &Worktree, palette: &Palette) -> Span<'static> {
+pub(crate) fn symbols(tree: &Worktree, palette: &Palette) -> Span<'static> {
     Span::styled(tree.symbols.clone(), status_style(tree, palette))
 }
 
-fn status_style(tree: &Worktree, palette: &Palette) -> Style {
+pub(crate) fn status_style(tree: &Worktree, palette: &Palette) -> Style {
     Style::new().fg(if tree.dirty {
         palette.warn
     } else {
@@ -581,7 +581,7 @@ fn status_style(tree: &Worktree, palette: &Palette) -> Style {
 }
 
 /// `↓N` when the branch is behind its upstream.
-fn behind(tree: &Worktree, palette: &Palette) -> Option<Span<'static>> {
+pub(crate) fn behind(tree: &Worktree, palette: &Palette) -> Option<Span<'static>> {
     let (_, behind) = tree.upstream.filter(|&(_, behind)| behind > 0)?;
     Some(Span::styled(
         format!("↓{behind}"),
@@ -590,7 +590,7 @@ fn behind(tree: &Worktree, palette: &Palette) -> Option<Span<'static>> {
 }
 
 /// A CI status's colour, as worktrunk's: dimmed when stale or for a draft.
-fn ci_style(ci: &Ci, palette: &Palette) -> Style {
+pub(crate) fn ci_style(ci: &Ci, palette: &Palette) -> Style {
     let color = match ci.state {
         CiState::Passed => palette.ok,
         CiState::Running => palette.info,
@@ -608,7 +608,7 @@ fn ci_style(ci: &Ci, palette: &Palette) -> Style {
 }
 
 /// A row's CI mark, its colour the status.
-fn ci_mark(ci: &Ci, palette: &Palette) -> Span<'static> {
+pub(crate) fn ci_mark(ci: &Ci, palette: &Palette) -> Span<'static> {
     let glyph = if ci.state == CiState::Error {
         palette.glyphs.ci_error
     } else {
@@ -662,7 +662,7 @@ fn review_detail(
 }
 
 /// A finished worktree's mark: why it is finished.
-fn finished_mark(signal: Signal, palette: &Palette) -> Span<'static> {
+pub(crate) fn finished_mark(signal: Signal, palette: &Palette) -> Span<'static> {
     Span::styled(palette.glyphs.signal(signal), Style::new().fg(palette.dim))
 }
 
