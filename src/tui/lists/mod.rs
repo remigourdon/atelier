@@ -172,12 +172,12 @@ fn tag_style(palette: &Palette) -> Style {
 }
 
 /// A group, never coloured as an issue key, which can look the same in uppercase.
-fn group_style(palette: &Palette) -> Style {
+pub fn group_style(palette: &Palette) -> Style {
     Style::new().fg(palette.group)
 }
 
 /// An issue key.
-fn key_style(palette: &Palette) -> Style {
+pub fn key_style(palette: &Palette) -> Style {
     Style::new().fg(palette.issue_key)
 }
 

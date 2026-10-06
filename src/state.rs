@@ -559,6 +559,14 @@ impl State {
             .optional()?)
     }
 
+    /// Every cached remote response of `source`, of any age, by key.
+    pub fn cached_entries(&self, source: &str) -> Result<Vec<(String, String)>> {
+        let mut statement =
+            (self.db).prepare("SELECT key, json FROM cache WHERE source = ? ORDER BY key")?;
+        let rows = statement.query_map([source], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     pub fn store_cache(&self, source: &str, key: &str, json: &str) -> Result<()> {
         self.db.execute(
             "INSERT OR REPLACE INTO cache(source, key, json, fetched_at) \
