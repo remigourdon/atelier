@@ -187,6 +187,16 @@ pub(super) fn run(model: &mut Model, job: Job) -> Effect {
     Effect::Run(job)
 }
 
+/// Switches to another workspace's session, leaving this TUI as it should be found on
+/// switching back: on its own session, listed first, with its work focused.
+pub(super) fn switch_workspace(model: &mut Model, name: String) -> Vec<Effect> {
+    let mut effects = vec![run(model, Job::SwitchWorkspace(name))];
+    model.filters.remove(&List::Workspaces);
+    model.selected.insert(List::Workspaces, 0);
+    effects.extend(focus_panel(model, Panel::Work));
+    effects
+}
+
 fn start(model: &mut Model, jobs: Vec<Job>) -> Vec<Effect> {
     jobs.into_iter().map(|job| run(model, job)).collect()
 }
@@ -557,7 +567,7 @@ fn main_height(model: &Model) -> u16 {
         .map_or(1, |rect| rect.height.saturating_sub(2).max(1))
 }
 
-pub(super) fn focus_panel(model: &mut Model, panel: Panel) -> Vec<Effect> {
+fn focus_panel(model: &mut Model, panel: Panel) -> Vec<Effect> {
     model.panel = panel;
     model.focus = Focus::Panel(panel);
     model.scroll = (0, 0);
