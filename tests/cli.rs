@@ -241,13 +241,13 @@ fn carnets_are_folders_under_the_configured_root() {
         "[carnets]\nroot = \"~/Data\"\n",
     )
     .unwrap();
-    let created = home.ok(&["carnet", "new", "ABC-1 slow login"]);
+    let created = home.ok(&["carnet", "new", "ABC-1 slow login", "-i", "ABC-1"]);
     let path = Path::new(created.strip_suffix('\n').unwrap());
     assert_eq!(
         path.parent().unwrap(),
         home.path("Data").canonicalize().unwrap()
     );
-    assert!(path.to_string_lossy().ends_with("-ABC-1-slow-login"));
+    assert!(path.to_string_lossy().ends_with("-abc-1-slow-login"));
     let readme = std::fs::read_to_string(path.join("README.md")).unwrap();
     assert!(
         readme.starts_with("+++\ngroup = \"\"\nissues = [\"ABC-1\"]\n"),
@@ -371,19 +371,19 @@ fn carnet_new_takes_its_group_issue_keys_and_summary() {
     ]);
     let record: serde_json::Value = serde_json::from_str(&json).unwrap();
     let path = Path::new(record["path"].as_str().unwrap());
-    assert!(path.to_string_lossy().ends_with("-ABC-1-slow-login"));
+    assert!(path.to_string_lossy().ends_with("-abc-1-slow-login"));
     assert_eq!(
         (
             record["date"].as_str().unwrap().len(),
             record["name"].as_str()
         ),
-        (10, Some("ABC-1-slow-login"))
+        (10, Some("abc-1-slow-login"))
     );
     assert_eq!(record["group"], "LOGIN");
     assert_eq!(
         record["issue_keys"],
-        serde_json::json!(["ABC-1", "o/api#3", "DEF-2"]),
-        "the typed key first, once; short keys resolved"
+        serde_json::json!(["o/api#3", "ABC-1", "DEF-2"]),
+        "only the keys given, short ones resolved"
     );
     assert_eq!(
         (&record["summary"], &record["closed"], &record["workspace"]),
@@ -395,13 +395,13 @@ fn carnet_new_takes_its_group_issue_keys_and_summary() {
     );
     assert_eq!(
         std::fs::read_to_string(path.join("README.md")).unwrap(),
-        "+++\ngroup = \"LOGIN\"\nissues = [\"ABC-1\", \"o/api#3\", \"DEF-2\"]\n\
-         summary = \"Why it is slow\"\nclosed = false\n+++\n\n# ABC-1 slow login\n"
+        "+++\ngroup = \"LOGIN\"\nissues = [\"o/api#3\", \"ABC-1\", \"DEF-2\"]\n\
+         summary = \"Why it is slow\"\nclosed = false\n+++\n"
     );
     assert_eq!(
         home.ok(&["carnet", "ls"]),
         format!(
-            "{}\tLOGIN\tABC-1,api#3,DEF-2\tWhy it is slow\n",
+            "{}\tLOGIN\tapi#3,ABC-1,DEF-2\tWhy it is slow\n",
             path.file_name().unwrap().to_string_lossy()
         )
     );
@@ -428,7 +428,7 @@ fn carnet_set_changes_only_what_is_given_in_one_commit() {
     assert_eq!(
         readme(),
         "+++\ngroup = \"LOGIN REWRITE\"\nissues = [\"ABC-5\", \"ORD-7\"]\nsummary = \"\"\n\
-         closed = false\n+++\n\n# notes\n",
+         closed = false\n+++\n",
         "-i replaces the whole list"
     );
     assert_eq!(
