@@ -314,6 +314,29 @@ pub fn fetch(
     (reviews, error)
 }
 
+/// Every open review the cache holds, for any provider, host and role, each once, most
+/// recently updated first. Runs no command.
+pub fn cached(state: &State) -> Result<Vec<Review>> {
+    let mut reviews: Vec<Review> = Vec::new();
+    for provider in Provider::ALL {
+        for (key, json) in state.cached_entries(provider.cli())? {
+            let listed = Role::ALL
+                .iter()
+                .any(|role| key.ends_with(&format!(" {}", role.key())));
+            let Ok(found) = serde_json::from_str::<Vec<Review>>(&json) else {
+                continue;
+            };
+            for review in found.into_iter().filter(|_| listed) {
+                if !reviews.iter().any(|other| other.url == review.url) {
+                    reviews.push(review);
+                }
+            }
+        }
+    }
+    reviews.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(reviews)
+}
+
 /// The subset of each provider's JSON that atelier reads.
 mod raw {
     use super::Deserialize;
@@ -416,7 +439,7 @@ mod raw {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use std::cell::Cell;
 
     use rusqlite::Connection;
@@ -580,6 +603,26 @@ mod tests {
         }
     }
 
+    /// An open review of `project_url` by alice, on branch `change-<number>`, linking nothing.
+    pub fn review(provider: Provider, role: Role, number: u64, project_url: &str) -> Review {
+        let project = project_url.rsplit('/').next().unwrap();
+        Review {
+            provider,
+            role,
+            number,
+            title: format!("Change {number}"),
+            url: format!("{project_url}/pull/{number}"),
+            project: format!("org/{project}"),
+            project_url: project_url.into(),
+            author: "alice".into(),
+            branch: format!("change-{number}"),
+            base: "main".into(),
+            draft: false,
+            updated_at: format!("2026-10-0{number}T00:00:00Z"),
+            issue_keys: Default::default(),
+        }
+    }
+
     fn state() -> State {
         State::from_connection(Connection::open_in_memory().unwrap(), "default").unwrap()
     }
@@ -628,5 +671,31 @@ mod tests {
         let (reviews, error) = fetch(&state, &failing, Role::Mine, true);
         assert_eq!(reviews.len(), 3);
         assert!(error.is_some());
+    }
+
+    #[test]
+    fn cached_reviews_span_every_provider_host_and_role_once_each_newest_first() {
+        let state = state();
+        let api = "https://github.com/o/api";
+        let (older, newer) = (
+            review(Provider::GitHub, Role::ToReview, 1, api),
+            review(Provider::GitHub, Role::Mine, 3, api),
+        );
+        let lab = review(Provider::GitLab, Role::Mine, 2, "https://gitlab.com/g/web");
+        let store = |source: &str, key: &str, reviews: &[&Review]| {
+            let json = serde_json::to_string(reviews).unwrap();
+            state.store_cache(source, key, &json).unwrap();
+        };
+        store("gh", "github.com to-review", &[&older]);
+        store("gh", "github.com mine", &[&newer, &older]);
+        store("glab", "gitlab.com mine", &[&lab]);
+        state.store_cache("gh", "issues o/api", "[]").unwrap();
+        state
+            .store_cache("glab", "gitlab.com to-review", "not json")
+            .unwrap();
+        let numbers: Vec<u64> = (cached(&state).unwrap().iter())
+            .map(|review| review.number)
+            .collect();
+        assert_eq!(numbers, [3, 2, 1]);
     }
 }

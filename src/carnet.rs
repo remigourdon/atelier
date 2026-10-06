@@ -188,6 +188,10 @@ impl Front {
         self.doc["issues"] = value(keys.iter().map(|key| key.as_str()).collect::<Array>());
     }
 
+    fn set_summary(&mut self, summary: &str) {
+        self.doc["summary"] = value(summary);
+    }
+
     /// Writes every key in its normal form, in order: `group`, `issues`, `summary` and
     /// `closed`, each as read, the absent ones empty.
     fn normalise(&mut self, tracker: &TrackerConfig) {
@@ -195,7 +199,7 @@ impl Front {
         let (summary, closed) = (self.summary(), self.closed());
         self.set_group(group.as_ref());
         self.set_issues(&keys);
-        self.doc["summary"] = value(summary);
+        self.set_summary(&summary);
         self.doc["closed"] = value(closed);
     }
 
@@ -243,9 +247,9 @@ fn split(readme: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// How a commit names the change from `old` to `new` links (`Set group A, link B-2, unlink
-/// C-3`), or `None` when they are the same.
-fn describe(old: &Links, new: &Links) -> Option<String> {
+/// How a commit names the change from `old` to `new` links and whether the summary changed
+/// (`Set group A, link B-2, unlink C-3, set summary`), or `None` when nothing did.
+fn describe(old: &Links, new: &Links, summary_changed: bool) -> Option<String> {
     let mut parts = Vec::new();
     if old.group != new.group {
         parts.push(match &new.group {
@@ -267,8 +271,11 @@ fn describe(old: &Links, new: &Links) -> Option<String> {
     if !removed.is_empty() {
         parts.push(format!("unlink {}", removed.join(", ")));
     }
-    if parts.is_empty() && old.issue_keys != new.issue_keys {
+    if added.is_empty() && removed.is_empty() && old.issue_keys != new.issue_keys {
         parts.push(format!("reorder {}", new.issue_keys.join(", ")));
+    }
+    if summary_changed {
+        parts.push("set summary".into());
     }
     let message = parts.join(", ");
     let mut chars = message.chars();
@@ -345,18 +352,32 @@ impl<'a> Carnets<'a> {
         path: &Path,
         edit: impl FnOnce(&mut Links),
     ) -> Result<Links> {
+        let amended = self.amend(runner, path, |links, _| edit(links))?;
+        Ok(amended.0)
+    }
+
+    /// Edits a carnet's group, issue keys and summary, as its front matter records them, with
+    /// `edit`, in one commit naming what changed. Returns them once edited.
+    pub fn amend(
+        &self,
+        runner: &dyn Runner,
+        path: &Path,
+        edit: impl FnOnce(&mut Links, &mut String),
+    ) -> Result<(Links, String)> {
         let mut edited = None;
         self.edit(runner, path, |front| {
             let old = Links {
                 group: front.group(),
                 issue_keys: front.issues(self.tracker),
             };
-            let mut new = old.clone();
-            edit(&mut new);
-            let message = describe(&old, &new);
+            let (mut new, mut summary) = (old.clone(), front.summary());
+            edit(&mut new, &mut summary);
+            let summary = summary.trim().to_owned();
+            let message = describe(&old, &new, summary != front.summary());
             front.set_group(new.group.as_ref());
             front.set_issues(&new.issue_keys);
-            edited = Some(new);
+            front.set_summary(&summary);
+            edited = Some((new, summary));
             message
         })?;
         edited.ok_or_else(|| eyre!("{} was not edited", path.display()))
@@ -373,16 +394,18 @@ impl<'a> Carnets<'a> {
     }
 
     /// Creates `<root>/<today>-<name in kebab case>`, keeping an issue key typed at the start
-    /// of `name`, with a README titled `name` in `group` and linking that key. Makes it a git
-    /// repo, commits the README, and records the carnet in `workspace`. Returns its path.
+    /// of `name`, with a README titled `name` whose front matter holds `links`, the typed key
+    /// first, and `summary`. Makes it a git repo, commits the README, and records the carnet in
+    /// `workspace`. Returns it as its folder now records it.
     pub fn create(
         &self,
         state: &State,
         runner: &dyn Runner,
         name: &str,
         workspace: &str,
-        group: Option<&Group>,
-    ) -> Result<PathBuf> {
+        links: &Links,
+        summary: &str,
+    ) -> Result<Carnet> {
         let root = self.root()?;
         let name = name.trim();
         if name.contains('/') {
@@ -393,14 +416,18 @@ impl<'a> Carnets<'a> {
             bail!("a carnet name must not be empty");
         }
         state.require_workspace(workspace)?;
-        let path = root.join(format!("{}-{slug}", state.today()?));
+        let date = state.today()?;
+        let path = root.join(format!("{date}-{slug}"));
         if path.exists() {
             bail!("{} already exists", path.display());
         }
+        let mut issue_keys = IssueKeys::resolve(key.as_deref(), self.tracker);
+        issue_keys.extend(links.issue_keys.iter().cloned());
         let links = Links {
-            group: group.cloned(),
-            issue_keys: IssueKeys::resolve(key.as_deref(), self.tracker),
+            group: links.group.clone(),
+            issue_keys,
         };
+        let summary = summary.trim();
         std::fs::create_dir_all(&path)?;
         let path = path.canonicalize()?;
         let made = (|| {
@@ -411,6 +438,7 @@ impl<'a> Carnets<'a> {
             front.normalise(self.tracker);
             front.set_group(links.group.as_ref());
             front.set_issues(&links.issue_keys);
+            front.set_summary(summary);
             std::fs::write(path.join("README.md"), front.render())?;
             git::init(runner, &path)?;
             commit(runner, &path, "Create carnet")?;
@@ -421,7 +449,15 @@ impl<'a> Carnets<'a> {
             let _ = std::fs::remove_dir_all(&path);
             return Err(err);
         }
-        Ok(path)
+        Ok(Carnet {
+            name: slug,
+            date,
+            links,
+            closed: false,
+            summary: summary.to_owned(),
+            readme: Stamp::of(&path),
+            path,
+        })
     }
 
     /// Searches every carnet for `text` with `rg`, its output on the terminal.
@@ -554,7 +590,12 @@ pub mod tests {
         workspace: &str,
         group: &str,
     ) -> Result<PathBuf> {
-        carnets(root).create(state, runner, name, workspace, self::group(group).as_ref())
+        let links = Links {
+            group: self::group(group),
+            ..Links::default()
+        };
+        let carnet = carnets(root).create(state, runner, name, workspace, &links, "")?;
+        Ok(carnet.path)
     }
 
     fn set_group(carnets: &Carnets, runner: &dyn Runner, path: &Path, group: Option<&Group>) {
@@ -628,6 +669,34 @@ pub mod tests {
     }
 
     #[test]
+    fn a_new_carnet_links_a_typed_key_first_then_the_keys_given_with_its_summary() {
+        let state = state();
+        let root = tempfile::tempdir().unwrap();
+        let fake = Fake::default();
+        let links = crate::links::tests::links("login", &["o/web#2", "DEF-3"]);
+        let carnet = (carnets(root.path()))
+            .create(&state, &fake, "DEF-3 logs", "w", &links, " Slow logs ")
+            .unwrap();
+        let today = state.today().unwrap();
+        assert_eq!(
+            (carnet.date.as_str(), carnet.name.as_str()),
+            (today.as_str(), "DEF-3-logs")
+        );
+        let expected = crate::links::tests::links("LOGIN", &["DEF-3", "o/web#2"]);
+        assert_eq!(carnet.links, expected, "the typed key first, once");
+        assert_eq!(
+            (carnet.summary.as_str(), carnet.closed),
+            ("Slow logs", false)
+        );
+        assert_eq!(
+            std::fs::read_to_string(carnet.path.join("README.md")).unwrap(),
+            "+++\ngroup = \"LOGIN\"\nissues = [\"DEF-3\", \"o/web#2\"]\nsummary = \"Slow logs\"\nclosed = false\n+++\n\n# DEF-3 logs\n"
+        );
+        assert_eq!(carnet.readme, Stamp::of(&carnet.path));
+        assert_eq!(state.require_item(&carnet.path).unwrap().links, expected);
+    }
+
+    #[test]
     fn a_carnet_name_must_be_a_plain_new_name() {
         let state = state();
         let root = tempfile::tempdir().unwrap();
@@ -649,7 +718,8 @@ pub mod tests {
         let config = Config::parse("").unwrap();
         let carnets = Carnets::new(&config).unwrap();
         assert_eq!(carnets.scan().unwrap(), []);
-        let error = (carnets.create(&state(), &Fake::default(), "x", "w", None)).unwrap_err();
+        let error = carnets.create(&state(), &Fake::default(), "x", "w", &Links::default(), "");
+        let error = error.unwrap_err();
         assert!(error.to_string().contains("[carnets]"), "{error}");
     }
 
@@ -801,6 +871,37 @@ pub mod tests {
             commits(&path, "Unlink ABC-5, o/atelier#2")
         );
         assert_eq!(front(&path).issues(carnets.tracker), keys(&[]));
+    }
+
+    #[test]
+    fn an_amendment_sets_links_and_summary_in_one_commit_naming_each_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let readme = "+++\ngroup = \"A\"\nissues = [\"ABC-1\"]\nsummary = \"Old\"\n+++\n# T\n";
+        let path = repo(dir.path(), "2026-01-02-x", Some(readme));
+        let fake = Fake::default();
+        let carnets = carnets(dir.path());
+        let amended = carnets.amend(&fake, &path, |links, summary| {
+            links.group = group("login rewrite");
+            links.issue_keys = keys(&["ABC-1", "ABC-5"]);
+            *summary = "New".into();
+        });
+        let (links, summary) = amended.unwrap();
+        assert_eq!(
+            links,
+            crate::links::tests::links("LOGIN REWRITE", &["ABC-1", "ABC-5"])
+        );
+        assert_eq!(summary, "New");
+        assert_eq!(
+            std::fs::read_to_string(path.join("README.md")).unwrap(),
+            "+++\ngroup = \"LOGIN REWRITE\"\nissues = [\"ABC-1\", \"ABC-5\"]\nsummary = \"New\"\nclosed = false\n+++\n# T\n"
+        );
+        assert_eq!(
+            fake.calls(),
+            commits(&path, "Set group LOGIN REWRITE, link ABC-5, set summary")
+        );
+        let unchanged = carnets.amend(&fake, &path, |_, summary| *summary = "New".into());
+        assert_eq!(unchanged.unwrap().1, "New");
+        assert_eq!(fake.calls().len(), 2, "no change, no commit");
     }
 
     #[test]

@@ -4,9 +4,9 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use color_eyre::eyre::{Result, eyre};
+use color_eyre::eyre::{Result, bail, eyre};
 
-use crate::carnet::{self, Carnets};
+use crate::carnet::{self, Carnet, Carnets};
 use crate::config::Config;
 #[cfg(test)]
 use crate::finish::Signal;
@@ -382,15 +382,16 @@ impl<'a> Items<'a> {
         Ok(path)
     }
 
-    /// Creates a carnet in `workspace` and in `group`, linking the issue key its name starts
-    /// with. Returns its path.
+    /// Creates a carnet in `workspace` with `links` and `summary`, also linking the issue key
+    /// its name starts with, first. Returns it.
     pub fn create_carnet(
         &self,
         name: &str,
         workspace: &str,
-        group: Option<&Group>,
-    ) -> Result<PathBuf> {
-        (self.carnets).create(self.state, self.runner, name, workspace, group)
+        links: &Links,
+        summary: &str,
+    ) -> Result<Carnet> {
+        (self.carnets).create(self.state, self.runner, name, workspace, links, summary)
     }
 
     /// Closes or reopens each carnet. Closing also closes its tab.
@@ -466,6 +467,28 @@ impl<'a> Items<'a> {
             self.state.set_issue_keys(path, &links.issue_keys)?;
         }
         Ok(item)
+    }
+
+    /// Edits a carnet's group, issue keys and summary with `edit`, in one commit, records its
+    /// links, and renames its tab when its group changed.
+    pub fn amend_carnet(
+        &self,
+        path: &Path,
+        edit: impl FnOnce(&mut Links, &mut String),
+    ) -> Result<()> {
+        let item = self.state.require_item(path)?;
+        if !item.is_carnet() {
+            bail!("{} is not a carnet", path.display());
+        }
+        let (links, _) = self.carnets.amend(self.runner, path, edit)?;
+        if links.issue_keys != item.links.issue_keys {
+            self.state.set_issue_keys(path, &links.issue_keys)?;
+        }
+        if links.group != item.links.group {
+            self.state.set_group(path, links.group.as_ref())?;
+            self.zellij.rename_tab(self.state, path)?;
+        }
+        Ok(())
     }
 
     /// Replaces the issue keys an item links.

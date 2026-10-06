@@ -973,7 +973,7 @@ pub mod tests {
     use crate::git::Commit;
     use crate::links::tests::{group, key, keys};
     use crate::links::{Group, IssueKey, Links};
-    use crate::reviews::{Review, Role};
+    use crate::reviews::Role;
     use crate::state::Repo;
     use crate::worktrunk::{Forge, Worktree};
 
@@ -1979,24 +1979,7 @@ pub mod tests {
         );
     }
 
-    pub fn review(provider: Provider, role: Role, number: u64, project_url: &str) -> Review {
-        let project = project_url.rsplit('/').next().unwrap();
-        Review {
-            provider,
-            role,
-            number,
-            title: format!("Change {number}"),
-            url: format!("{project_url}/pull/{number}"),
-            project: format!("org/{project}"),
-            project_url: project_url.into(),
-            author: "alice".into(),
-            branch: format!("change-{number}"),
-            base: "main".into(),
-            draft: false,
-            updated_at: format!("2026-10-0{number}T00:00:00Z"),
-            issue_keys: Default::default(),
-        }
-    }
+    pub use crate::reviews::tests::review;
 
     /// Reviews of the registered api repo and of an unregistered one, in both roles.
     pub fn with_reviews(mut model: Model) -> Model {

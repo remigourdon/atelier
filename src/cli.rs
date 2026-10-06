@@ -1,7 +1,7 @@
 //! The command line.
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::engine::{ArgValueCandidates, CompletionCandidate};
@@ -13,7 +13,7 @@ use crate::context::{self, Target};
 use crate::git;
 use crate::hooks::{self, Phase};
 use crate::items::Items;
-use crate::links::group_text;
+use crate::links::{Group, IssueKeys, Links, group_text};
 use crate::process::System;
 use crate::state::{self, State};
 use crate::worktrunk::{self, HooksConfig};
@@ -66,23 +66,23 @@ enum Command {
         #[arg(add = ArgValueCandidates::new(complete_workspaces))]
         workspace: String,
     },
-    /// Describe a directory's worktree or carnet: its workspace, group, issue keys and first
-    /// issue, its group's worktrees and carnets. Reads atelier's records, the issue cache and
-    /// `wt list`; changes nothing.
+    /// Describe a directory's worktree or carnet: its workspace, group, issues and reviews,
+    /// the worktrees and carnets of its group or sharing its issue keys, and the carnet to
+    /// write notes in. Reads atelier's records, the caches and `wt list`; changes nothing.
     Context {
         /// A directory inside the item to describe.
-        #[arg(default_value = ".", conflicts_with = "key")]
+        #[arg(default_value = ".", conflicts_with = "issue_key")]
         path: PathBuf,
-        /// Describe an issue key's issue, worktrees and carnets instead.
+        /// Describe an issue key's issue, linked work and reviews instead.
         #[arg(short, long)]
-        key: Option<String>,
+        issue_key: Option<String>,
         /// Print JSON, for scripts and coding agents.
         #[arg(long)]
         json: bool,
     },
     /// Print one ANSI line for zjstatus about the worktree or carnet holding the current
-    /// directory: its first issue key, that issue's title and worktrunk's cells. Empty outside
-    /// one.
+    /// directory: its group, its repo or `carnet`, worktrunk's cells, then its issue keys.
+    /// Empty outside one.
     Statusline,
     /// Manage carnets, the investigation folders under `[carnets] root`.
     #[command(subcommand)]
@@ -115,12 +115,53 @@ enum Ws {
 
 #[derive(Subcommand)]
 enum Carnet {
-    /// Create a carnet `<root>/YYYY-MM-DD-<name>`: a git repo with a README.
+    /// Create a carnet `<root>/YYYY-MM-DD-<name>`: a git repo with a README. Prints its path.
     New {
+        /// Its name; an issue key at its start is linked first.
         name: String,
         /// Its workspace (default: the current session's, else the default workspace).
         #[arg(short, long, add = ArgValueCandidates::new(complete_workspaces))]
         workspace: Option<String>,
+        /// Its group.
+        #[arg(short, long)]
+        group: Option<String>,
+        /// An issue key it links; repeat for more.
+        #[arg(short, long = "issues", value_name = "ISSUE_KEY")]
+        issues: Vec<String>,
+        /// Its one-line summary.
+        #[arg(short, long)]
+        summary: Option<String>,
+        /// Print the new carnet as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change the group, issue keys or summary of the carnet holding a directory, in one
+    /// commit. Only the flags given change.
+    Set {
+        /// A directory inside the carnet.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Its group; empty for none.
+        #[arg(short, long)]
+        group: Option<String>,
+        /// The issue keys it links, replacing them all; repeat for more.
+        #[arg(short, long = "issues", value_name = "ISSUE_KEY")]
+        issues: Vec<String>,
+        /// Its one-line summary.
+        #[arg(short, long)]
+        summary: Option<String>,
+    },
+    /// Close the carnet holding a directory, and its tab: its investigation is over.
+    Close {
+        /// A directory inside the carnet.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Reopen the closed carnet holding a directory.
+    Reopen {
+        /// A directory inside the carnet.
+        #[arg(default_value = ".")]
+        path: PathBuf,
     },
     /// List open carnets, newest first: folder, group, issue keys and summary.
     Ls {
@@ -165,12 +206,16 @@ pub fn run() -> Result<()> {
         }
         Command::Hooks(command) => run_hooks(command),
         Command::Tui => crate::tui::run(Config::load()?),
-        Command::Context { path, key, json } => {
+        Command::Context {
+            path,
+            issue_key,
+            json,
+        } => {
             let config = Config::load()?;
             // Read-only: describing a directory must not create or migrate the database.
             let state = State::read(&state::db_path(), config.default_workspace())?;
-            let target = match &key {
-                Some(key) => Target::Key(key),
+            let target = match &issue_key {
+                Some(key) => Target::IssueKey(key),
                 None => Target::Dir(&path),
             };
             let here = crate::zellij::current_session();
@@ -280,7 +325,14 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
             // Disabled carnets are an error here, not an empty list.
             carnets.root()?;
             match command {
-                Carnet::New { name, workspace } => {
+                Carnet::New {
+                    name,
+                    workspace,
+                    group,
+                    issues,
+                    summary,
+                    json,
+                } => {
                     let items = items(state, config)?;
                     // The workspace given, which must exist, else the current session's when
                     // it is one, else the default workspace.
@@ -289,8 +341,46 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
                     }
                     let workspace =
                         items.workspace(workspace.as_deref(), state.default_workspace());
-                    let path = items.create_carnet(&name, &workspace, None)?;
-                    println!("created {} in {workspace}", path.display());
+                    let links = Links {
+                        group: group.as_deref().and_then(Group::parse),
+                        issue_keys: resolve(&issues, config),
+                    };
+                    let summary = summary.as_deref().unwrap_or_default();
+                    let carnet = items.create_carnet(&name, &workspace, &links, summary)?;
+                    if json {
+                        let record = context::CarnetInfo::new(&carnet, workspace, None);
+                        println!("{}", serde_json::to_string_pretty(&record)?);
+                    } else {
+                        println!("{}", carnet.path.display());
+                    }
+                }
+                Carnet::Set {
+                    path,
+                    group,
+                    issues,
+                    summary,
+                } => {
+                    let carnet = holding_carnet(state, config, &path)?;
+                    let issue_keys = (!issues.is_empty()).then(|| resolve(&issues, config));
+                    items(state, config)?.amend_carnet(&carnet, |links, kept| {
+                        if let Some(group) = &group {
+                            links.group = Group::parse(group);
+                        }
+                        if let Some(issue_keys) = issue_keys {
+                            links.issue_keys = issue_keys;
+                        }
+                        if let Some(summary) = summary {
+                            *kept = summary;
+                        }
+                    })?;
+                }
+                Carnet::Close { path } => {
+                    let carnet = holding_carnet(state, config, &path)?;
+                    items(state, config)?.set_carnets_closed(&[carnet], true)?;
+                }
+                Carnet::Reopen { path } => {
+                    let carnet = holding_carnet(state, config, &path)?;
+                    items(state, config)?.set_carnets_closed(&[carnet], false)?;
                 }
                 Carnet::Ls { closed } => {
                     for carnet in carnets.scan()? {
@@ -318,6 +408,21 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
             unreachable!()
         }
     }
+}
+
+/// The recorded carnet holding `dir`, found as `context` finds an item; anything else is
+/// refused.
+fn holding_carnet(state: &State, config: &Config, dir: &Path) -> Result<PathBuf> {
+    let located = context::locate(state, config, dir)?;
+    match located.filter(|located| located.item.is_carnet()) {
+        Some(located) => Ok(located.item.path),
+        None => bail!("{} is not in a carnet", dir.display()),
+    }
+}
+
+/// Issue keys typed on the command line, resolved as front matter's are, blank ones dropped.
+fn resolve(issues: &[String], config: &Config) -> IssueKeys {
+    IssueKeys::resolve(issues.iter().map(String::as_str), &config.tracker)
 }
 
 fn run_hook(phase: Phase) -> Result<()> {
