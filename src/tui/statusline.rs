@@ -7,7 +7,9 @@ use color_eyre::eyre::Result;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 
-use super::lists::work::{behind, ci_mark, ci_style, finished_mark, symbols};
+use super::lists::work::{
+    behind, ci_mark, decision_style, finished_mark, review_reference, symbols,
+};
 use super::view::Palette;
 use crate::config::Config;
 use crate::context;
@@ -15,7 +17,7 @@ use crate::finish;
 use crate::issues;
 use crate::process::Runner;
 use crate::state::{ItemKind, State};
-use crate::worktrunk::{Decision, Forge, Worktree};
+use crate::worktrunk::{Forge, Worktree};
 
 /// What the line is about.
 #[derive(Debug, Default)]
@@ -121,19 +123,10 @@ fn cells(tree: &Worktree, forge: Option<&Forge>, palette: &Palette) -> Vec<Span<
     if let Some(ci) = &tree.ci {
         cells.push(ci_mark(ci, palette));
         if let Some(review) = &ci.review {
-            let reference = match (review.number, forge) {
-                (Some(number), Some(forge)) => forge.review_reference(number),
-                (Some(number), None) => format!("#{number}"),
-                (None, _) => "review".into(),
-            };
+            let reference = review_reference(review, forge);
             cells.push(Span::styled(reference, Style::new().fg(palette.text)));
             if let Some(decision) = review.decision {
-                let style = match decision {
-                    Decision::ChangesRequested => Style::new().fg(palette.changes_requested),
-                    Decision::Pending => Style::new().fg(palette.approval_pending),
-                    Decision::Draft => Style::new().fg(palette.dim),
-                    Decision::Approved => ci_style(ci, palette),
-                };
+                let style = decision_style(ci, decision, palette);
                 cells.push(Span::styled(decision.label(), style));
             }
         }

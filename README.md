@@ -36,6 +36,6 @@ command_atelier_rendermode "raw"
 command_atelier_cwd        "{focused_pane_cwd}"
 ```
 
-zjstatus runs commands in its own directory, so `{focused_pane_cwd}` points it at the focused pane's. The built-in session layout keeps `zellij:status-bar`; this is opt-in.
+zjstatus runs commands in its own directory, so `{focused_pane_cwd}` points it at the focused pane's, so the bar follows the visible tab. The built-in session layout keeps `zellij:status-bar`; this is opt-in.
 
 Licensed under either of [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your option.

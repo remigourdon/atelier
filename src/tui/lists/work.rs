@@ -642,23 +642,32 @@ fn review_detail(
     forge: Option<&Forge>,
     palette: &Palette,
 ) -> Line<'static> {
-    let reference = match (review.number, forge) {
-        (Some(number), Some(forge)) => forge.review_reference(number),
-        (Some(number), None) => format!("#{number}"),
-        (None, _) => "open".into(),
-    };
-    let mut spans = vec![Span::raw(reference)];
+    let mut spans = vec![Span::raw(review_reference(review, forge))];
     if let Some(decision) = review.decision {
-        let style = match decision {
-            Decision::ChangesRequested => Style::new().fg(palette.changes_requested),
-            Decision::Pending => Style::new().fg(palette.approval_pending),
-            Decision::Draft => Style::new().fg(palette.dim),
-            // Approval leaves the CI's colour, as in worktrunk.
-            Decision::Approved => ci_style(ci, palette),
-        };
+        let style = decision_style(ci, decision, palette);
         spans.push(Span::styled(format!(" {}", decision.label()), style));
     }
     Line::from(spans)
+}
+
+/// How the forge refers to a review: `#12`, `!12` on GitLab, `open` without a number.
+pub(crate) fn review_reference(review: &CiReview, forge: Option<&Forge>) -> String {
+    match (review.number, forge) {
+        (Some(number), Some(forge)) => forge.review_reference(number),
+        (Some(number), None) => format!("#{number}"),
+        (None, _) => "open".into(),
+    }
+}
+
+/// A review decision's colour.
+pub(crate) fn decision_style(ci: &Ci, decision: Decision, palette: &Palette) -> Style {
+    match decision {
+        Decision::ChangesRequested => Style::new().fg(palette.changes_requested),
+        Decision::Pending => Style::new().fg(palette.approval_pending),
+        Decision::Draft => Style::new().fg(palette.dim),
+        // Approval leaves the CI's colour, as in worktrunk.
+        Decision::Approved => ci_style(ci, palette),
+    }
 }
 
 /// A finished worktree's mark: why it is finished.
