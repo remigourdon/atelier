@@ -14,6 +14,7 @@ use crate::carnet::Stamp;
 use crate::finish::{Plan, Scope, Step};
 use crate::git::Commit;
 use crate::issues::{self, Issue, TrackerConfig};
+use crate::items::Items;
 pub use crate::items::{Removal, Snapshot, Work, WorkKind};
 use crate::links::{Group, IssueKeys};
 use crate::process::Logged;
@@ -173,20 +174,9 @@ pub enum Job {
     },
     /// Runs a finish plan's checked steps.
     Finish(Vec<Step>),
-    /// Checks out a review's branch with `wt switch pr:N` or `mr:N` in its registered repo and
-    /// workspace, and focuses its tab. A new worktree is in `group`.
-    Checkout {
-        repo: PathBuf,
-        workspace: String,
-        review: Box<Review>,
-        group: Option<Group>,
-    },
-    /// Creates a worktree on `branch` for an issue, linking its key, in `group`.
-    Start {
-        repo: PathBuf,
-        branch: String,
-        workspace: String,
-        issue: Box<Issue>,
+    /// Makes a pending worktree in `group`: starts an issue's or checks out a review's.
+    Make {
+        pending: Pending,
         group: Option<Group>,
     },
     /// Looks up the one group among the items linking a pending worktree's issue keys.
@@ -212,29 +202,41 @@ pub enum Pending {
 impl Pending {
     /// The job that makes it, in `group`.
     pub fn job(self, group: Option<Group>) -> Job {
+        Job::Make {
+            pending: self,
+            group,
+        }
+    }
+
+    /// The issue keys its worktree links.
+    pub fn issue_keys(&self, items: &Items) -> IssueKeys {
         match self {
-            Pending::Start {
-                repo,
-                branch,
-                workspace,
-                issue,
-            } => Job::Start {
-                repo,
-                branch,
-                workspace,
-                issue,
-                group,
-            },
-            Pending::Checkout {
-                repo,
-                workspace,
-                review,
-            } => Job::Checkout {
-                repo,
-                workspace,
-                review,
-                group,
-            },
+            Pending::Start { issue, .. } => [issue.key.clone()].into_iter().collect(),
+            Pending::Checkout { review, .. } => items.review_keys(review),
+        }
+    }
+
+    /// Whether its worktree exists already.
+    pub fn exists(&self, model: &Model) -> bool {
+        match self {
+            Pending::Start { repo, branch, .. } => (model.snapshot.work.iter()).any(|work| {
+                work.repo() == Some(repo)
+                    && (work.tree()).and_then(|tree| tree.branch.as_deref())
+                        == Some(branch.as_str())
+            }),
+            Pending::Checkout { review, .. } => model.review_work(review).is_some(),
+        }
+    }
+
+    /// The issue or review it is for, as listed.
+    pub fn label(&self, model: &Model) -> String {
+        match self {
+            Pending::Start { issue, .. } => model.issue_label(issue),
+            Pending::Checkout { review, .. } => format!(
+                "{}{}",
+                model.review_project(review),
+                review.provider.reference(review.number)
+            ),
         }
     }
 }

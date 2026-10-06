@@ -131,11 +131,7 @@ pub fn run(context: &Context, job: Job) -> Action {
                 .state()
                 .and_then(|state| {
                     let items = context.items(&state, &recorder)?;
-                    let keys = match &pending {
-                        Pending::Start { issue, .. } => [issue.key.clone()].into_iter().collect(),
-                        Pending::Checkout { review, .. } => items.review_keys(review),
-                    };
-                    items.linked_group(&keys)
+                    items.linked_group(&pending.issue_keys(&items))
                 })
                 .map_err(|err| err.to_string());
             Action::Linked {
@@ -310,19 +306,19 @@ fn execute(context: &Context, state: &State, runner: &dyn Runner, job: Job) -> R
         } => items
             .create(&repo, &branch, &workspace, group.as_ref())
             .map(drop),
-        Job::Start {
-            repo,
-            branch,
-            workspace,
-            issue,
-            group,
-        } => items.start(&repo, &branch, &workspace, &issue.key, group.as_ref()),
-        Job::Checkout {
-            repo,
-            workspace,
-            review,
-            group,
-        } => items.checkout(&repo, &workspace, &review, group.as_ref()),
+        Job::Make { pending, group } => match pending {
+            Pending::Start {
+                repo,
+                branch,
+                workspace,
+                issue,
+            } => items.start(&repo, &branch, &workspace, &issue.key, group.as_ref()),
+            Pending::Checkout {
+                repo,
+                workspace,
+                review,
+            } => items.checkout(&repo, &workspace, &review, group.as_ref()),
+        },
         Job::NewCarnet {
             name,
             workspace,

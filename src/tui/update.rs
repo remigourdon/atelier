@@ -584,14 +584,7 @@ fn submit(model: &mut Model, then: Submit, value: &str) -> Vec<Effect> {
 /// Makes a pending worktree in the one group linked to its issue keys, looked up first, else in
 /// the group asked for. A worktree already there keeps its group, so nothing is asked.
 pub(super) fn join_linked_group(model: &mut Model, pending: Pending) -> Vec<Effect> {
-    let exists = match &pending {
-        Pending::Start { repo, branch, .. } => (model.snapshot.work.iter()).any(|work| {
-            work.repo() == Some(repo)
-                && (work.tree()).and_then(|tree| tree.branch.as_deref()) == Some(branch.as_str())
-        }),
-        Pending::Checkout { review, .. } => model.review_work(review).is_some(),
-    };
-    let job = if exists {
+    let job = if pending.exists(model) {
         pending.job(None)
     } else {
         Job::LinkedGroup(pending)
@@ -601,16 +594,11 @@ pub(super) fn join_linked_group(model: &mut Model, pending: Pending) -> Vec<Effe
 
 /// Asks for the group of a pending worktree whose linked work is not in exactly one group.
 fn ask_group(model: &mut Model, pending: Pending) -> Vec<Effect> {
-    let label = match &pending {
-        Pending::Start { issue, .. } => model.issue_label(issue),
-        Pending::Checkout { review, .. } => format!(
-            "{}{}",
-            model.review_project(review),
-            review.provider.reference(review.number)
-        ),
-    };
     let action = Action::Ask {
-        title: format!("Group of the worktree for {label} (empty: none)"),
+        title: format!(
+            "Group of the worktree for {} (empty: none)",
+            pending.label(model)
+        ),
         initial: String::new(),
         then: Submit::Join(pending),
         completions: model.group_names(),
@@ -2970,7 +2958,13 @@ pub mod tests {
     }
 
     fn started_group(effects: Vec<Effect>) -> Option<Group> {
-        let [Job::Start { group, .. }] = &jobs(effects)[..] else {
+        let [
+            Job::Make {
+                pending: Pending::Start { .. },
+                group,
+            },
+        ] = &jobs(effects)[..]
+        else {
             panic!("no start");
         };
         group.clone()
@@ -3040,8 +3034,12 @@ pub mod tests {
         let mut model = with_reviews(model());
         press(&mut model, "3");
         let checkout = press(&mut model, " ");
-        let [Job::Checkout { group, .. }] =
-            &jobs(linked(&mut model, checkout.clone(), Some("a")))[..]
+        let [
+            Job::Make {
+                pending: Pending::Checkout { .. },
+                group,
+            },
+        ] = &jobs(linked(&mut model, checkout.clone(), Some("a")))[..]
         else {
             panic!();
         };
@@ -3051,12 +3049,24 @@ pub mod tests {
             prompt(&model).0,
             "Group of the worktree for api#2 (empty: none)"
         );
-        let [Job::Checkout { group, .. }] = &jobs(press(&mut model, "b\n"))[..] else {
+        let [
+            Job::Make {
+                pending: Pending::Checkout { .. },
+                group,
+            },
+        ] = &jobs(press(&mut model, "b\n"))[..]
+        else {
             panic!();
         };
         assert_eq!(group, &Group::parse("B"));
         model.snapshot.work[0].tree_mut().branch = Some("change-2".into());
-        let [Job::Checkout { group: None, .. }] = &jobs(press(&mut model, " "))[..] else {
+        let [
+            Job::Make {
+                pending: Pending::Checkout { .. },
+                group: None,
+            },
+        ] = &jobs(press(&mut model, " "))[..]
+        else {
             panic!("checked out already: no lookup");
         };
     }
