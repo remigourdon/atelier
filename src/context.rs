@@ -255,6 +255,8 @@ pub struct ReviewInfo {
     pub author: String,
     /// `owner/repo`, or a GitLab project's full path.
     pub project: String,
+    /// The project's web page.
+    pub project_url: String,
     pub issue_keys: IssueKeys,
     /// The worktree listed here that has its branch checked out, in its project's repo.
     pub worktree: Option<PathBuf>,
@@ -482,6 +484,7 @@ pub fn describe(
                 title: review.title,
                 author: review.author,
                 project: review.project,
+                project_url: review.project_url,
                 issue_keys: review.issue_keys,
                 here: worktree.is_some_and(|info| info.holds),
                 worktree: worktree.map(|info| info.path.clone()),
@@ -973,7 +976,7 @@ mod tests {
             json["reviews"][0],
             serde_json::json!({
                 "provider": "github", "number": 31, "url": "https://github.com/o/api/pull/31",
-                "title": "Change 31", "author": "alice", "project": "org/api",
+                "title": "Change 31", "author": "alice", "project": "org/api", "project_url": API,
                 "issue_keys": ["ABC-1"], "worktree": setup.tree, "here": true,
             })
         );
