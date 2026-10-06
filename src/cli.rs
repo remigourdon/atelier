@@ -1,7 +1,7 @@
 //! The command line.
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::engine::{ArgValueCandidates, CompletionCandidate};
@@ -150,6 +150,18 @@ enum Carnet {
         /// Its one-line summary.
         #[arg(short, long)]
         summary: Option<String>,
+    },
+    /// Close the carnet holding a directory, and its tab: its investigation is over.
+    Close {
+        /// A directory inside the carnet.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Reopen the closed carnet holding a directory.
+    Reopen {
+        /// A directory inside the carnet.
+        #[arg(default_value = ".")]
+        path: PathBuf,
     },
     /// List open carnets, newest first: folder, group, issue keys and summary.
     Ls {
@@ -348,12 +360,9 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
                     issues,
                     summary,
                 } => {
-                    let located = context::locate(state, config, &path)?;
-                    let Some(located) = located.filter(|located| located.item.is_carnet()) else {
-                        bail!("{} is not in a carnet", path.display());
-                    };
+                    let carnet = holding_carnet(state, config, &path)?;
                     let issue_keys = (!issues.is_empty()).then(|| resolve(&issues, config));
-                    items(state, config)?.amend_carnet(&located.item.path, |links, kept| {
+                    items(state, config)?.amend_carnet(&carnet, |links, kept| {
                         if let Some(group) = &group {
                             links.group = Group::parse(group);
                         }
@@ -364,6 +373,14 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
                             *kept = summary;
                         }
                     })?;
+                }
+                Carnet::Close { path } => {
+                    let carnet = holding_carnet(state, config, &path)?;
+                    items(state, config)?.set_carnets_closed(&[carnet], true)?;
+                }
+                Carnet::Reopen { path } => {
+                    let carnet = holding_carnet(state, config, &path)?;
+                    items(state, config)?.set_carnets_closed(&[carnet], false)?;
                 }
                 Carnet::Ls { closed } => {
                     for carnet in carnets.scan()? {
@@ -390,6 +407,16 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
         | Command::Statusline => {
             unreachable!()
         }
+    }
+}
+
+/// The recorded carnet holding `dir`, found as `context` finds an item; anything else is
+/// refused.
+fn holding_carnet(state: &State, config: &Config, dir: &Path) -> Result<PathBuf> {
+    let located = context::locate(state, config, dir)?;
+    match located.filter(|located| located.item.is_carnet()) {
+        Some(located) => Ok(located.item.path),
+        None => bail!("{} is not in a carnet", dir.display()),
     }
 }
 

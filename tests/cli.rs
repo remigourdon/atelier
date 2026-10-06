@@ -479,3 +479,43 @@ fn carnet_set_changes_only_what_is_given_in_one_commit() {
     let error = home.fails(&["carnet", "set", &repo, "-s", "x"]);
     assert!(error.contains("not in a carnet"), "{error}");
 }
+
+#[test]
+fn carnet_close_and_reopen_the_carnet_holding_a_directory() {
+    let home = carnet_home();
+    let created = home.ok(&["carnet", "new", "notes", "-s", "Why"]);
+    let path = Path::new(created.strip_suffix('\n').unwrap());
+    std::fs::create_dir(path.join("logs")).unwrap();
+    let run = |args: &[&str]| {
+        let mut command = home.command(args);
+        let output = command.current_dir(path.join("logs")).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let readme = || std::fs::read_to_string(path.join("README.md")).unwrap();
+    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+
+    assert_eq!(run(&["carnet", "close"]), "");
+    assert!(readme().contains("closed = true\n"), "{}", readme());
+    assert_eq!(home.ok(&["carnet", "ls"]), "", "out of the open ones");
+    run(&["carnet", "close"]);
+    assert_eq!(
+        commits(path),
+        "Close\nCreate carnet\n",
+        "closing twice commits once"
+    );
+
+    home.ok(&["carnet", "reopen", &path.to_string_lossy()]);
+    assert!(readme().contains("closed = false\n"), "{}", readme());
+    assert_eq!(home.ok(&["carnet", "ls"]), format!("{name}\t\t\tWhy\n"));
+    assert_eq!(commits(path), "Reopen\nClose\nCreate carnet\n");
+
+    for command in ["close", "reopen"] {
+        let error = home.fails(&["carnet", command, &home.path("Data").to_string_lossy()]);
+        assert!(error.contains("not in a carnet"), "{error}");
+    }
+}
