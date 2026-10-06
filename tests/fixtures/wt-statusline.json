@@ -1,0 +1,73 @@
+{
+  "schema": 2,
+  "repo": {
+    "default_branch": "main",
+    "forge": {
+      "url": "https://github.com/remigourdon/atelier",
+      "provider": "github",
+      "host": "github.com",
+      "owner": "remigourdon",
+      "name": "atelier",
+      "remote": "origin"
+    }
+  },
+  "collected": {
+    "ci": true,
+    "summary": false
+  },
+  "items": [
+    {
+      "branch": "ABC-1-fix",
+      "head": {
+        "sha": "fc89fa65682d5961f373ea5ea32477e932ca8ccb",
+        "short_sha": "fc89fa6",
+        "subject": "Colour the main view by Catppuccin's style guide (#29)",
+        "committed_at": "2026-10-05T22:17:49Z"
+      },
+      "worktree": {
+        "path": "/home/remi/atelier.ABC-1-fix",
+        "main": false,
+        "current": true,
+        "previous": false,
+        "detached": false,
+        "branch_mismatch": false,
+        "duplicate_branch": false,
+        "changes": {
+          "staged": false,
+          "modified": true,
+          "untracked": true,
+          "renamed": false,
+          "deleted": false,
+          "conflicted": false,
+          "diff": {
+            "added": 4,
+            "deleted": 2
+          }
+        }
+      },
+      "upstream": {
+        "ahead": 1,
+        "behind": 2
+      },
+      "default_branch": {
+        "ahead": 3
+      },
+      "checks": {
+        "status": "running",
+        "source": "pr",
+        "stale": false
+      },
+      "pr": {
+        "number": 31,
+        "url": "https://github.com/remigourdon/atelier/pull/31",
+        "review": "approved",
+        "mergeable": true
+      },
+      "display": {
+        "state": "ahead",
+        "symbols": "!?↕",
+        "statusline": "ABC-1-fix  \u001b[36m!?\u001b[39m\u001b[2m↕\u001b[22m"
+      }
+    }
+  ]
+}

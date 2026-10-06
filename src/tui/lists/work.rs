@@ -568,11 +568,11 @@ impl ListKind for WorkList {
 }
 
 /// worktrunk's status symbols, such as `!?↑`: warning when the tree is dirty.
-fn symbols(tree: &Worktree, palette: &Palette) -> Span<'static> {
+pub(crate) fn symbols(tree: &Worktree, palette: &Palette) -> Span<'static> {
     Span::styled(tree.symbols.clone(), status_style(tree, palette))
 }
 
-fn status_style(tree: &Worktree, palette: &Palette) -> Style {
+pub(crate) fn status_style(tree: &Worktree, palette: &Palette) -> Style {
     Style::new().fg(if tree.dirty {
         palette.warn
     } else {
@@ -581,7 +581,7 @@ fn status_style(tree: &Worktree, palette: &Palette) -> Style {
 }
 
 /// `↓N` when the branch is behind its upstream.
-fn behind(tree: &Worktree, palette: &Palette) -> Option<Span<'static>> {
+pub(crate) fn behind(tree: &Worktree, palette: &Palette) -> Option<Span<'static>> {
     let (_, behind) = tree.upstream.filter(|&(_, behind)| behind > 0)?;
     Some(Span::styled(
         format!("↓{behind}"),
@@ -590,7 +590,7 @@ fn behind(tree: &Worktree, palette: &Palette) -> Option<Span<'static>> {
 }
 
 /// A CI status's colour, as worktrunk's: dimmed when stale or for a draft.
-fn ci_style(ci: &Ci, palette: &Palette) -> Style {
+pub(crate) fn ci_style(ci: &Ci, palette: &Palette) -> Style {
     let color = match ci.state {
         CiState::Passed => palette.ok,
         CiState::Running => palette.info,
@@ -608,7 +608,7 @@ fn ci_style(ci: &Ci, palette: &Palette) -> Style {
 }
 
 /// A row's CI mark, its colour the status.
-fn ci_mark(ci: &Ci, palette: &Palette) -> Span<'static> {
+pub(crate) fn ci_mark(ci: &Ci, palette: &Palette) -> Span<'static> {
     let glyph = if ci.state == CiState::Error {
         palette.glyphs.ci_error
     } else {
@@ -642,27 +642,36 @@ fn review_detail(
     forge: Option<&Forge>,
     palette: &Palette,
 ) -> Line<'static> {
-    let reference = match (review.number, forge) {
-        (Some(number), Some(forge)) => forge.review_reference(number),
-        (Some(number), None) => format!("#{number}"),
-        (None, _) => "open".into(),
-    };
-    let mut spans = vec![Span::raw(reference)];
+    let mut spans = vec![Span::raw(review_reference(review, forge))];
     if let Some(decision) = review.decision {
-        let style = match decision {
-            Decision::ChangesRequested => Style::new().fg(palette.changes_requested),
-            Decision::Pending => Style::new().fg(palette.approval_pending),
-            Decision::Draft => Style::new().fg(palette.dim),
-            // Approval leaves the CI's colour, as in worktrunk.
-            Decision::Approved => ci_style(ci, palette),
-        };
+        let style = decision_style(ci, decision, palette);
         spans.push(Span::styled(format!(" {}", decision.label()), style));
     }
     Line::from(spans)
 }
 
+/// How the forge refers to a review: `#12`, `!12` on GitLab, `open` without a number.
+pub(crate) fn review_reference(review: &CiReview, forge: Option<&Forge>) -> String {
+    match (review.number, forge) {
+        (Some(number), Some(forge)) => forge.review_reference(number),
+        (Some(number), None) => format!("#{number}"),
+        (None, _) => "open".into(),
+    }
+}
+
+/// A review decision's colour.
+pub(crate) fn decision_style(ci: &Ci, decision: Decision, palette: &Palette) -> Style {
+    match decision {
+        Decision::ChangesRequested => Style::new().fg(palette.changes_requested),
+        Decision::Pending => Style::new().fg(palette.approval_pending),
+        Decision::Draft => Style::new().fg(palette.dim),
+        // Approval leaves the CI's colour, as in worktrunk.
+        Decision::Approved => ci_style(ci, palette),
+    }
+}
+
 /// A finished worktree's mark: why it is finished.
-fn finished_mark(signal: Signal, palette: &Palette) -> Span<'static> {
+pub(crate) fn finished_mark(signal: Signal, palette: &Palette) -> Span<'static> {
     Span::styled(palette.glyphs.signal(signal), Style::new().fg(palette.dim))
 }
 

@@ -6,13 +6,16 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::items::{Removal, Snapshot, Work};
+use crate::worktrunk::Worktree;
 
 /// Why a worktree is finished.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Signal {
     /// worktrunk finds its branch integrated into the default branch.
     Integrated,
     /// Its upstream branch is gone, and it is not integrated.
+    #[serde(rename = "upstream_gone")]
     Gone,
 }
 
@@ -28,8 +31,14 @@ impl Signal {
 /// Why a worktree other than its repo's main one is finished, if it is. Integrated wins over
 /// gone. As fresh as the last fetch.
 pub fn signal(work: &Work) -> Option<Signal> {
-    let tree = work.tree().filter(|tree| !tree.main)?;
-    if tree.integrated {
+    tree_signal(work.tree()?)
+}
+
+/// Why a worktree is finished, as [`signal`].
+pub fn tree_signal(tree: &Worktree) -> Option<Signal> {
+    if tree.main {
+        None
+    } else if tree.integrated {
         Some(Signal::Integrated)
     } else if tree.gone {
         Some(Signal::Gone)

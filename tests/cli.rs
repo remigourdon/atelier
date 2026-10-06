@@ -216,6 +216,19 @@ fn context_never_creates_the_database() {
 }
 
 #[test]
+fn statusline_is_empty_outside_an_item_and_never_creates_the_database() {
+    let home = Home::new();
+    let output = home
+        .command(&["statusline"])
+        .current_dir(home.path(""))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(!home.path("state/atelier").exists());
+}
+
+#[test]
 fn carnets_are_folders_under_the_configured_root() {
     let home = Home::new();
     assert!(
@@ -275,6 +288,13 @@ fn carnets_are_folders_under_the_configured_root() {
     assert_eq!(context["workspace"]["name"], "default");
     assert_eq!(context["group"], "ABC-1");
     assert_eq!(context["carnet"], path.to_string_lossy().as_ref());
+    let mut statusline = home.command(&["statusline"]);
+    let output = statusline.current_dir(path).output().unwrap();
+    let line = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        line.contains("ABC-1") && !line.contains("closed"),
+        "{line:?}"
+    );
     let json = home.ok(&["context", "--json", "--key", "ORD-7"]);
     let context: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(context["item"], serde_json::Value::Null);

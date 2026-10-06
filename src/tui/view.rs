@@ -49,6 +49,8 @@ pub struct Glyphs {
     pub workspace: &'static str,
     pub repo: &'static str,
     pub worktree: &'static str,
+    /// A repo's main worktree, in place of its name when there is a glyph.
+    pub main: &'static str,
     pub carnet: &'static str,
     pub review: &'static str,
     pub issue: &'static str,
@@ -73,6 +75,7 @@ impl Glyphs {
                 workspace: "",
                 repo: "",
                 worktree: "",
+                main: "",
                 carnet: "",
                 review: "",
                 issue: "",
@@ -86,13 +89,14 @@ impl Glyphs {
                 ci_error: "⚠",
                 spinner,
             },
-            // Nerd Fonts: fa-desktop, oct-repo, dev-git_branch, fa-book, oct-git_pull_request,
+            // Nerd Fonts: fa-desktop, oct-repo, dev-git_branch, fa-home, fa-book, oct-git_pull_request,
             // oct-issue_opened, fa-circle, fa-circle_o, fa-folder, fa-folder_open, oct-git_merge,
             // fa-chain_broken, fa-diamond, fa-warning.
             Icons::Nerd => Self {
                 workspace: "\u{f108}",
                 repo: "\u{f401}",
                 worktree: "\u{e725}",
+                main: "\u{f015}",
                 carnet: "\u{f02d}",
                 review: "\u{f407}",
                 issue: "\u{f41b}",

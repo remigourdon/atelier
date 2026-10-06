@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{Result, WrapErr, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use toml_edit::{DocumentMut, Item, Table, value};
 
 use crate::hooks::{self, Phase};
@@ -212,7 +212,8 @@ pub struct Ci {
 }
 
 /// What worktrunk's CI column shows, its "no CI" aside.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CiState {
     Passed,
     Running,
@@ -249,7 +250,8 @@ pub struct CiReview {
 }
 
 /// What reviewers decided on a review.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Decision {
     ChangesRequested,
     /// A required approval is not given yet.
@@ -351,6 +353,36 @@ pub fn list(runner: &dyn Runner, repo: &Path, full: bool) -> Result<Listing> {
         args.push("--full");
     }
     Listing::parse(&runner.output("wt", &args)?)
+}
+
+/// The worktree holding `path`, with its CI, from `wt list statusline`: the same item as
+/// `wt list --full` reports. Its CI lookup is cached by worktrunk, and costs a second or two
+/// when the cache is stale.
+pub fn statusline(runner: &dyn Runner, path: &Path) -> Result<Statusline> {
+    let path = path.to_string_lossy();
+    let args = [
+        "-C",
+        &path,
+        "--config-set",
+        "list.json-schema=2",
+        "list",
+        "statusline",
+    ];
+    let listing =
+        Listing::parse(&runner.output("wt", &[&args[..], &["--format", "json"]].concat())?)?;
+    let tree = (listing.worktrees.into_iter().next())
+        .ok_or_else(|| color_eyre::eyre::eyre!("wt list statusline listed no worktree"))?;
+    Ok(Statusline {
+        tree,
+        forge: listing.forge,
+    })
+}
+
+/// The worktree `wt list statusline` reports, with its repo's forge for review references.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Statusline {
+    pub tree: Worktree,
+    pub forge: Option<Forge>,
 }
 
 /// Switches `repo` to `target` (`[--create] <branch>`, or `pr:N`), creating the worktree when
@@ -752,6 +784,29 @@ mod tests {
             fake.calls(),
             ["wt -C /r --config-set list.json-schema=2 list --format json --full"]
         );
+    }
+
+    #[test]
+    fn statusline_reads_the_one_worktree_with_its_ci() {
+        let fake = crate::process::fake::Fake::default().always(
+            "wt",
+            Some(include_str!("../tests/fixtures/wt-statusline.json")),
+        );
+        let Statusline { tree, forge } = statusline(&fake, Path::new("/r.b")).unwrap();
+        assert_eq!(forge.unwrap().provider, "github");
+        assert_eq!(
+            fake.calls(),
+            ["wt -C /r.b --config-set list.json-schema=2 list statusline --format json"]
+        );
+        assert_eq!(tree.branch.as_deref(), Some("ABC-1-fix"));
+        assert!(tree.dirty && !tree.main && !tree.integrated);
+        assert_eq!(tree.upstream, Some((1, 2)));
+        let ci = tree.ci.unwrap();
+        assert_eq!(ci.state, CiState::Running);
+        assert_eq!(ci.decision(), Some(Decision::Approved));
+        assert_eq!(ci.review.unwrap().number, Some(31));
+        let empty = crate::process::fake::Fake::default().always("wt", Some(r#"{"items":[]}"#));
+        assert!(statusline(&empty, Path::new("/r")).is_err());
     }
 
     #[test]

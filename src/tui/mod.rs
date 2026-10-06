@@ -5,6 +5,7 @@ mod jobs;
 mod lists;
 mod markdown;
 mod schedule;
+pub mod statusline;
 mod update;
 mod view;
 mod widgets;
