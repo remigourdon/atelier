@@ -9,8 +9,9 @@ use crate::carnet::{self, Carnets, Stamp};
 use crate::config::Config;
 use crate::finish::{self, Scope};
 use crate::git;
-use crate::issues::{self, TrackerConfig};
+use crate::issues;
 use crate::items::{Items, Snapshot};
+use crate::links::KeyFinder;
 use crate::process::{Logged, Recorder, Runner, System};
 use crate::reviews::{self, Role};
 use crate::state::{self, State};
@@ -142,9 +143,9 @@ pub fn run(context: &Context, job: Job) -> Action {
         }
         // Like refreshes, these run constantly: log only failures.
         Job::Fetch { feed, keys, force } => {
-            let config = &context.config.tracker;
             let (rows, log) = match context.state() {
                 Ok(state) => {
+                    let config = &context.config;
                     let (rows, log) = fetch(&state, &recorder, config, feed, &keys, force);
                     (Ok(rows), log)
                 }
@@ -248,7 +249,7 @@ fn fetch_failures(recorder: &Recorder, error: Option<Report>, what: String) -> V
 fn fetch(
     state: &State,
     recorder: &Recorder,
-    config: &TrackerConfig,
+    config: &Config,
     feed: Feed,
     keys: &[String],
     force: bool,
@@ -259,7 +260,14 @@ fn fetch(
     for key in keys {
         match feed {
             Feed::Reviews(provider) => {
-                let api = provider.reviews(recorder, key.clone());
+                let finder = match KeyFinder::new(config) {
+                    Ok(finder) => finder,
+                    Err(error) => {
+                        log.extend(fetch_failures(recorder, Some(error), feed.what()));
+                        continue;
+                    }
+                };
+                let api = provider.reviews(recorder, key.clone(), &finder);
                 for role in Role::ALL {
                     let (found, error) = reviews::fetch(state, api.as_ref(), role, force);
                     reviews.extend(found);
@@ -267,7 +275,7 @@ fn fetch(
                 }
             }
             Feed::Issues(tracker) => {
-                let api = tracker.issues(recorder, key.clone(), config);
+                let api = tracker.issues(recorder, key.clone(), &config.tracker);
                 let (found, error) = issues::fetch(state, api.as_ref(), force);
                 issues.extend(found);
                 log.extend(fetch_failures(recorder, error, feed.what()));
@@ -379,7 +387,7 @@ mod tests {
             .always("gh api --hostname a", Some(gh))
             .always("gh api --hostname b", None);
         let recorder = Recorder::new(&fake);
-        let config = TrackerConfig::default();
+        let config = Config::default();
         let github = Feed::Reviews(Provider::GitHub);
         let hosts = ["a".to_owned(), "b".to_owned()];
         let (Rows::Reviews(found), log) = fetch(&state, &recorder, &config, github, &hosts, false)
@@ -422,7 +430,7 @@ mod tests {
             .once("gh", Some("[]"))
             .always("gh", None);
         let recorder = Recorder::new(&fake);
-        let config = TrackerConfig::default();
+        let config = Config::default();
         let scopes = ["o/a".to_owned(), "o/b".to_owned()];
         let github = Feed::Issues(issues::Tracker::GitHub);
         let (Rows::Issues(found), log) = fetch(&state, &recorder, &config, github, &scopes, false)

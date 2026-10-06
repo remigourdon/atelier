@@ -3,7 +3,10 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, close_tabs, pair, subtle, tab_mark};
+use super::{ListKind, close_tabs, group_style, key_style, pair, subtle, tab_mark, work_line};
+use std::collections::HashSet;
+
+use crate::links::{Group, IssueKey};
 use crate::reviews::{Review, Role};
 use crate::state::Repo;
 use crate::tui::app::{Cmd, Effect, Feed, Kind, List, Model, Pending, Source, Work};
@@ -63,7 +66,31 @@ impl Model {
             .map_or_else(|| review.project.clone(), Repo::name)
     }
 
-    /// The worktree that has a review's branch checked out.
+    /// The open reviews linking the issue `key`, in either role, each once.
+    pub fn issue_reviews(&self, key: &IssueKey) -> Vec<&Review> {
+        let mut seen = HashSet::new();
+        (self.reviews.iter())
+            .filter(|review| review.issue_keys.links(key) && seen.insert(&review.url))
+            .collect()
+    }
+
+    /// How a review is listed: its repo's name, else its project, and its number.
+    pub fn review_label(&self, review: &Review) -> String {
+        format!(
+            "{}{}",
+            self.review_project(review),
+            review.provider.reference(review.number)
+        )
+    }
+
+    /// A review's group: its worktree's.
+    pub fn review_group(&self, review: &Review) -> Option<Group> {
+        self.review_work(review)
+            .and_then(|work| work.group().cloned())
+    }
+
+    /// The worktree that has a review's branch checked out, in the registered repo whose forge
+    /// is the review's project.
     pub fn review_work(&self, review: &Review) -> Option<&Work> {
         let repo = self.project_repo(&review.project_url)?;
         self.snapshot.work.iter().find(|work| {
@@ -121,17 +148,16 @@ impl ListKind for Reviews {
                 let mut spans = vec![marker];
                 spans.extend(icon(glyphs.review, dim));
                 spans.push(Span::styled(
-                    format!(
-                        "{}{} ",
-                        model.review_project(review),
-                        review.provider.reference(review.number)
-                    ),
+                    format!("{} ", model.review_label(review)),
                     dim,
                 ));
                 spans.push(Span::raw(review.title.as_str()));
                 if review.draft {
                     spans.push(Span::raw(" "));
                     spans.push(status(review, palette));
+                }
+                if let Some(group) = model.review_group(review) {
+                    spans.push(Span::styled(format!(" {group}"), group_style(palette)));
                 }
                 if list == List::ToReview {
                     spans.push(Span::styled(format!(" @{}", review.author), dim));
@@ -171,15 +197,17 @@ impl ListKind for Reviews {
             pair("URL", review.url.clone()),
             pair("Repo", repo),
             pair(
+                "Issue keys",
+                Span::styled(
+                    review.issue_keys.display(&model.tracker_config, ", "),
+                    key_style(palette),
+                ),
+            ),
+            pair(
                 "Worktree",
                 model.review_work(review).map_or(
                     subtle("none: Space checks it out", palette).into(),
-                    |work| {
-                        Line::from(vec![
-                            tab_mark(work.tab, palette),
-                            Span::raw(work.path().display().to_string()),
-                        ])
-                    },
+                    |work| work_line(work, palette),
                 ),
             ),
         ]

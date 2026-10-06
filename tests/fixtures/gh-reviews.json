@@ -5,11 +5,12 @@
         "nodes": [
           {
             "number": 10,
-            "title": "Phase 2: TUI frame, Workspaces and Work",
+            "title": "ABC-2 Phase 2: TUI frame, Workspaces and Work",
+            "body": "Closes #3. Follows DEF-4 and ABC-2.",
             "url": "https://github.com/remigourdon/atelier/pull/10",
             "isDraft": false,
             "updatedAt": "2026-10-04T16:55:46Z",
-            "headRefName": "phase-2-tui",
+            "headRefName": "phase-2-tui-ABC-7",
             "baseRefName": "main",
             "author": {
               "login": "remigourdon"
@@ -17,6 +18,22 @@
             "repository": {
               "nameWithOwner": "remigourdon/atelier",
               "url": "https://github.com/remigourdon/atelier"
+            },
+            "closingIssuesReferences": {
+              "nodes": [
+                {
+                  "number": 3,
+                  "repository": {
+                    "nameWithOwner": "remigourdon/atelier"
+                  }
+                },
+                {
+                  "number": 5,
+                  "repository": {
+                    "nameWithOwner": "remigourdon/other"
+                  }
+                }
+              ]
             }
           },
           {
@@ -33,6 +50,10 @@
             "repository": {
               "nameWithOwner": "remigourdon/atelier",
               "url": "https://github.com/remigourdon/atelier"
+            },
+            "body": "",
+            "closingIssuesReferences": {
+              "nodes": []
             }
           }
         ],

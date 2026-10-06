@@ -3,6 +3,7 @@
 use color_eyre::eyre::{Report, Result, WrapErr};
 use serde::{Deserialize, Serialize};
 
+use crate::links::{IssueKey, IssueKeys, KeyFinder};
 use crate::process::Runner;
 use crate::state::State;
 
@@ -41,11 +42,16 @@ impl Provider {
         }
     }
 
-    /// Its reviews on `host`, through its CLI.
-    pub fn reviews<'a>(self, runner: &'a dyn Runner, host: String) -> Box<dyn Reviews + 'a> {
+    /// Its reviews on `host`, through its CLI, linking the issue keys `keys` finds.
+    pub fn reviews<'a>(
+        self,
+        runner: &'a dyn Runner,
+        host: String,
+        keys: &'a KeyFinder<'a>,
+    ) -> Box<dyn Reviews + 'a> {
         match self {
-            Provider::GitHub => Box::new(Gh { runner, host }),
-            Provider::GitLab => Box::new(Glab { runner, host }),
+            Provider::GitHub => Box::new(Gh { runner, host, keys }),
+            Provider::GitLab => Box::new(Glab { runner, host, keys }),
         }
     }
 
@@ -101,6 +107,10 @@ pub struct Review {
     pub base: String,
     pub draft: bool,
     pub updated_at: String,
+    /// The issues it links, found when it is parsed: GitHub's closing references, then the
+    /// keys in its title, its branch and its body.
+    #[serde(default)]
+    pub issue_keys: IssueKeys,
 }
 
 pub trait Reviews {
@@ -117,13 +127,15 @@ pub trait Reviews {
 pub struct Gh<'a> {
     pub runner: &'a dyn Runner,
     pub host: String,
+    pub keys: &'a KeyFinder<'a>,
 }
 
 /// `--paginate` pages through it by `$endCursor` and `pageInfo`.
 const GH_QUERY: &str = "query($q: String!, $endCursor: String) { \
     search(query: $q, type: ISSUE, first: 100, after: $endCursor) { \
-    nodes { ... on PullRequest { number title url isDraft updatedAt headRefName baseRefName \
-    author { login } repository { nameWithOwner url } } } \
+    nodes { ... on PullRequest { number title body url isDraft updatedAt headRefName baseRefName \
+    author { login } repository { nameWithOwner url } \
+    closingIssuesReferences(first: 20) { nodes { number repository { nameWithOwner } } } } } \
     pageInfo { hasNextPage endCursor } } }";
 
 impl Reviews for Gh<'_> {
@@ -157,7 +169,7 @@ impl Reviews for Gh<'_> {
                 &search,
             ],
         )?;
-        parse_gh(&json, role)
+        parse_gh(&json, role, self.keys)
     }
 }
 
@@ -166,6 +178,7 @@ impl Reviews for Gh<'_> {
 pub struct Glab<'a> {
     pub runner: &'a dyn Runner,
     pub host: String,
+    pub keys: &'a KeyFinder<'a>,
 }
 
 impl Glab<'_> {
@@ -194,17 +207,32 @@ impl Reviews for Glab<'_> {
         let json = self.api(&format!(
             "/merge_requests?state=opened&scope={scope}&per_page=100"
         ))?;
-        parse_glab(&json, role)
+        parse_glab(&json, role, self.keys)
     }
 }
 
 /// Parses the pages of `gh api graphql`'s search, skipping nodes that are not pull requests.
-pub fn parse_gh(json: &str, role: Role) -> Result<Vec<Review>> {
+pub fn parse_gh(json: &str, role: Role, keys: &KeyFinder) -> Result<Vec<Review>> {
     let pages: Vec<raw::GhResponse> = serde_json::from_str(json).wrap_err("parsing gh reviews")?;
     Ok(pages
         .into_iter()
         .flat_map(|page| page.data.search.nodes)
         .filter_map(|node| {
+            let mut issue_keys: IssueKeys = (node.closing_issues_references.nodes.iter())
+                .map(|issue| {
+                    let repo = &issue.repository.name_with_owner;
+                    IssueKey::listed(format!("{repo}#{}", issue.number))
+                })
+                .collect();
+            issue_keys.extend(
+                keys.find(&[
+                    &node.title,
+                    &node.head_ref_name,
+                    node.body.as_deref().unwrap_or_default(),
+                ])
+                .iter()
+                .cloned(),
+            );
             Some(Review {
                 provider: Provider::GitHub,
                 role,
@@ -218,13 +246,15 @@ pub fn parse_gh(json: &str, role: Role) -> Result<Vec<Review>> {
                 base: node.base_ref_name,
                 draft: node.is_draft,
                 updated_at: node.updated_at,
+                issue_keys,
             })
         })
         .collect())
 }
 
-/// Parses `glab api merge_requests`.
-pub fn parse_glab(json: &str, role: Role) -> Result<Vec<Review>> {
+/// Parses `glab api merge_requests`. GitLab has no tracker, so only the keys written in a merge
+/// request's title, branch and description link it.
+pub fn parse_glab(json: &str, role: Role, keys: &KeyFinder) -> Result<Vec<Review>> {
     let raw: Vec<raw::GlabMergeRequest> =
         serde_json::from_str(json).wrap_err("parsing glab reviews")?;
     Ok(raw
@@ -241,6 +271,11 @@ pub fn parse_glab(json: &str, role: Role) -> Result<Vec<Review>> {
                     .and_then(|host| project_url.split_once(host))
                     .map_or(String::new(), |(_, path)| path.trim_matches('/').to_owned()),
             };
+            let issue_keys = keys.find(&[
+                &mr.title,
+                &mr.source_branch,
+                mr.description.as_deref().unwrap_or_default(),
+            ]);
             // The draft flag is shown on its own.
             let title = match mr.title.strip_prefix("Draft: ") {
                 Some(title) if mr.draft => title.to_owned(),
@@ -259,6 +294,7 @@ pub fn parse_glab(json: &str, role: Role) -> Result<Vec<Review>> {
                 base: mr.target_branch,
                 draft: mr.draft,
                 updated_at: mr.updated_at,
+                issue_keys,
             }
         })
         .collect())
@@ -304,6 +340,8 @@ mod raw {
     pub struct GhPull {
         pub number: Option<u64>,
         pub title: String,
+        /// `None` when it is empty.
+        pub body: Option<String>,
         pub url: String,
         pub is_draft: bool,
         pub updated_at: String,
@@ -311,6 +349,21 @@ mod raw {
         pub base_ref_name: String,
         /// `None` for a deleted account.
         pub author: Option<GhAuthor>,
+        pub repository: GhRepository,
+        pub closing_issues_references: GhClosing,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    pub struct GhClosing {
+        pub nodes: Vec<GhClosed>,
+    }
+
+    /// An issue a pull request closes when it merges.
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct GhClosed {
+        pub number: u64,
         pub repository: GhRepository,
     }
 
@@ -331,6 +384,9 @@ mod raw {
         pub iid: u64,
         #[serde(default)]
         pub title: String,
+        /// `null` when empty.
+        #[serde(default)]
+        pub description: Option<String>,
         pub web_url: String,
         #[serde(default)]
         pub draft: bool,
@@ -368,14 +424,21 @@ mod tests {
     use color_eyre::eyre::eyre;
 
     use super::*;
+    use crate::config::Config;
+    use crate::links::tests::keys;
     use crate::process::fake::Fake;
+
+    /// Finds keys with the default pattern and no tracker.
+    pub fn finder() -> KeyFinder<'static> {
+        KeyFinder::new(Box::leak(Box::new(Config::parse("").unwrap()))).unwrap()
+    }
 
     const GH: &str = include_str!("../tests/fixtures/gh-reviews.json");
     const GLAB: &str = include_str!("../tests/fixtures/glab-reviews.json");
 
     #[test]
     fn gh_search_parses_every_page_of_pull_requests_only() {
-        let reviews = parse_gh(GH, Role::Mine).unwrap();
+        let reviews = parse_gh(GH, Role::Mine, &finder()).unwrap();
         let numbers: Vec<u64> = reviews.iter().map(|review| review.number).collect();
         assert_eq!(
             numbers,
@@ -388,17 +451,17 @@ mod tests {
         assert_eq!(first.project_url, "https://github.com/remigourdon/atelier");
         assert_eq!(
             (first.branch.as_str(), first.base.as_str()),
-            ("phase-2-tui", "main")
+            ("phase-2-tui-ABC-7", "main")
         );
         assert_eq!(first.author, "remigourdon");
         assert_eq!(first.role, Role::Mine);
         assert!(!first.draft && reviews[2].draft);
-        assert!(parse_gh("{\"errors\":[]}", Role::Mine).is_err());
+        assert!(parse_gh("{\"errors\":[]}", Role::Mine, &finder()).is_err());
     }
 
     #[test]
     fn glab_merge_requests_parse_with_their_project() {
-        let reviews = parse_glab(GLAB, Role::ToReview).unwrap();
+        let reviews = parse_glab(GLAB, Role::ToReview, &finder()).unwrap();
         let first = &reviews[0];
         assert_eq!(first.provider, Provider::GitLab);
         assert_eq!(first.number, 42);
@@ -416,11 +479,50 @@ mod tests {
     }
 
     #[test]
+    fn gh_reviews_link_their_closing_references_then_the_keys_in_title_branch_and_body() {
+        let reviews = parse_gh(GH, Role::Mine, &finder()).unwrap();
+        assert_eq!(
+            reviews[0].issue_keys,
+            keys(&[
+                "remigourdon/atelier#3",
+                "remigourdon/other#5",
+                "ABC-2",
+                "ABC-7",
+                "DEF-4"
+            ]),
+            "the body's ABC-2 is linked once, from the title"
+        );
+        assert!(reviews[1].issue_keys.is_empty());
+        assert!(reviews[2].issue_keys.is_empty(), "no body, no references");
+    }
+
+    #[test]
+    fn glab_reviews_link_the_keys_in_title_branch_and_description() {
+        let reviews = parse_glab(GLAB, Role::ToReview, &finder()).unwrap();
+        assert_eq!(reviews[0].issue_keys, keys(&["ORD-3479", "ORD-3400"]));
+        assert!(reviews[1].issue_keys.is_empty());
+    }
+
+    #[test]
+    fn short_github_keys_in_a_review_resolve_against_the_tracker() {
+        let config = Config::parse(
+            "issue_key_pattern = '[a-z]+#[0-9]+'\n[tracker.github]\nrepos = [\"o/web\"]\n",
+        )
+        .unwrap();
+        let finder = KeyFinder::new(&config).unwrap();
+        let json = r#"[{"data":{"search":{"nodes":[{"number":1,"title":"Fix web#4",
+            "repository":{"nameWithOwner":"o/web","url":"https://github.com/o/web"}}]}}}]"#;
+        let reviews = parse_gh(json, Role::Mine, &finder).unwrap();
+        assert_eq!(reviews[0].issue_keys, keys(&["o/web#4"]));
+    }
+
+    #[test]
     fn gh_searches_the_host_for_my_role() {
         let fake = Fake::default().always("gh", Some(GH));
         let gh = Gh {
             runner: &fake,
             host: "github.com".into(),
+            keys: &finder(),
         };
         assert_eq!(gh.reviews(Role::ToReview).unwrap().len(), 3);
         let call = &fake.calls()[0];
@@ -436,6 +538,7 @@ mod tests {
         let glab = Glab {
             runner: &fake,
             host: "h".into(),
+            keys: &finder(),
         };
         glab.reviews(Role::ToReview).unwrap();
         glab.reviews(Role::Mine).unwrap();
@@ -468,7 +571,7 @@ mod tests {
             if self.fail {
                 return Err(eyre!("offline"));
             }
-            parse_gh(GH, role)
+            parse_gh(GH, role, &finder())
         }
     }
 

@@ -5,16 +5,15 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{Result, eyre};
-use regex::Regex;
 
 use crate::carnet::{self, Carnets};
-use crate::config::{Config, issue_keys};
+use crate::config::Config;
 #[cfg(test)]
 use crate::finish::Signal;
 use crate::finish::Step;
 use crate::git;
 use crate::hooks::Hints;
-use crate::links::{Group, IssueKey, IssueKeys, Links};
+use crate::links::{Group, IssueKey, IssueKeys, KeyFinder, Links};
 use crate::process::{Logged, Runner};
 use crate::reviews::Review;
 use crate::state::{self, ItemKind, Repo, State, Tab};
@@ -180,7 +179,7 @@ pub struct Items<'a> {
     runner: &'a dyn Runner,
     config: &'a Config,
     zellij: Zellij<'a>,
-    issue_key: Regex,
+    keys: KeyFinder<'a>,
     carnets: Carnets<'a>,
 }
 
@@ -197,7 +196,7 @@ impl<'a> Items<'a> {
             runner,
             config,
             zellij: Zellij::new(runner, config, layouts),
-            issue_key: config.issue_key_regex()?,
+            keys: KeyFinder::new(config)?,
             carnets: Carnets::new(config)?,
         })
     }
@@ -213,14 +212,11 @@ impl<'a> Items<'a> {
 
     /// Every issue key in `names`, in order, without duplicates.
     fn keys(&self, names: &[&str]) -> IssueKeys {
-        let found: Vec<String> = (names.iter())
-            .flat_map(|name| issue_keys(&self.issue_key, name))
-            .collect();
-        IssueKeys::resolve(found.iter().map(String::as_str), &self.config.tracker)
+        self.keys.find(names)
     }
 
     /// The keys a worktree on `branch` is recorded with: `extra`, then those in the branch.
-    fn seeded(&self, extra: &IssueKeys, branch: &str) -> IssueKeys {
+    pub fn seeded(&self, extra: &IssueKeys, branch: &str) -> IssueKeys {
         let mut keys = extra.clone();
         keys.extend(self.keys(&[branch]).iter().cloned());
         keys
@@ -295,15 +291,9 @@ impl<'a> Items<'a> {
         Ok(path)
     }
 
-    /// The issue keys a review's checkout links beyond its branch's: those in its branch, then
-    /// its title.
-    pub fn review_keys(&self, review: &Review) -> IssueKeys {
-        self.keys(&[&review.branch, &review.title])
-    }
-
     /// Checks out a review's branch through worktrunk (`pr:N` or `mr:N`) and focuses its tab,
     /// whether the worktree is new or was there already. A new one is in `group` and links the
-    /// review's keys.
+    /// review's keys, then those in its branch.
     pub fn checkout(
         &self,
         repo: &Path,
@@ -313,7 +303,7 @@ impl<'a> Items<'a> {
     ) -> Result<()> {
         let links = Links {
             group: group.cloned(),
-            issue_keys: self.review_keys(review),
+            issue_keys: review.issue_keys.clone(),
         };
         let target = review.provider.shortcut(review.number);
         let path = self.switch(repo, &[&target], &review.branch, workspace, &links)?;
@@ -828,6 +818,7 @@ mod tests {
             base: "main".into(),
             draft: false,
             updated_at: String::new(),
+            issue_keys: IssueKeys::default(),
         }
     }
 
@@ -1350,7 +1341,7 @@ mod tests {
         let calls = fake.calls();
         assert_eq!(
             calls[0],
-            "env ATELIER_WORKSPACE=default ATELIER_GROUP= ATELIER_ISSUE_KEYS=ABC-1 \
+            "env ATELIER_WORKSPACE=default ATELIER_GROUP= ATELIER_ISSUE_KEYS= \
              wt -C /r switch pr:12 --no-cd --yes"
         );
         assert!(
@@ -1363,7 +1354,7 @@ mod tests {
     }
 
     #[test]
-    fn checkout_links_the_keys_in_the_branch_then_the_title_in_the_group_given() {
+    fn checkout_links_the_reviews_keys_then_the_branchs_in_the_group_given() {
         let state = state();
         let fake = Fake::default()
             .always("wt -C /r --config-set", Some(LISTING))
@@ -1375,18 +1366,17 @@ mod tests {
             );
         let items = items(&state, &fake);
         let review = Review {
-            title: "DEF-4: fix it".into(),
+            issue_keys: keys(&["DEF-4"]),
             ..review(12, "ABC-1-x")
         };
-        assert_eq!(items.review_keys(&review), keys(&["ABC-1", "DEF-4"]));
         (items.checkout(Path::new("/r"), "side", &review, group("login").as_ref())).unwrap();
         assert!(
-            fake.calls()[0].contains("ATELIER_GROUP=LOGIN ATELIER_ISSUE_KEYS=ABC-1,DEF-4 "),
+            fake.calls()[0].contains("ATELIER_GROUP=LOGIN ATELIER_ISSUE_KEYS=DEF-4 "),
             "{:?}",
             fake.calls()
         );
         let item = state.require_item("/r.ABC-1-x").unwrap();
-        assert_eq!(item.links, links("LOGIN", &["ABC-1", "DEF-4"]));
+        assert_eq!(item.links, links("LOGIN", &["DEF-4", "ABC-1"]));
     }
 
     #[test]
