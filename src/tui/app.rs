@@ -268,6 +268,11 @@ pub enum Effect {
     Run(Job),
     /// Attach to a session from outside zellij, handing it the terminal.
     Attach(String),
+    /// Run the configured tool in an item's directory; a carnet's branch is read when it runs.
+    Tool {
+        path: PathBuf,
+        branch: Option<String>,
+    },
     /// Copy to the clipboard through OSC 52.
     Copy(String),
     Quit,
@@ -342,6 +347,8 @@ pub enum Action {
         then: Submit,
     },
     Copy(String),
+    /// Commands that ran outside any job, for the command log.
+    Logged(Vec<Logged>),
     Loaded {
         snapshot: Result<Snapshot, String>,
         /// Whether it was a full refresh.
@@ -407,6 +414,7 @@ pub enum Cmd {
     Pull,
     Finish,
     ToggleCarnet,
+    Tool,
     Search,
     Browse,
     CopyMenu,
@@ -490,8 +498,8 @@ pub const KEYMAP: &[Binding] = &[
     Binding { keys: &[ch('k'), code(KeyCode::Up)], label: "k/↑", cmd: Cmd::Up, help: "previous item", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('.')], label: ".", cmd: Cmd::PageDown, help: "next page", hint: NONE, on: On::Nav },
     Binding { keys: &[ch(',')], label: ",", cmd: Cmd::PageUp, help: "previous page", hint: NONE, on: On::Nav },
-    Binding { keys: &[ch('<'), code(KeyCode::Home)], label: "</Home/gg", cmd: Cmd::Top, help: "top", hint: NONE, on: On::Nav },
-    Binding { keys: &[ch('>'), code(KeyCode::End), ch('G')], label: ">/End/G", cmd: Cmd::Bottom, help: "bottom", hint: NONE, on: On::Nav },
+    Binding { keys: &[ch('<'), code(KeyCode::Home)], label: "</Home", cmd: Cmd::Top, help: "top", hint: NONE, on: On::Nav },
+    Binding { keys: &[ch('>'), code(KeyCode::End)], label: ">/End", cmd: Cmd::Bottom, help: "bottom", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('h'), code(KeyCode::Left), code(KeyCode::BackTab)], label: "h/←/S-Tab", cmd: Cmd::PrevPanel, help: "previous panel", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('l'), code(KeyCode::Right), code(KeyCode::Tab)], label: "l/→/Tab", cmd: Cmd::NextPanel, help: "next panel", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('1')], label: "1", cmd: Cmd::Jump(1), help: "Workspaces │ Repos", hint: NONE, on: On::Nav },
@@ -517,6 +525,7 @@ pub const KEYMAP: &[Binding] = &[
     Binding { keys: &[ch('d')], label: "d", cmd: Cmd::Remove, help: "remove", hint: LOCAL, on: On::Lists(LOCAL) },
     Binding { keys: &[ch('x')], label: "x", cmd: Cmd::Close, help: "close tab", hint: TABS, on: On::Lists(TABS) },
     Binding { keys: &[ch('c')], label: "c", cmd: Cmd::ToggleCarnet, help: "close or reopen carnet", hint: CARNETS, on: On::Lists(CARNETS) },
+    Binding { keys: &[ch('g')], label: "g", cmd: Cmd::Tool, help: "open tool", hint: CARNETS, on: On::Lists(CARNETS) },
     Binding { keys: &[ch('s')], label: "s", cmd: Cmd::Search, help: "search inside carnets (rg)", hint: &[Kind::Carnets], on: On::Lists(&[Kind::Carnets]) },
     Binding { keys: &[ch('p')], label: "p", cmd: Cmd::Pull, help: "pull (git pull --ff-only --prune)", hint: WORK, on: On::Lists(WORK) },
     Binding { keys: &[ch('f')], label: "f", cmd: Cmd::Finish, help: "finish merged work: remove worktrees, close carnet, pull main", hint: FINISH, on: On::Lists(FINISH) },
@@ -585,7 +594,7 @@ pub const POPUP_KEYMAP: &[PopupBinding] = &[
     PopupBinding { popup: Popup::Menu, keys: &[ch('j'), code(KeyCode::Down)], label: "j/↓", cmd: PopupCmd::Down, help: "next" },
     PopupBinding { popup: Popup::Menu, keys: &[ch('k'), code(KeyCode::Up)], label: "k/↑", cmd: PopupCmd::Up, help: "previous" },
     PopupBinding { popup: Popup::Menu, keys: &[ch('<'), code(KeyCode::Home)], label: "</Home", cmd: PopupCmd::Top, help: "top" },
-    PopupBinding { popup: Popup::Menu, keys: &[ch('>'), code(KeyCode::End), ch('G')], label: ">/End/G", cmd: PopupCmd::Bottom, help: "bottom" },
+    PopupBinding { popup: Popup::Menu, keys: &[ch('>'), code(KeyCode::End)], label: ">/End", cmd: PopupCmd::Bottom, help: "bottom" },
     PopupBinding { popup: Popup::Menu, keys: &[code(KeyCode::Enter)], label: "Enter", cmd: PopupCmd::Accept, help: "run" },
     PopupBinding { popup: Popup::Menu, keys: &[code(KeyCode::Esc), ch('q')], label: "Esc", cmd: PopupCmd::Cancel, help: "close" },
     PopupBinding { popup: Popup::Finish, keys: &[ch('j'), code(KeyCode::Down)], label: "j/↓", cmd: PopupCmd::Down, help: "next" },
@@ -690,8 +699,6 @@ pub struct Model {
     /// The spinner's frame, advanced each tick.
     pub frame: usize,
     pub modal: Option<Modal>,
-    /// The first `g` of `gg`.
-    pub pending_g: bool,
     pub size: (u16, u16),
 }
 
@@ -722,7 +729,6 @@ impl Model {
             search: None,
             frame: 0,
             modal: None,
-            pending_g: false,
             size,
         }
     }

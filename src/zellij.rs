@@ -304,6 +304,34 @@ impl<'a> Zellij<'a> {
         Ok(())
     }
 
+    /// Runs `command` in `path`: in a floating pane over this session, closed when it exits,
+    /// else on this terminal.
+    pub fn run_tool(&self, path: &Path, command: &str) -> Result<()> {
+        if self.here.is_none() {
+            let script = format!(
+                "cd {} && {command}",
+                crate::tool::quote(&path.to_string_lossy())
+            );
+            return self.runner.interactive("sh", &["-c", &script]);
+        }
+        let path = path.to_string_lossy();
+        self.runner.output(
+            "zellij",
+            &[
+                "run",
+                "--floating",
+                "--close-on-exit",
+                "--cwd",
+                &path,
+                "--",
+                "sh",
+                "-c",
+                command,
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Focuses a recorded tab, switching session first when it lives elsewhere.
     pub fn focus(&self, tab: &Tab) -> Result<()> {
         match &self.here {
@@ -637,6 +665,24 @@ mod tests {
     const PANES: &str = r#"[{"id":0,"tab_id":4,"is_plugin":true,"title":"editor"},
         {"id":7,"tab_id":4,"title":"editor","pane_cwd":"/r/a"},
         {"id":8,"tab_id":4,"title":"shell","pane_cwd":"/r/a"}]"#;
+
+    #[test]
+    fn run_tool_floats_inside_zellij_and_runs_on_the_terminal_outside() {
+        let fake = Fake::default();
+        zellij(&fake, Some("w"))
+            .run_tool(Path::new("/r/a"), "tig 'feat'")
+            .unwrap();
+        zellij(&fake, None)
+            .run_tool(Path::new("/r/a b"), "lazygit")
+            .unwrap();
+        assert_eq!(
+            fake.calls(),
+            [
+                "zellij run --floating --close-on-exit --cwd /r/a -- sh -c tig 'feat'",
+                "sh -c cd '/r/a b' && lazygit",
+            ]
+        );
+    }
 
     #[test]
     fn open_tab_creates_the_tab_in_the_owning_session_and_records_the_anchor() {

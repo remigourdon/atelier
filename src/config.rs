@@ -16,6 +16,8 @@ pub struct Config {
     pub agent_command: Option<String>,
     pub ticket_pattern: Option<String>,
     pub browser: Option<String>,
+    /// What `g` runs on an item, in its directory.
+    pub tool: Option<String>,
     pub theme: Theme,
     pub icons: Icons,
     pub zellij: Zellij,
@@ -80,6 +82,10 @@ impl Config {
 
     pub fn agent_command(&self) -> &str {
         self.agent_command.as_deref().unwrap_or("claude")
+    }
+
+    pub fn tool(&self) -> &str {
+        self.tool.as_deref().unwrap_or(crate::tool::DEFAULT)
     }
 
     pub fn anchor_pane(&self) -> &str {

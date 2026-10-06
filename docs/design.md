@@ -40,6 +40,7 @@ default_workspace = "default"   # created on first use; cannot be removed
 editor = "hx"                  # else $VISUAL, else $EDITOR, else a plain shell; never nvim by default
 agent_command = "claude"
 browser = "firefox"            # else $BROWSER
+tool = "lazygit"               # what `g` runs in an item's directory; {path} and {branch} are replaced, shell-quoted
 theme = "mocha"                # latte | frappe | macchiato | mocha
 icons = "unicode"              # unicode | nerd
 ticket_pattern = "[A-Z][A-Z0-9]{1,9}-[1-9][0-9]{0,5}"
@@ -101,6 +102,7 @@ title = "Backlog"                  # the catch-all
 
 - The built-in layouts are `session.kdl` and `worktree.kdl`. The worktree layout runs the resolved editor and `agent_command`.
 - A tab's anchor pane is found by `title == anchor_pane`. A name set in the layout survives programs setting the terminal title (verified on zellij 0.45). Custom layouts must name one pane `editor`.
+- `g` runs `tool` with `zellij run --floating --close-on-exit --cwd <path> -- sh -c <tool>`, so it needs no tab and opens none.
 - The core also owns reconcile, tab naming and elision, and cross-session focus.
 
 ## TUI
@@ -130,7 +132,7 @@ Lazygit defaults. The keymap is one table in code that also feeds `?` and the hi
 
 | Keys | Action |
 |---|---|
-| `j` `k` `↑` `↓` · `,` `.` · `<` `>` `Home` `End` `gg` `G` | item · page · top/bottom |
+| `j` `k` `↑` `↓` · `,` `.` · `<` `>` `Home` `End` | item · page · top/bottom |
 | `h` `l` `←` `→` `Tab` `S-Tab` · `1`–`4` · `0` | previous/next panel · jump · focus main view |
 | `J` `K` `C-d` `C-u` `PgUp` `PgDn` · `H` `L` | scroll the main view from any panel · horizontally |
 | `[` `]` | previous/next sub-tab |
@@ -142,6 +144,7 @@ Lazygit defaults. The keymap is one table in code that also feeds `?` and the hi
 | `p` | `git pull --ff-only --prune` on the worktree, so on a main worktree it also refreshes which branches are gone; carnets are skipped |
 | `f` | finish plan: the selection's groups in Work, a sweep in Workspaces, the linked work in Issues; `j` `k` move, `Space` toggles, `Enter` runs the checked lines, `Esc` cancels |
 | `c` · `s` | close or reopen a carnet (in the hint bar while carnets are enabled) · search inside carnets with `rg` (Carnets sub-tab) |
+| `g` | open `tool` (lazygit by default) on the worktree or carnet in Work or Carnets: a floating pane over the atelier tab inside zellij, the terminal outside; quitting returns to the same row |
 | `o` · `y` `C-o` | open in browser · copy path/branch/URL via OSC 52 |
 | `/` | substring filter on the focused panel |
 | `R` · `?` · `+` `_` · `@` | refresh · actions menu · screen mode · toggle command log |
