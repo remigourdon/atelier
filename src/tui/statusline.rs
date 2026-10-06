@@ -309,7 +309,7 @@ mod tests {
             keys: vec!["ABC-1".into()],
             ..worktree("")
         };
-        assert_eq!(text(&subject, Icons::Unicode), "api ⊘ ABC-1");
+        assert_eq!(text(&subject, Icons::Unicode), "api ⊗ ABC-1");
     }
 
     #[test]

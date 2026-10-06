@@ -92,7 +92,7 @@ impl Glyphs {
                 folded: "▸",
                 unfolded: "▾",
                 integrated: "⊂",
-                gone: "⊘",
+                gone: "⊗",
                 ci: "◆",
                 ci_error: "⚠",
                 spinner,
