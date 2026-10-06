@@ -474,7 +474,7 @@ mod tests {
     fn group_prompt_lists_its_completions() {
         let mut model = loaded(100, 30);
         model.snapshot.work[3].links.group = crate::links::Group::parse("slow pages");
-        for c in ['>', 'e', '\t'] {
+        for c in ['>', 'e', 'g', '\t'] {
             let code = match c {
                 '\t' => crossterm::event::KeyCode::Tab,
                 c => crossterm::event::KeyCode::Char(c),

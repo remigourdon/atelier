@@ -456,7 +456,6 @@ fn render_hints(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect)
             .iter()
             .filter(|binding| binding.hint.contains(&active.kind()))
             .filter(|binding| model.carnets || binding.cmd != Cmd::ToggleCarnet)
-            .filter(|binding| binding.cmd != Cmd::Link || links_selection(model, active))
         {
             if !spans.is_empty() {
                 spans.push(Span::styled(" · ", Style::new().fg(palette.dim)));
@@ -485,11 +484,6 @@ fn render_hints(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect)
             right,
         );
     }
-}
-
-/// Whether `l` has an item to edit the issue keys of: not on a group header or in an empty list.
-fn links_selection(model: &Model, list: List) -> bool {
-    lists::of(list).item(model, list).is_some()
 }
 
 /// Short help for the hint bar, keeping tab closing distinct from carnet closing.

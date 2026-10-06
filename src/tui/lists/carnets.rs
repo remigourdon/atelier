@@ -7,7 +7,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use super::{
-    ListKind, ask_issue_keys, close_tabs, group_span, group_style, issue_keys, pair, tab_detail,
+    ListKind, close_tabs, edit_links, group_span, group_style, issue_keys, pair, tab_detail,
     tab_mark,
 };
 use crate::issues::TrackerConfig;
@@ -162,9 +162,10 @@ impl ListKind for Carnets {
         model.carnet()
     }
 
-    fn link(&self, model: &mut Model, _list: List) -> Vec<Effect> {
+    /// Edits the carnet's group or issue keys.
+    fn edit(&self, model: &mut Model, _list: List) -> Vec<Effect> {
         match model.carnet().cloned() {
-            Some(work) => ask_issue_keys(model, &work),
+            Some(work) => edit_links(model, &work),
             None => Vec::new(),
         }
     }

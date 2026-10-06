@@ -726,7 +726,6 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
         }
         Cmd::New => return lists::of(list).create(model, list),
         Cmd::Edit => return lists::of(list).edit(model, list),
-        Cmd::Link => return lists::of(list).link(model, list),
         Cmd::Move => return lists::of(list).move_to(model, list),
         Cmd::Remove => return lists::of(list).remove(model, list),
         Cmd::Close | Cmd::ToggleCarnet | Cmd::Pull | Cmd::Search => {
@@ -1454,7 +1453,7 @@ pub mod tests {
     fn edit_regroups_and_renames_repos() {
         let mut model = model();
         press(&mut model, "j");
-        press(&mut model, "e");
+        press(&mut model, "eg");
         let Some(Modal::Prompt { input, .. }) = &model.modal else {
             panic!();
         };
@@ -2813,13 +2812,13 @@ pub mod tests {
     fn e_on_a_row_moves_that_item_to_a_group_or_out_of_any() {
         let mut model = spread();
         press(&mut model, "j");
-        press(&mut model, "e");
+        press(&mut model, "eg");
         assert_eq!(
             prompt(&model),
             ("Group of api:ABC-1-login".into(), "ABC-1".into())
         );
         press(&mut model, "\x1b");
-        press(&mut model, "e");
+        press(&mut model, "eg");
         press(&mut model, &"\x08".repeat("ABC-1".len()));
         assert_eq!(
             jobs(press(&mut model, " slow pages\n")),
@@ -2828,14 +2827,14 @@ pub mod tests {
                 group: Group::parse("SLOW PAGES"),
             }]
         );
-        press(&mut model, "jje");
+        press(&mut model, "jjeg");
         assert_eq!(
             prompt(&model).0,
             "Group of 2026-10-01-ABC-1-logs",
             "a carnet too"
         );
         press(&mut model, "\x1b");
-        press(&mut model, ">e");
+        press(&mut model, ">eg");
         let (_, text) = prompt(&model);
         assert_eq!(text, "", "an ungrouped item");
     }
@@ -2877,10 +2876,10 @@ pub mod tests {
             .work
             .push(work("api", "x", "slow pages", "side"));
         assert_eq!(model.group_names(), ["ABC-1", "SLOW PAGES"]);
-        press(&mut model, ">e");
+        press(&mut model, ">eg");
         press(&mut model, "s\t");
         assert_eq!(prompt(&model).1, "SLOW PAGES");
-        press(&mut model, "\x1b>e\t");
+        press(&mut model, "\x1b>eg\t");
         assert_eq!(
             prompt(&model).1,
             "ABC-1",
@@ -2890,20 +2889,21 @@ pub mod tests {
         assert_eq!(prompt(&model).1, "SLOW PAGES");
         press(&mut model, "\t");
         assert_eq!(prompt(&model).1, "ABC-1");
-        press(&mut model, "\x1b>e");
+        press(&mut model, "\x1b>eg");
         press(&mut model, "zz\t");
         assert_eq!(prompt(&model).1, "zz", "nothing to complete");
     }
 
     #[test]
-    fn l_replaces_an_items_issue_keys() {
+    fn e_on_an_item_edits_its_group_or_its_issue_keys() {
         let mut model = spread();
         model.tracker_config =
             (crate::config::Config::parse("[tracker.github]\nrepos = [\"o/api\"]"))
                 .unwrap()
                 .tracker;
-        press(&mut model, "j");
-        press(&mut model, "l");
+        press(&mut model, "je");
+        assert_eq!(menu_labels(&model), ["group", "issue keys"]);
+        press(&mut model, "i");
         assert_eq!(
             prompt(&model),
             ("Issue keys of api:ABC-1-login".into(), "ABC-1".into())
@@ -2916,11 +2916,13 @@ pub mod tests {
             }],
             "short GitHub keys resolve; order kept, duplicates dropped"
         );
-        press(&mut model, "]l");
+        press(&mut model, "eg");
+        assert_eq!(prompt(&model).0, "Group of api:ABC-1-login");
+        press(&mut model, "\x1b]ei");
         assert_eq!(
             prompt(&model).0,
             "Issue keys of 2026-10-02-ideas",
-            "a carnet"
+            "a carnet, in the Carnets list"
         );
         let effects = press(&mut model, "\n");
         assert_eq!(
@@ -2931,14 +2933,25 @@ pub mod tests {
             }],
             "an empty list unlinks every key"
         );
+        press(&mut model, "eg");
+        assert_eq!(prompt(&model).0, "Group of 2026-10-02-ideas");
     }
 
     #[test]
-    fn l_on_a_group_header_does_nothing() {
+    fn e_on_a_group_header_renames_it_at_once() {
         let mut model = spread();
-        assert!(press(&mut model, "l").is_empty());
-        assert!(model.modal.is_none());
-        assert_eq!(model.panel, Panel::Work, "nor moves to the next panel");
+        press(&mut model, "e");
+        assert!(matches!(model.modal, Some(Modal::Prompt { .. })), "no menu");
+    }
+
+    #[test]
+    fn h_and_l_move_between_panels_as_in_lazygit() {
+        let mut model = spread();
+        assert_eq!(model.panel, Panel::Work);
+        press(&mut model, "l");
+        assert_eq!(model.panel, Panel::Reviews);
+        press(&mut model, "h");
+        assert_eq!(model.panel, Panel::Work);
     }
 
     /// Answers the pending group lookup that `effects` started with `group`.

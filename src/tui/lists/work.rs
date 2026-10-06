@@ -7,8 +7,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::{
-    ListKind, ask_issue_keys, carnets, group_span, group_style, issue_keys, kind, pair, paths,
-    plan, subtle, tab_detail, tab_mark,
+    ListKind, carnets, edit_links, group_span, group_style, issue_keys, kind, pair, paths, plan,
+    subtle, tab_detail, tab_mark,
 };
 use crate::finish::{self, Scope, Signal};
 use crate::links::{Group, group_text};
@@ -451,42 +451,24 @@ impl ListKind for WorkList {
         Vec::new()
     }
 
-    /// Moves the selected item to a group, or out of any, or renames the selected group in
-    /// every workspace.
+    /// Edits the selected item's group or issue keys, or renames the selected group in every
+    /// workspace.
     fn edit(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        let (title, initial, paths) = match model.work_row() {
-            Some(Row::Item(index)) => {
-                let work = &model.snapshot.work[index];
-                let initial = group_text(work.group()).to_owned();
-                (
-                    format!("Group of {}", work.title()),
-                    initial,
-                    vec![work.path.clone()],
-                )
-            }
-            Some(Row::Group { group, .. }) => (
-                format!("Rename group {group}"),
-                group.to_string(),
-                model.group_members(&group),
-            ),
-            None => return Vec::new(),
-        };
-        let action = Action::Ask {
-            title,
-            initial,
-            then: Submit::Group(paths),
-            completions: model.group_names(),
-        };
-        update(model, action)
-    }
-
-    fn link(&self, model: &mut Model, _list: List) -> Vec<Effect> {
         match model.work_row() {
             Some(Row::Item(index)) => {
                 let work = model.snapshot.work[index].clone();
-                ask_issue_keys(model, &work)
+                edit_links(model, &work)
             }
-            _ => Vec::new(),
+            Some(Row::Group { group, .. }) => {
+                let action = Action::Ask {
+                    title: format!("Rename group {group}"),
+                    initial: group.to_string(),
+                    then: Submit::Group(model.group_members(&group)),
+                    completions: model.group_names(),
+                };
+                update(model, action)
+            }
+            None => Vec::new(),
         }
     }
 

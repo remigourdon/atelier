@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::app::{Action, Cmd, Effect, Job, Kind, List, Model, Submit, Work};
-use super::update::{run, update};
+use super::app::{Action, Cmd, Effect, Job, Kind, List, MenuEntry, Modal, Model, Submit, Work};
+use super::update::run;
 use super::view::Palette;
 use crate::finish::Scope;
 use crate::issues::TrackerConfig;
@@ -59,9 +59,6 @@ pub trait ListKind: Sync {
         Vec::new()
     }
     /// `l`: edits the selected item's issue keys.
-    fn link(&self, _model: &mut Model, _list: List) -> Vec<Effect> {
-        Vec::new()
-    }
     fn move_to(&self, _model: &mut Model, _list: List) -> Vec<Effect> {
         Vec::new()
     }
@@ -109,15 +106,35 @@ fn plan(model: &mut Model, scope: Scope) -> Vec<Effect> {
     vec![run(model, Job::Plan { scope, repos })]
 }
 
-/// Asks for an item's issue keys, comma-separated, prefilled as stored.
-fn ask_issue_keys(model: &mut Model, work: &Work) -> Vec<Effect> {
-    let action = Action::Ask {
+/// `e` on an item: a menu to move it to a group, or out of any, or to edit its issue keys,
+/// comma-separated, prefilled as stored.
+fn edit_links(model: &mut Model, work: &Work) -> Vec<Effect> {
+    let group = Action::Ask {
+        title: format!("Group of {}", work.title()),
+        initial: group_text(work.group()).to_owned(),
+        then: Submit::Group(vec![work.path.clone()]),
+        completions: model.group_names(),
+    };
+    let issue_keys = Action::Ask {
         title: format!("Issue keys of {}", work.title()),
         initial: work.links.issue_keys.join(", "),
         then: Submit::IssueKeys(work.path.clone()),
         completions: Vec::new(),
     };
-    update(model, action)
+    let entry = |key: &str, label: &str, action| MenuEntry {
+        key: key.into(),
+        label: label.into(),
+        action,
+    };
+    model.modal = Some(Modal::Menu {
+        title: format!("Edit {}", work.title()),
+        entries: vec![
+            entry("g", "group", group),
+            entry("i", "issue keys", issue_keys),
+        ],
+        selected: 0,
+    });
+    Vec::new()
 }
 
 fn paths(works: &[&Work]) -> Vec<PathBuf> {
