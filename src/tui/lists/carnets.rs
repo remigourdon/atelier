@@ -7,13 +7,14 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::{
-    ListKind, close_tabs, edit_links, group_span, group_style, issue_keys, pair, subtle,
+    ListKind, close_tabs, edit_links, group_span, group_style, issue_keys, move_menu, pair, subtle,
     tab_detail, tab_mark,
 };
+use crate::carnet::dated;
 use crate::issues::TrackerConfig;
 use crate::links::group_text;
 use crate::tui::app::{Action, Cmd, Effect, Job, Kind, List, Model, Submit, Work, WorkKind};
-use crate::tui::update::{run, update, workspace_menu};
+use crate::tui::update::{run, update};
 use crate::tui::view::{Palette, icon};
 
 pub struct Carnets;
@@ -35,12 +36,11 @@ impl Model {
                 (self.search.as_ref()).is_none_or(|search| search.hits.contains_key(&work.path))
             })
             .filter(|work| {
-                let summary = match &work.kind {
-                    WorkKind::Carnet { summary, .. } => summary.as_str(),
-                    WorkKind::Worktree { .. } => "",
-                };
                 let (group, keys) = (group_text(work.group()), work.links.issue_keys.join(" "));
-                self.matches(List::Carnets, &[&work.title(), group, &keys, summary])
+                self.matches(
+                    List::Carnets,
+                    &[&work.title(), group, &keys, work.summary()],
+                )
             })
             .collect()
     }
@@ -69,7 +69,7 @@ pub enum Standing {
 
 impl Standing {
     /// `work`'s standing, `elsewhere` when it is in a workspace other than the selected one.
-    fn of(work: &Work, elsewhere: bool) -> Self {
+    pub fn of(work: &Work, elsewhere: bool) -> Self {
         if work.closed() {
             Self::Closed
         } else if elsewhere {
@@ -79,6 +79,7 @@ impl Standing {
         }
     }
 
+    /// Its glyph's colour.
     pub fn style(self, palette: &Palette) -> Style {
         match self {
             Self::Open => Style::new().fg(palette.info),
@@ -88,35 +89,34 @@ impl Standing {
     }
 }
 
-/// A carnet's folder name, split into its date and the rest.
+/// A carnet's folder name split into its date and the rest, which a scan ensures it has.
 fn folder(work: &Work) -> (String, String) {
     let folder = work.title();
-    match folder.get(..10).zip(folder.get(11..)) {
+    match dated(&folder) {
         Some((date, name)) => (date.to_owned(), name.to_owned()),
         None => (folder.clone(), String::new()),
     }
 }
 
-/// A carnet's row after `lead`: its glyph coloured by its standing, its date, its summary (else
+/// A carnet's row after `lead`: its glyph coloured by its `standing`, its date, its summary (else
 /// its folder name after the date, as a placeholder), its group unless `grouped` says a header
 /// shows it, and its issue keys; dimmed throughout when it is closed.
 pub fn row(
     work: &Work,
     lead: Vec<Span<'static>>,
-    elsewhere: bool,
+    standing: Standing,
     grouped: bool,
     tracker: &TrackerConfig,
     palette: &Palette,
 ) -> Line<'static> {
     let dim = Style::new().fg(palette.dim);
-    let standing = Standing::of(work, elsewhere);
     let mut spans = lead;
     spans.extend(icon(palette.glyphs.carnet, standing.style(palette)));
     let (date, name) = folder(work);
     spans.push(Span::styled(date, dim));
-    spans.push(match &work.kind {
-        WorkKind::Carnet { summary, .. } if !summary.is_empty() => Span::raw(format!(" {summary}")),
-        _ => Span::styled(format!(" {name}"), dim.add_modifier(Modifier::ITALIC)),
+    spans.push(match work.summary() {
+        "" => Span::styled(format!(" {name}"), dim.add_modifier(Modifier::ITALIC)),
+        summary => Span::raw(format!(" {summary}")),
     });
     if let Some(group) = work.group().filter(|_| !grouped) {
         spans.push(Span::styled(format!(" {group}"), group_style(palette)));
@@ -126,9 +126,7 @@ pub fn row(
         spans.push(issue_keys(work, tracker, ",", palette));
     }
     if standing == Standing::Closed {
-        spans = (spans.into_iter())
-            .map(|span| span.style(Style::new().fg(palette.dim)))
-            .collect();
+        spans = spans.into_iter().map(|span| span.style(dim)).collect();
     }
     Line::from(spans)
 }
@@ -183,8 +181,9 @@ impl ListKind for Carnets {
         (model.carnet_rows().into_iter())
             .map(|work| {
                 let elsewhere = selected.is_some_and(|name| name != work.workspace);
+                let standing = Standing::of(work, elsewhere);
                 let lead = vec![tab_mark(work.tab, palette)];
-                row(work, lead, elsewhere, false, &model.tracker_config, palette)
+                row(work, lead, standing, false, &model.tracker_config, palette)
             })
             .collect()
     }
@@ -225,12 +224,9 @@ impl ListKind for Carnets {
         let Some(work) = model.carnet() else {
             return Vec::new();
         };
-        let (current, paths) = (work.workspace.clone(), vec![work.path.clone()]);
-        let title = format!("Move {} to", work.title());
-        workspace_menu(model, title, &current, |workspace| Job::Move {
-            paths: paths.clone(),
-            workspace,
-        })
+        let (title, paths) = (format!("Move {} to", work.title()), [work.path.clone()]);
+        let current = work.workspace.clone();
+        move_menu(model, title, &paths, &current)
     }
 
     /// Opens the carnet's tab; a closed carnet stays closed.
@@ -294,6 +290,7 @@ mod tests {
     use super::*;
     use crate::config::Icons;
     use crate::tui::app::Panel;
+    use crate::tui::lists::key_style;
     use crate::tui::update::tests::{model, with_carnets};
 
     fn titles(model: &Model) -> Vec<String> {
@@ -337,43 +334,57 @@ mod tests {
         };
         let (dim, info) = (Style::new().fg(palette.dim), Style::new().fg(palette.info));
         assert_eq!(
-            shown(&row(&work, Vec::new(), false, false, tracker, &palette)),
+            shown(&row(
+                &work,
+                Vec::new(),
+                Standing::Open,
+                false,
+                tracker,
+                &palette
+            )),
             [
                 ("✎ ".into(), info),
                 ("2026-10-01".into(), dim),
                 (" Login fails".into(), Style::new()),
                 (" ABC-1".into(), group_style(&palette)),
                 (" ".into(), Style::new()),
-                ("ABC-1".into(), super::super::key_style(&palette)),
+                ("ABC-1".into(), key_style(&palette)),
             ]
         );
-        let line = row(&work, Vec::new(), true, true, tracker, &palette);
-        assert_eq!(
-            line.spans[0].style,
-            Style::new().fg(palette.warn),
-            "elsewhere"
+        let standing = Standing::of(&work, true);
+        let line = row(&work, Vec::new(), standing, true, tracker, &palette);
+        assert_eq!(line.spans[0].style, standing.style(&palette));
+        assert_eq!(standing, Standing::Elsewhere);
+        assert!(
+            !line.spans.iter().any(|span| span.content == " ABC-1"),
+            "no group under its header"
         );
-        assert_eq!(line.spans.len(), 5, "no group under its header");
 
         let unsummarised = &model.snapshot.carnets[0];
-        let line = row(unsummarised, Vec::new(), false, false, tracker, &palette);
-        assert_eq!(line.spans[2].content, " ideas", "the folder name stands in");
-        assert!(line.spans[2].style.add_modifier.contains(Modifier::ITALIC));
-
-        let closed = model.snapshot.carnets.last().unwrap();
         let line = row(
-            closed,
-            vec![tab_mark(false, &palette)],
-            true,
+            unsummarised,
+            Vec::new(),
+            Standing::Open,
             false,
             tracker,
             &palette,
         );
+        let name = (line.spans.iter()).find(|span| span.content == " ideas");
+        assert!(
+            name.is_some_and(|span| span.style.add_modifier.contains(Modifier::ITALIC)),
+            "the folder name stands in"
+        );
+
+        let closed = model.snapshot.carnets.last().unwrap();
+        let standing = Standing::of(closed, true);
+        assert_eq!(standing, Standing::Closed, "closed wins over elsewhere");
+        let lead = vec![tab_mark(false, &palette)];
+        let line = row(closed, lead, standing, false, tracker, &palette);
         assert!(
             line.spans
                 .iter()
                 .all(|span| span.style.fg == Some(palette.dim)),
-            "closed wins over elsewhere, the row dimmed"
+            "the row dimmed"
         );
     }
 }

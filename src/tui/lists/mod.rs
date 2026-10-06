@@ -19,7 +19,7 @@ use ratatui::text::{Line, Span};
 use super::app::{
     Action, Cmd, Effect, Job, Kind, List, MenuEntry, Modal, Model, Submit, Work, WorkKind,
 };
-use super::update::run;
+use super::update::{run, workspace_menu};
 use super::view::Palette;
 use crate::finish::Scope;
 use crate::issues::TrackerConfig;
@@ -142,6 +142,15 @@ fn edit_links(model: &mut Model, work: &Work) -> Vec<Effect> {
     }
     model.modal = Some(Modal::menu(format!("Edit {}", work.title()), entries));
     Vec::new()
+}
+
+/// `m` on items: a menu, titled `title`, of the other workspaces to move `paths` to, from
+/// `current`.
+fn move_menu(model: &mut Model, title: String, paths: &[PathBuf], current: &str) -> Vec<Effect> {
+    workspace_menu(model, title, current, |workspace| Job::Move {
+        paths: paths.to_vec(),
+        workspace,
+    })
 }
 
 fn paths(works: &[&Work]) -> Vec<PathBuf> {

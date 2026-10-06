@@ -18,6 +18,7 @@ use super::app::{
 use super::lists;
 use super::view::{Glyphs, Legend, areas, main_len, offset};
 use super::widgets;
+use crate::carnet::slug;
 use crate::finish::Plan;
 use crate::links::{Group, IssueKeys, Links, group_text};
 use crate::process::Logged;
@@ -583,13 +584,7 @@ fn submit(model: &mut Model, then: Submit, value: &str) -> Vec<Effect> {
         _ if value.is_empty()
             && matches!(
                 then,
-                Submit::Branch { .. }
-                    | Submit::Start { .. }
-                    | Submit::Carnet {
-                        step: DraftStep::Name,
-                        ..
-                    }
-                    | Submit::Workspace
+                Submit::Branch { .. } | Submit::Start { .. } | Submit::Workspace
             ) =>
         {
             return Vec::new();
@@ -893,26 +888,29 @@ fn screen(model: &Model) -> Rect {
 /// Takes `value` as a new carnet's `step`, then asks the next one, or makes the carnet once
 /// its issue keys are in.
 fn draft_carnet(model: &mut Model, mut draft: Draft, step: DraftStep, value: &str) -> Vec<Effect> {
-    let (title, initial, next) = match step {
+    let (title, initial, groups, next) = match step {
         DraftStep::Summary => {
             draft.summary = value.into();
             // The summary's first words name the folder unless edited.
-            let words: Vec<&str> = value.split_whitespace().take(5).collect();
-            let name = crate::carnet::slug(&words.join(" "));
-            ("New carnet: folder name", name, DraftStep::Name)
+            let name = slug(value).split('-').take(5).collect::<Vec<_>>().join("-");
+            ("New carnet: folder name", name, Vec::new(), DraftStep::Name)
         }
+        // A name without a letter or a digit has no folder name: asked again, as typed.
+        DraftStep::Name if slug(value).is_empty() => (
+            "New carnet: folder name, with a letter or a digit",
+            value.to_owned(),
+            Vec::new(),
+            DraftStep::Name,
+        ),
         DraftStep::Name => {
             draft.name = value.into();
             let group = group_text(draft.group.as_ref()).to_owned();
-            ("New carnet: group", group, DraftStep::Group)
+            ("New carnet: group", group, model.groups(), DraftStep::Group)
         }
         DraftStep::Group => {
             draft.group = Group::parse(value);
-            (
-                "New carnet: issue keys",
-                String::new(),
-                DraftStep::IssueKeys,
-            )
+            let next = DraftStep::IssueKeys;
+            ("New carnet: issue keys", String::new(), Vec::new(), next)
         }
         DraftStep::IssueKeys => {
             let links = Links {
@@ -928,11 +926,6 @@ fn draft_carnet(model: &mut Model, mut draft: Draft, step: DraftStep, value: &st
             return vec![run(model, job)];
         }
     };
-    let groups = if next == DraftStep::Group {
-        model.groups()
-    } else {
-        Vec::new()
-    };
     let then = Submit::Carnet { draft, step: next };
     let action = Action::Ask {
         title: title.into(),
@@ -943,6 +936,8 @@ fn draft_carnet(model: &mut Model, mut draft: Draft, step: DraftStep, value: &st
     update(model, action)
 }
 
+/// A menu, titled `title`, of the workspaces other than `current`, each running `job` with its
+/// name; a note when there is no other.
 pub(super) fn workspace_menu(
     model: &mut Model,
     title: String,
@@ -1723,6 +1718,16 @@ pub mod tests {
         assert_eq!(model.filter(List::Work), "form");
         press(&mut model, "\x1b");
         assert_eq!(titles(&model).len(), 4);
+    }
+
+    #[test]
+    fn the_work_filter_matches_a_carnets_summary() {
+        let mut model = with_carnets(model());
+        if let WorkKind::Carnet { summary, .. } = &mut model.snapshot.work[4].kind {
+            *summary = "Token refresh".into();
+        }
+        press(&mut model, "/token");
+        assert_eq!(titles(&model), ["[ABC-1]", "2026-10-01-ABC-1-logs"]);
     }
 
     #[test]
@@ -2972,17 +2977,25 @@ pub mod tests {
             ("New carnet: folder name".into(), String::new()),
             "no summary, no name to suggest"
         );
-        assert!(jobs(press(&mut model, "\n")).is_empty(), "no name");
-        assert!(model.modal.is_none());
+        assert!(jobs(press(&mut model, "-/\n")).is_empty(), "no name");
+        assert_eq!(
+            prompt(&model),
+            (
+                "New carnet: folder name, with a letter or a digit".into(),
+                "-/".into()
+            ),
+            "asked again, as typed"
+        );
+        press(&mut model, "\x1b");
         press(&mut model, "nc");
-        press(&mut model, "Login fails after the token refresh, again\n");
+        press(&mut model, "Login fails: after token-refresh, again\n");
         assert_eq!(
             prompt(&model),
             (
                 "New carnet: folder name".into(),
-                "login-fails-after-the-token".into()
+                "login-fails-after-token-refresh".into()
             ),
-            "the summary's first five words"
+            "the summary's first five words, punctuation dropped"
         );
         press(&mut model, "\n");
         assert_eq!(
@@ -2998,10 +3011,10 @@ pub mod tests {
         assert_eq!(
             jobs(press(&mut model, "ABC-1, DEF-2\n")),
             [Job::NewCarnet {
-                name: "login-fails-after-the-token".into(),
+                name: "login-fails-after-token-refresh".into(),
                 workspace: "default".into(),
                 links: crate::links::tests::links("ABC-1", &["ABC-1", "DEF-2"]),
-                summary: "Login fails after the token refresh, again".into(),
+                summary: "Login fails: after token-refresh, again".into(),
             }]
         );
         press(&mut model, "nc");

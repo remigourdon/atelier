@@ -342,9 +342,13 @@ pub enum Effect {
 /// A new carnet, made one prompt at a time.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Draft {
+    /// Where it is made: the selected workspace.
     pub workspace: String,
+    /// Its one-line summary, empty for none.
     pub summary: String,
+    /// Its folder name, after the date, as typed.
     pub name: String,
+    /// Its group, the selection's until the group prompt says otherwise.
     pub group: Option<Group>,
 }
 

@@ -8,8 +8,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::{
-    ListKind, carnets, edit_links, group_span, group_style, issue_keys, kind, pair, paths, plan,
-    subtle, tab_detail, tab_mark,
+    ListKind, carnets, edit_links, group_span, group_style, issue_keys, kind, move_menu, pair,
+    paths, plan, subtle, tab_detail, tab_mark,
 };
 use crate::finish::{self, Scope, Signal};
 use crate::links::{Group, group_text};
@@ -17,7 +17,7 @@ use crate::tui::app::{
     Action, Cmd, Draft, DraftStep, Effect, Job, Kind, List, MenuEntry, Modal, Model, Removal,
     Submit, Work, WorkKind,
 };
-use crate::tui::update::{confirm, note, run, update, workspace_menu};
+use crate::tui::update::{confirm, note, run, update};
 use crate::tui::view::{Palette, icon};
 use crate::worktrunk::{Ci, CiReview, CiState, Decision, Forge, Worktree};
 
@@ -88,6 +88,7 @@ impl Model {
                             &work.title(),
                             group_text(work.group()),
                             &work.path.to_string_lossy(),
+                            work.summary(),
                         ],
                     )
             })
@@ -231,7 +232,8 @@ impl ListKind for WorkList {
                     let mut spans = vec![Span::raw(indent), marker];
                     if work.is_carnet() {
                         let tracker = &model.tracker_config;
-                        return carnets::row(work, spans, false, true, tracker, palette);
+                        let standing = carnets::Standing::of(work, false);
+                        return carnets::row(work, spans, standing, true, tracker, palette);
                     }
                     spans.extend(icon(glyphs.worktree, dim));
                     spans.push(Span::raw(work.title()));
@@ -483,15 +485,8 @@ impl ListKind for WorkList {
         };
         let current = first.workspace.clone();
         let paths = paths(&targets);
-        workspace_menu(
-            model,
-            format!("Move {} item(s) to", paths.len()),
-            &current,
-            |workspace| Job::Move {
-                paths: paths.clone(),
-                workspace,
-            },
-        )
+        let title = format!("Move {} item(s) to", paths.len());
+        move_menu(model, title, &paths, &current)
     }
 
     fn remove(&self, model: &mut Model, _list: List) -> Vec<Effect> {

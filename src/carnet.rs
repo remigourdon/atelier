@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::SystemTime;
 
 use color_eyre::eyre::{Result, WrapErr, bail, eyre};
@@ -20,24 +21,21 @@ use crate::state::{ItemKind, State, dir_name};
 /// The line that opens and closes a README's front matter.
 const FENCE: &str = "+++";
 
-/// How a carnet's folder is named: by its date, then its slug.
-#[derive(Debug, Clone)]
-struct Names {
-    dated: Regex,
+/// A carnet's folder name: its date, then its slug.
+static DATED: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(\d{4}-\d{2}-\d{2})-(.+)$").unwrap());
+
+/// A carnet's folder name split into its date, `YYYY-MM-DD`, and the rest; `None` when it is
+/// not dated.
+pub fn dated(folder: &str) -> Option<(&str, &str)> {
+    let captures = DATED.captures(folder)?;
+    Some((captures.get(1)?.as_str(), captures.get(2)?.as_str()))
 }
 
-impl Names {
-    fn new() -> Result<Self> {
-        Ok(Self {
-            dated: Regex::new(r"^(\d{4}-\d{2}-\d{2})-(.+)$")?,
-        })
-    }
-}
-
-/// The folder name, after the date, of a carnet named `name`: its words lowercased, joined by
-/// `-`.
+/// The folder name, after the date, of a carnet named `name`: its letters and digits,
+/// lowercased, each run joined by `-`.
 pub fn slug(name: &str) -> String {
-    (name.split(|c: char| c.is_whitespace() || c == '_' || c == '-'))
+    (name.split(|c: char| !c.is_alphanumeric()))
         .filter(|word| !word.is_empty())
         .map(str::to_lowercase)
         .collect::<Vec<_>>()
@@ -101,7 +99,7 @@ fn read_front(readme: &Path) -> String {
 
 /// Every carnet directly under `root`: a directory named `YYYY-MM-DD-…` with a `.git`, newest
 /// first, its front matter normalised. A missing root holds none.
-fn scan(root: &Path, names: &Names, tracker: &TrackerConfig) -> Result<Vec<Carnet>> {
+fn scan(root: &Path, tracker: &TrackerConfig) -> Result<Vec<Carnet>> {
     let Ok(root) = root.canonicalize() else {
         return Ok(Vec::new());
     };
@@ -109,7 +107,7 @@ fn scan(root: &Path, names: &Names, tracker: &TrackerConfig) -> Result<Vec<Carne
     for entry in std::fs::read_dir(&root).wrap_err_with(|| format!("{}", root.display()))? {
         let path = entry?.path();
         let folder = dir_name(&path);
-        let Some(captures) = names.dated.captures(&folder) else {
+        let Some((date, name)) = dated(&folder) else {
             continue;
         };
         if !path.is_dir() || !path.join(".git").exists() {
@@ -123,8 +121,8 @@ fn scan(root: &Path, names: &Names, tracker: &TrackerConfig) -> Result<Vec<Carne
             },
             closed: front.closed(),
             summary: front.summary(),
-            date: captures[1].to_owned(),
-            name: captures[2].to_owned(),
+            date: date.to_owned(),
+            name: name.to_owned(),
             readme: Stamp::of(&path),
             path,
         });
@@ -288,7 +286,6 @@ fn commit(runner: &dyn Runner, path: &Path, message: &str) -> Result<()> {
 pub struct Carnets<'a> {
     /// `None` while carnets are disabled.
     root: Option<PathBuf>,
-    names: Names,
     tracker: &'a TrackerConfig,
 }
 
@@ -296,7 +293,6 @@ impl<'a> Carnets<'a> {
     pub fn new(config: &'a Config) -> Result<Self> {
         Ok(Self {
             root: config.carnet_root(),
-            names: Names::new()?,
             tracker: &config.tracker,
         })
     }
@@ -310,7 +306,7 @@ impl<'a> Carnets<'a> {
     /// Every carnet, newest first; none while carnets are disabled.
     pub fn scan(&self) -> Result<Vec<Carnet>> {
         match &self.root {
-            Some(root) => scan(root, &self.names, self.tracker),
+            Some(root) => scan(root, self.tracker),
             None => Ok(Vec::new()),
         }
     }
@@ -396,13 +392,9 @@ impl<'a> Carnets<'a> {
         summary: &str,
     ) -> Result<Carnet> {
         let root = self.root()?;
-        let name = name.trim();
-        if name.contains('/') {
-            bail!("a carnet name must not contain /");
-        }
         let slug = slug(name);
         if slug.is_empty() {
-            bail!("a carnet name must not be empty");
+            bail!("a carnet name needs a letter or a digit");
         }
         state.require_workspace(workspace)?;
         let date = state.today()?;
@@ -682,9 +674,13 @@ pub mod tests {
         let root = tempfile::tempdir().unwrap();
         let fake = Fake::default();
         let named = |name: &str| make(&state, &fake, root.path(), name, "w", "");
-        assert!(named("  ").unwrap_err().to_string().contains("empty"));
-        assert!(named(" _ - ").unwrap_err().to_string().contains("empty"));
-        assert!(named("a/b").unwrap_err().to_string().contains("/"));
+        assert!(named("  ").unwrap_err().to_string().contains("letter"));
+        assert!(named(" _ -/: ").unwrap_err().to_string().contains("letter"));
+        let path = named("Fix: a/b, again").unwrap();
+        assert!(
+            dir_name(&path).ends_with("-fix-a-b-again"),
+            "punctuation dropped"
+        );
         named("notes").unwrap();
         assert!(named("notes").unwrap_err().to_string().contains("exists"));
         assert!(

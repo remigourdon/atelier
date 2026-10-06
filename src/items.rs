@@ -77,6 +77,14 @@ impl Work {
         matches!(self.kind, WorkKind::Carnet { closed: true, .. })
     }
 
+    /// A carnet's one-line summary; empty for a worktree.
+    pub fn summary(&self) -> &str {
+        match &self.kind {
+            WorkKind::Carnet { summary, .. } => summary,
+            WorkKind::Worktree { .. } => "",
+        }
+    }
+
     pub fn group(&self) -> Option<&Group> {
         self.links.group.as_ref()
     }
