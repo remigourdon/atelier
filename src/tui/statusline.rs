@@ -131,7 +131,8 @@ fn cells(tree: &Worktree, forge: Option<&Forge>, palette: &Palette) -> Vec<Span<
     cells
 }
 
-/// Spans as raw ANSI: truecolour foregrounds, bold and dim, reset after each styled span.
+/// Spans as raw ANSI: truecolour foregrounds, bold and dim, each undone after its span. Only
+/// what was set is undone, never a full reset, so a background the bar paints behind survives.
 pub fn ansi(spans: &[Span]) -> String {
     let mut out = String::new();
     for span in spans {
@@ -148,7 +149,7 @@ pub fn ansi(spans: &[Span]) -> String {
         if codes.is_empty() {
             out.push_str(&span.content);
         } else {
-            let _ = write!(out, "\x1b[{}m{}\x1b[0m", codes.join(";"), span.content);
+            let _ = write!(out, "\x1b[{}m{}\x1b[22;39m", codes.join(";"), span.content);
         }
     }
     out
@@ -214,10 +215,14 @@ mod tests {
         let blue = PALETTE.mocha.colors.blue.rgb;
         assert!(
             line.contains(&format!(
-                "\x1b[38;2;{};{};{}m◆\x1b[0m",
+                "\x1b[38;2;{};{};{}m◆\x1b[22;39m",
                 blue.r, blue.g, blue.b
             )),
             "running CI in the Work row's colour: {line:?}"
+        );
+        assert!(
+            !line.contains("\x1b[0m"),
+            "a full reset clears the bar's background"
         );
     }
 
