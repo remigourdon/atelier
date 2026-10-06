@@ -176,7 +176,7 @@ pub fn run() -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&context)?);
             } else {
-                print!("{}", context::render(&context));
+                print!("{}", context::render(&context, &config.tracker));
             }
             Ok(())
         }

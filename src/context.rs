@@ -12,7 +12,7 @@ use crate::carnet::{self, Carnet, Names};
 use crate::config::Config;
 use crate::finish::{self, Signal};
 use crate::git;
-use crate::issues::{self, Issue};
+use crate::issues::{self, Issue, TrackerConfig};
 use crate::items::canonical;
 use crate::process::Runner;
 use crate::state::{Item, ItemKind, State, dir_name};
@@ -485,8 +485,8 @@ fn carnet_infos(records: &Records, carnets: &[&Carnet]) -> Vec<CarnetInfo> {
         .collect()
 }
 
-/// The context as lines for a person to read.
-pub fn render(context: &Context) -> String {
+/// The context as lines for a person to read, issue keys shown short.
+pub fn render(context: &Context, tracker: &TrackerConfig) -> String {
     let mut out = String::new();
     let mut line = |label: &str, text: String| {
         let _ = writeln!(out, "{label:<10} {text}");
@@ -520,14 +520,22 @@ pub fn render(context: &Context) -> String {
         line("group", group.clone());
     }
     if !context.issue_keys.is_empty() {
-        line("issues", context.issue_keys.join(", "));
+        let keys: Vec<String> = (context.issue_keys.iter())
+            .map(|key| tracker.display_key(key))
+            .collect();
+        line("issues", keys.join(", "));
     }
     if let Some(cached) = &context.issue {
         let issue = &cached.issue;
         let url = (issue.url.as_ref()).map_or(String::new(), |url| format!("  {url}"));
         line(
             "issue",
-            format!("{}  {}  [{}]{url}", issue.key, issue.title, issue.status),
+            format!(
+                "{}  {}  [{}]{url}",
+                tracker.display_key(&issue.key),
+                issue.title,
+                issue.status
+            ),
         );
     }
     if !context.worktrees.is_empty() {
@@ -781,7 +789,7 @@ mod tests {
         );
         assert_eq!(json["worktrees"][0]["status"]["finished"], "upstream_gone");
 
-        let text = render(&context);
+        let text = render(&context, &setup.config.tracker);
         assert!(
             text.starts_with(&format!(
                 "item       {} (worktree on ABC-1-fix)\nworkspace  w (current session, tab in w)\n\
@@ -898,7 +906,21 @@ mod tests {
                 "worktrees": [], "carnets": [], "carnet": null,
             })
         );
-        assert_eq!(render(&context), "item       not in an atelier item\n");
+        let tracker = &setup.config.tracker;
+        assert_eq!(
+            render(&context, tracker),
+            "item       not in an atelier item\n"
+        );
+        let mut keyed = describe(
+            &setup.state,
+            &setup.config,
+            &fake,
+            None,
+            Target::Key("o/api#3"),
+        );
+        let keyed = keyed.as_mut().unwrap();
+        assert_eq!(keyed.issue_keys, ["o/api#3"]);
+        assert_eq!(render(keyed, tracker), "issues     api#3\n", "shown short");
 
         let plain = setup.dir.path().join("a.plain");
         let context = describe(

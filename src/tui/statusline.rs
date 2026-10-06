@@ -23,7 +23,7 @@ use crate::worktrunk::{Forge, Statusline, Worktree};
 #[derive(Debug, Default)]
 pub struct Subject {
     /// The first issue key, as shown; empty for none.
-    pub key: String,
+    pub label: String,
     /// The cached issue title, or a carnet's summary: last, so the first cut when space is short.
     pub title: String,
     /// A repo's main worktree, named so instead of a key.
@@ -46,7 +46,7 @@ pub fn line(state: &State, config: &Config, runner: &dyn Runner, dir: &Path) -> 
         ItemKind::Carnet => Subject {
             title: (located.carnet.as_ref()).map_or(String::new(), |carnet| carnet.summary.clone()),
             closed: located.carnet.is_some_and(|carnet| carnet.closed),
-            key,
+            label: key,
             ..Subject::default()
         },
         ItemKind::Worktree => {
@@ -60,7 +60,7 @@ pub fn line(state: &State, config: &Config, runner: &dyn Runner, dir: &Path) -> 
             Subject {
                 main: tree.as_ref().is_some_and(|statusline| statusline.tree.main),
                 title: title.unwrap_or_default(),
-                key,
+                label: key,
                 tree,
                 ..Subject::default()
             }
@@ -82,9 +82,9 @@ pub fn spans(subject: &Subject, palette: &Palette) -> Vec<Span<'static>> {
             glyph
         };
         parts.push(Span::styled(name, Style::new().fg(palette.accent).bold()));
-    } else if !subject.key.is_empty() {
+    } else if !subject.label.is_empty() {
         parts.push(Span::styled(
-            subject.key.clone(),
+            subject.label.clone(),
             Style::new().fg(palette.accent).bold(),
         ));
     }
@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn a_worktree_shows_its_key_then_cells_then_title() {
         let subject = Subject {
-            key: "ABC-1".into(),
+            label: "ABC-1".into(),
             title: "Fix the login".into(),
             tree: Some(recorded()),
             ..Subject::default()
@@ -254,7 +254,7 @@ mod tests {
         tree.upstream = None;
         tree.gone = true;
         let subject = Subject {
-            key: "ABC-1".into(),
+            label: "ABC-1".into(),
             tree: Some(Statusline { tree, forge: None }),
             ..Subject::default()
         };
@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn a_carnet_shows_its_key_whether_closed_then_summary() {
         let subject = Subject {
-            key: "ABC-1".into(),
+            label: "ABC-1".into(),
             title: "Notes".into(),
             closed: true,
             ..Subject::default()
