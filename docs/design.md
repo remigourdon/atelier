@@ -53,7 +53,7 @@ root = "~/Data"
 session_layout = "…"
 worktree_layout = "…"
 anchor_pane = "editor"
-zjstatus = "~/.config/zellij/plugins/zjstatus.wasm"  # when it exists, the built-in layouts add the statusline row
+zjstatus = "…"                 # default $XDG_CONFIG_HOME/zellij/plugins/zjstatus.wasm; when it exists, the built-in layouts add the statusline row
 
 [tracker.github]               # and/or [tracker.jira] with `jql` and `url` (fallback $ATLASSIAN_URL / $JIRA_URL)
 repos = ["owner/name"]

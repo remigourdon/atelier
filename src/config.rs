@@ -95,9 +95,10 @@ impl Config {
 
     /// Where the zjstatus plugin is looked for: the built-in layouts add its row when it exists.
     pub fn zjstatus(&self) -> PathBuf {
-        expand(
-            (self.zellij.zjstatus.as_deref()).unwrap_or("~/.config/zellij/plugins/zjstatus.wasm"),
-        )
+        match &self.zellij.zjstatus {
+            Some(path) => expand(path),
+            None => config_home().join("zellij/plugins/zjstatus.wasm"),
+        }
     }
 
     /// Where carnets live, or `None` when they are disabled.
