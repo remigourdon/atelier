@@ -386,18 +386,28 @@ pub struct Statusline {
 }
 
 /// Switches `repo` to `target` (`[--create] <branch>`, or `pr:N`), creating the worktree when
-/// needed, and tells atelier's hooks the workspace and group it goes to.
+/// needed, and tells atelier's hooks the workspace it goes to, its group and its issue keys.
 pub fn switch(
     runner: &dyn Runner,
     repo: &Path,
     target: &[&str],
     workspace: &str,
     group: &str,
+    keys: &[String],
 ) -> Result<()> {
     let repo = repo.to_string_lossy();
     let workspace = format!("{}={workspace}", hooks::WORKSPACE_VAR);
     let group = format!("{}={group}", hooks::GROUP_VAR);
-    let mut args = vec![workspace.as_str(), &group, "wt", "-C", &repo, "switch"];
+    let keys = format!("{}={}", hooks::ISSUE_KEYS_VAR, keys.join(","));
+    let mut args = vec![
+        workspace.as_str(),
+        &group,
+        &keys,
+        "wt",
+        "-C",
+        &repo,
+        "switch",
+    ];
     args.extend(target);
     args.extend(["--no-cd", "--yes"]);
     runner.output("env", &args).map(drop)

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, carnets, kind, pair, paths, plan, subtle, tab_detail, tab_mark};
+use super::{ListKind, carnets, issue_keys, kind, pair, paths, plan, subtle, tab_detail, tab_mark};
 use crate::finish::{self, Scope, Signal};
 use crate::tui::app::{
     Action, Cmd, Effect, Job, Kind, List, MenuEntry, Modal, Model, Removal, Submit, Work, WorkKind,
@@ -282,7 +282,9 @@ impl ListKind for WorkList {
                         repo_name,
                         tree,
                     } => (repo, repo_name, tree),
-                    WorkKind::Carnet { .. } => return carnets::detail(work, palette),
+                    WorkKind::Carnet { .. } => {
+                        return carnets::detail(work, &model.tracker_config, palette);
+                    }
                 };
                 let status_text = if tree.dirty {
                     format!("dirty +{} -{}", tree.diff.0, tree.diff.1)
@@ -314,6 +316,10 @@ impl ListKind for WorkList {
                     pair("Path", tree.path.display().to_string()),
                     pair("Workspace", work.workspace.clone()),
                     pair("Group", work.group.clone()),
+                    pair(
+                        "Issue keys",
+                        issue_keys(work, &model.tracker_config, ", ", palette),
+                    ),
                     pair("Tab", tab_detail(work.tab, palette)),
                     pair("Status", status),
                     pair("Upstream", upstream),

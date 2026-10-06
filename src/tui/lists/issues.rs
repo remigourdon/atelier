@@ -45,14 +45,18 @@ impl Model {
         self.issues(list).get(self.index(list)).copied()
     }
 
-    /// An issue's linked work: the worktrees in its group and the carnets, closed ones too,
-    /// that list its key among their tickets.
+    /// An issue's linked work: the worktrees and the carnets, closed ones too, that link its
+    /// key, in any group.
     pub fn issue_work(&self, issue: &Issue) -> Vec<&Work> {
         let worktrees =
-            (self.snapshot.work.iter()).filter(|work| !work.is_carnet() && work.group == issue.key);
-        let carnets =
-            (self.snapshot.carnets.iter()).filter(|carnet| carnet.tickets().contains(&issue.key));
+            (self.snapshot.work.iter()).filter(|work| !work.is_carnet() && work.links(&issue.key));
+        let carnets = (self.snapshot.carnets.iter()).filter(|carnet| carnet.links(&issue.key));
         worktrees.chain(carnets).collect()
+    }
+
+    /// An issue's key as shown.
+    pub fn issue_label(&self, issue: &Issue) -> String {
+        self.tracker_config.display_key(&issue.key)
     }
 }
 
@@ -69,6 +73,7 @@ fn ask_start(model: &mut Model, issue: Issue) -> Vec<Effect> {
         })
     };
     let own = (issue.project_url.as_deref()).and_then(|url| model.project_repo(url));
+    let label = model.issue_label(&issue);
     let mut repos: Vec<&Repo> = model.snapshot.repos.iter().collect();
     repos.sort_by_key(|repo| {
         let suggested = (linked.iter()).any(|work| work.repo() == Some(&repo.path));
@@ -80,7 +85,7 @@ fn ask_start(model: &mut Model, issue: Issue) -> Vec<Effect> {
             key: (index + 1).to_string(),
             label: repo.name(),
             action: Action::Ask {
-                title: format!("New worktree of {} for {}: branch", repo.name(), issue.key),
+                title: format!("New worktree of {} for {label}: branch", repo.name()),
                 initial: issue.branch(),
                 then: Submit::Start {
                     repo: repo.path.clone(),
@@ -97,7 +102,7 @@ fn ask_start(model: &mut Model, issue: Issue) -> Vec<Effect> {
         );
     }
     model.modal = Some(Modal::Menu {
-        title: format!("New worktree for {} in", issue.key),
+        title: format!("New worktree for {label} in"),
         entries,
         selected: 0,
     });
@@ -155,7 +160,7 @@ impl ListKind for Issues {
                 };
                 let mut spans = vec![marker];
                 spans.extend(icon(glyphs.issue, dim));
-                spans.push(Span::styled(format!("{} ", issue.key), dim));
+                spans.push(Span::styled(format!("{} ", model.issue_label(issue)), dim));
                 if issue.state != State::Todo {
                     let label = format!("{} ", issue.state.label().to_lowercase());
                     spans.push(Span::styled(label, state_style(issue.state, palette)));
@@ -182,7 +187,7 @@ impl ListKind for Issues {
             return Vec::new();
         };
         let mut pairs = vec![
-            pair("Issue", issue.key.clone()),
+            pair("Issue", model.issue_label(issue)),
             pair("Title", issue.title.clone()),
             pair(
                 "State",
@@ -274,14 +279,14 @@ impl ListKind for Issues {
         }
     }
 
-    /// The issue's linked work: the worktrees in its group and the carnets whose first ticket
-    /// it is.
+    /// The whole groups of the issue's linked work, and its linked items in no group alone.
     fn finish(&self, model: &mut Model, _list: List) -> Vec<Effect> {
         let Some(issue) = model.issue() else {
             return Vec::new();
         };
         let scope = Scope::Issue {
             key: issue.key.clone(),
+            label: model.issue_label(issue),
             state: issue.state.label().to_lowercase(),
         };
         plan(model, scope)

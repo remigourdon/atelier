@@ -64,13 +64,14 @@ enum Command {
         #[arg(add = ArgValueCandidates::new(complete_workspaces))]
         workspace: String,
     },
-    /// Describe a directory's worktree or carnet: its workspace, its group's issue, worktrees
-    /// and carnets. Reads atelier's records, the issue cache and `wt list`; changes nothing.
+    /// Describe a directory's worktree or carnet: its workspace, group, issue keys and first
+    /// issue, its group's worktrees and carnets. Reads atelier's records, the issue cache and
+    /// `wt list`; changes nothing.
     Context {
         /// A directory inside the item to describe.
         #[arg(default_value = ".", conflicts_with = "key")]
         path: PathBuf,
-        /// Describe a ticket key's issue, worktrees and carnets instead.
+        /// Describe an issue key's issue, worktrees and carnets instead.
         #[arg(short, long)]
         key: Option<String>,
         /// Print JSON, for scripts and coding agents.
@@ -78,7 +79,8 @@ enum Command {
         json: bool,
     },
     /// Print one ANSI line for zjstatus about the worktree or carnet holding the current
-    /// directory: its ticket, issue title and worktrunk's cells. Empty outside one.
+    /// directory: its first issue key, that issue's title and worktrunk's cells. Empty outside
+    /// one.
     Statusline,
     /// Manage carnets, the investigation folders under `[carnets] root`.
     #[command(subcommand)]
@@ -118,7 +120,7 @@ enum Carnet {
         #[arg(short, long, add = ArgValueCandidates::new(complete_workspaces))]
         workspace: Option<String>,
     },
-    /// List open carnets, newest first: folder, tickets and summary.
+    /// List open carnets, newest first: folder, group, issue keys and summary.
     Ls {
         /// Include closed carnets.
         #[arg(long)]
@@ -273,7 +275,7 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
         }
         Command::Carnet(command) => {
             let root = config.require_carnet_root()?;
-            let names = crate::carnet::Names::new(config.ticket_pattern())?;
+            let names = crate::carnet::Names::new(config.issue_key_pattern())?;
             match command {
                 Carnet::New { name, workspace } => {
                     let items = items(state, config)?;
@@ -288,12 +290,16 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
                     println!("created {} in {workspace}", path.display());
                 }
                 Carnet::Ls { closed } => {
-                    for carnet in crate::carnet::scan(&root, &names)? {
+                    for carnet in crate::carnet::scan(&root, &names, &config.tracker)? {
                         if closed || !carnet.closed {
+                            let keys: Vec<String> = (carnet.issue_keys.iter())
+                                .map(|key| config.tracker.display_key(key))
+                                .collect();
                             println!(
-                                "{}\t{}\t{}",
+                                "{}\t{}\t{}\t{}",
                                 state::dir_name(&carnet.path),
-                                carnet.tickets.join(","),
+                                carnet.group,
+                                keys.join(","),
                                 carnet.summary
                             );
                         }

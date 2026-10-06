@@ -1,4 +1,5 @@
-//! `atelier context`: what atelier knows about a directory or a ticket, for scripts and agents.
+//! `atelier context`: what atelier knows about a directory or an issue key, for scripts and
+//! agents.
 
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -17,7 +18,7 @@ use crate::process::Runner;
 use crate::state::{Item, ItemKind, State, dir_name};
 use crate::worktrunk::{self, CiState, Decision, Statusline, Worktree};
 
-/// What to describe: the item holding a directory, or a ticket key.
+/// What to describe: the item holding a directory, or an issue key.
 pub enum Target<'a> {
     Dir(&'a Path),
     Key(&'a str),
@@ -27,18 +28,20 @@ pub enum Target<'a> {
 /// the carnet folders, the issue cache and `wt list`: nothing is written.
 #[derive(Debug, Serialize)]
 pub struct Context {
-    /// The worktree or carnet holding the directory; `None` for a ticket key or a directory
+    /// The worktree or carnet holding the directory; `None` for an issue key or a directory
     /// in no item atelier recorded.
     pub item: Option<ItemInfo>,
     /// The item's workspace.
     pub workspace: Option<Workspace>,
-    /// The ticket key the rest is about; `None` when the item has no group.
+    /// The item's group; `None` when it has none.
     pub group: Option<String>,
-    /// The group's issue as last cached; `None` when it is not a cached issue.
+    /// The issues the item links, in order, or the issue key described.
+    pub issue_keys: Vec<String>,
+    /// The first key's issue as last cached; `None` when it is not a cached issue.
     pub issue: Option<CachedIssue>,
-    /// The worktrees in the group, across repos.
+    /// The worktrees in the group, across repos; for an issue key, those linking it.
     pub worktrees: Vec<WorktreeInfo>,
-    /// The carnets listing the group among their tickets, closed ones included, newest first.
+    /// The carnets in the group or linking the first key, closed ones included, newest first.
     pub carnets: Vec<CarnetInfo>,
     /// The newest open one.
     pub carnet: Option<PathBuf>,
@@ -181,7 +184,7 @@ impl From<&Worktree> for Status {
     }
 }
 
-/// A carnet linked to the group.
+/// A carnet in the group or linking its issue.
 #[derive(Debug, Serialize)]
 pub struct CarnetInfo {
     pub path: PathBuf,
@@ -189,7 +192,8 @@ pub struct CarnetInfo {
     pub date: String,
     /// The folder name after its date.
     pub name: String,
-    pub tickets: Vec<String>,
+    pub group: String,
+    pub issue_keys: Vec<String>,
     pub closed: bool,
     pub summary: String,
     pub workspace: String,
@@ -203,7 +207,8 @@ impl CarnetInfo {
             path: carnet.path.clone(),
             date: carnet.date.clone(),
             name: carnet.name.clone(),
-            tickets: carnet.tickets.clone(),
+            group: carnet.group.clone(),
+            issue_keys: carnet.issue_keys.clone(),
             closed: carnet.closed,
             summary: carnet.summary.clone(),
             workspace,
@@ -248,19 +253,19 @@ impl Records {
             .max_by_key(|item| item.path.as_os_str().len())
     }
 
-    /// The worktrees whose group is `group`.
-    fn linked(&self, group: &str) -> Vec<&Item> {
+    /// The worktrees `linked` picks.
+    fn worktrees(&self, linked: impl Fn(&Item) -> bool) -> Vec<&Item> {
         (self.items.iter())
-            .filter(|item| item.kind == ItemKind::Worktree)
-            .filter(|item| !group.is_empty() && item.group == group)
+            .filter(|item| item.kind == ItemKind::Worktree && linked(item))
             .collect()
     }
 }
 
-/// The item holding a directory and its group, read as `describe` reads them.
+/// The item holding a directory and its issue keys as `describe` reads them: a carnet's from
+/// its folder.
 pub struct Located {
     pub item: Item,
-    pub group: String,
+    pub issue_keys: Vec<String>,
     /// The carnet's folder, for a carnet item.
     pub carnet: Option<Carnet>,
 }
@@ -273,19 +278,31 @@ pub fn locate(state: &State, config: &Config, dir: &Path) -> Result<Option<Locat
         return Ok(None);
     };
     let carnets = match (item.is_carnet(), config.carnet_root()) {
-        (true, Some(root)) => carnet::scan(&root, &Names::new(config.ticket_pattern())?)?,
+        (true, Some(root)) => scan(config, &root)?,
         _ => Vec::new(),
     };
     let carnet = carnets.into_iter().find(|carnet| carnet.path == item.path);
-    let group = carnet
-        .as_ref()
-        .map_or(&*item.group, Carnet::group)
-        .to_owned();
+    let (_, issue_keys) = links(&item, carnet.as_ref());
     Ok(Some(Located {
         item,
-        group,
+        issue_keys,
         carnet,
     }))
+}
+
+/// The carnets under `root`.
+fn scan(config: &Config, root: &Path) -> Result<Vec<Carnet>> {
+    let names = Names::new(config.issue_key_pattern())?;
+    carnet::scan(root, &names, &config.tracker)
+}
+
+/// An item's group and issue keys: a carnet's as its folder records them, else the recorded
+/// ones.
+fn links(item: &Item, carnet: Option<&Carnet>) -> (String, Vec<String>) {
+    match carnet {
+        Some(carnet) => (carnet.group.clone(), carnet.issue_keys.clone()),
+        None => (item.group.clone(), item.issue_keys.clone()),
+    }
 }
 
 /// The worktree item holding a directory, from `wt list statusline`, its CI included, and
@@ -349,20 +366,27 @@ pub fn describe(
     here: Option<&str>,
     target: Target,
 ) -> Result<Context> {
-    let names = Names::new(config.ticket_pattern())?;
     let carnets = match config.carnet_root() {
-        Some(root) => carnet::scan(&root, &names)?,
+        Some(root) => scan(config, &root)?,
         None => Vec::new(),
     };
     let records = Records::read(state)?;
-    let (current, group) = match target {
-        Target::Key(key) => (None, key.to_owned()),
+    let (current, group, keys) = match target {
+        Target::Key(key) => (None, String::new(), vec![config.tracker.resolve_key(key)]),
         Target::Dir(dir) => match records.containing(dir) {
-            Some(item) => (Some(item), group(item, &carnets)),
-            None => (None, String::new()),
+            Some(item) => {
+                let carnet = (carnets.iter()).find(|carnet| carnet.path == item.path);
+                let (group, keys) = links(item, carnet.filter(|_| item.is_carnet()));
+                (Some(item), group, keys)
+            }
+            None => (None, String::new(), Vec::new()),
         },
     };
-    let linked = records.linked(&group);
+    let first = keys.first().map_or("", String::as_str);
+    let linked = match target {
+        Target::Key(_) => records.worktrees(|item| item.issue_keys.iter().any(|key| key == first)),
+        Target::Dir(_) => records.worktrees(|item| !group.is_empty() && item.group == group),
+    };
     let tree = current
         .filter(|item| item.kind == ItemKind::Worktree)
         .map(|item| Current {
@@ -374,11 +398,17 @@ pub fn describe(
         runner,
         others.filter(|item| current.is_none_or(|current| current.path != item.path)),
     );
-    let issue = match group.as_str() {
+    let issue = match first {
         "" => None,
         key => issues::cached(state, &config.tracker, key)?
             .map(|(issue, cached_at)| CachedIssue { issue, cached_at }),
     };
+    let listed: Vec<&Carnet> = (carnets.iter())
+        .filter(|carnet| {
+            (!group.is_empty() && carnet.group == group)
+                || (!first.is_empty() && carnet.issue_keys.iter().any(|key| key == first))
+        })
+        .collect();
     Ok(Context {
         item: current.map(|item| ItemInfo {
             path: item.path.clone(),
@@ -392,9 +422,13 @@ pub fn describe(
             session: records.session(&item.path),
         }),
         worktrees: worktrees(&records, &listings, &linked, tree.as_ref()),
-        carnets: linked_carnets(&records, &carnets, &group),
-        carnet: carnet::newest_open(&carnets, &group).map(|carnet| carnet.path.clone()),
+        carnets: carnet_infos(&records, &listed),
+        carnet: (listed.iter())
+            .filter(|carnet| !carnet.closed)
+            .max_by(|a, b| a.path.cmp(&b.path))
+            .map(|carnet| carnet.path.clone()),
         group: Some(group).filter(|group| !group.is_empty()),
+        issue_keys: keys,
         issue,
     })
 }
@@ -437,28 +471,18 @@ fn worktrees(
         .collect()
 }
 
-/// The carnets listing `group` among their tickets, in their workspace: the recorded one, else
-/// the default workspace.
-fn linked_carnets(records: &Records, carnets: &[Carnet], group: &str) -> Vec<CarnetInfo> {
+/// The carnets, each in its workspace: the recorded one, else the default workspace.
+fn carnet_infos(records: &Records, carnets: &[&Carnet]) -> Vec<CarnetInfo> {
     let workspaces: HashMap<&PathBuf, &str> = (records.items.iter())
         .map(|item| (&item.path, item.workspace.as_str()))
         .collect();
     (carnets.iter())
-        .filter(|carnet| !group.is_empty() && carnet.tickets.iter().any(|ticket| ticket == group))
         .map(|carnet| {
             let workspace =
                 (workspaces.get(&carnet.path).copied()).unwrap_or(&records.default_workspace);
             CarnetInfo::new(carnet, workspace.to_owned(), records.session(&carnet.path))
         })
         .collect()
-}
-
-/// An item's group: a carnet's first ticket as its folder records it, else the recorded one.
-fn group(item: &Item, carnets: &[Carnet]) -> String {
-    (carnets.iter())
-        .find(|carnet| item.is_carnet() && carnet.path == item.path)
-        .map_or(&*item.group, Carnet::group)
-        .to_owned()
 }
 
 /// The context as lines for a person to read.
@@ -475,7 +499,7 @@ pub fn render(context: &Context) -> String {
                 format!("{} ({}{branch})", item.path.display(), item.kind.as_str()),
             );
         }
-        None if context.group.is_none() => line("item", "not in an atelier item".into()),
+        None if context.issue_keys.is_empty() => line("item", "not in an atelier item".into()),
         None => {}
     }
     if let Some(workspace) = &context.workspace {
@@ -494,6 +518,9 @@ pub fn render(context: &Context) -> String {
     }
     if let Some(group) = &context.group {
         line("group", group.clone());
+    }
+    if !context.issue_keys.is_empty() {
+        line("issues", context.issue_keys.join(", "));
     }
     if let Some(cached) = &context.issue {
         let issue = &cached.issue;
@@ -575,8 +602,9 @@ mod tests {
         closed: PathBuf,
     }
 
-    /// Repos `/a` (aliased `api`) and `/b`, a worktree of each in `ABC-1` and one ungrouped,
-    /// carnets of `ABC-1` (one closed, one older) and of `ORD-7`, and `ABC-1` cached.
+    /// Repos `/a` (aliased `api`) and `/b`, a worktree of each in group `LOGIN`, the first
+    /// linking `ABC-1`, and one ungrouped; carnets in `LOGIN` (one closed, one older), one
+    /// linking `ABC-1` after `ORD-7`, one linking only `ORD-7`; and `ABC-1` cached.
     fn setup() -> Setup {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("carnets");
@@ -595,13 +623,13 @@ mod tests {
         let tree = tree.canonicalize().unwrap();
         let other = dir.path().join("b.ABC-1");
         let plain = dir.path().join("a.plain");
-        let add = |path: &Path, repo: &str, group: &str, workspace: &str| {
+        let add = |path: &Path, repo: &str, group: &str, keys: &[String], workspace: &str| {
             let repo = Some(Path::new(repo));
-            (state.add_item(path, ItemKind::Worktree, repo, group, workspace)).unwrap();
+            (state.add_item(path, ItemKind::Worktree, repo, group, keys, workspace)).unwrap();
         };
-        add(&tree, "/a", "ABC-1", "w");
-        add(&other, "/b", "ABC-1", "default");
-        add(&plain, "/a", "", "w");
+        add(&tree, "/a", "LOGIN", &["ABC-1".into()], "w");
+        add(&other, "/b", "LOGIN", &[], "default");
+        add(&plain, "/a", "", &[], "w");
         state
             .set_tab(&Tab {
                 path: tree.clone(),
@@ -610,18 +638,26 @@ mod tests {
                 pane_id: "terminal_1".into(),
             })
             .unwrap();
-        repo(&root, "2026-01-01-ABC-1-older", None);
+        repo(
+            &root,
+            "2026-01-01-ABC-1-older",
+            Some("+++\ngroup = \"login\"\n+++\n"),
+        );
         let newer = repo(
             &root,
             "2026-02-01-notes",
-            Some("+++\ntickets = [\"ORD-7\", \"ABC-1\"]\nsummary = \"Notes\"\n+++\n"),
+            Some("+++\nissues = [\"ORD-7\", \"ABC-1\"]\nsummary = \"Notes\"\n+++\n"),
         );
         let closed = repo(
             &root,
             "2026-03-01-ABC-1-done",
-            Some("+++\nclosed = true\n+++\n"),
+            Some("+++\ngroup = \"LOGIN\"\nclosed = true\n+++\n"),
         );
-        repo(&root, "2026-04-01-ORD-7-other", None);
+        repo(
+            &root,
+            "2026-04-01-ORD-7-other",
+            Some("+++\nissues = [\"ORD-7\"]\n+++\n"),
+        );
         let cached = serde_json::to_string(&[issue("ABC-1", &[], false)]).unwrap();
         state.store_cache("gh", "issues o/api", &cached).unwrap();
         Setup {
@@ -687,7 +723,8 @@ mod tests {
         assert_eq!(workspace.name, "w");
         assert!(workspace.current);
         assert_eq!(workspace.session.as_deref(), Some("w"));
-        assert_eq!(context.group.as_deref(), Some("ABC-1"));
+        assert_eq!(context.group.as_deref(), Some("LOGIN"));
+        assert_eq!(context.issue_keys, ["ABC-1"]);
         let cached = context.issue.as_ref().unwrap();
         assert_eq!(cached.issue.title, "Issue ABC-1");
         assert!(!cached.cached_at.is_empty());
@@ -717,7 +754,7 @@ mod tests {
                 ("notes", false),
                 ("ABC-1-older", false)
             ],
-            "a later ticket links too; ORD-7's own carnet does not"
+            "the group's, and one linking the first key later; ORD-7's own does not"
         );
         assert_eq!(context.carnets[0].path, setup.closed);
         assert_eq!(
@@ -748,7 +785,7 @@ mod tests {
         assert!(
             text.starts_with(&format!(
                 "item       {} (worktree on ABC-1-fix)\nworkspace  w (current session, tab in w)\n\
-             group      ABC-1\nissue      ABC-1  Issue ABC-1  [open]  ",
+             group      LOGIN\nissues     ABC-1\nissue      ABC-1  Issue ABC-1  [open]  ",
                 setup.tree.display()
             )),
             "{text}"
@@ -765,7 +802,7 @@ mod tests {
         let setup = setup();
         let closed = &setup.closed;
         (setup.state)
-            .add_item(closed, ItemKind::Carnet, None, "stale", "w")
+            .add_item(closed, ItemKind::Carnet, None, "stale", &[], "w")
             .unwrap();
         let fake = Fake::default();
         let context = describe(
@@ -776,7 +813,12 @@ mod tests {
             Target::Dir(closed),
         )
         .unwrap();
-        assert_eq!(context.group.as_deref(), Some("ABC-1"));
+        assert_eq!(
+            context.group.as_deref(),
+            Some("LOGIN"),
+            "the folder's, not the row's"
+        );
+        assert!(context.issue_keys.is_empty());
         let item = context.item.unwrap();
         assert_eq!(
             (item.kind, item.repo, item.branch),
@@ -788,7 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ticket_key_without_a_directory() {
+    fn an_issue_key_without_a_directory() {
         let setup = setup();
         let fake = Fake::default();
         let context = describe(
@@ -800,6 +842,10 @@ mod tests {
         )
         .unwrap();
         assert!(context.item.is_none() && context.workspace.is_none());
+        assert_eq!(
+            (context.group, context.issue_keys),
+            (None, vec!["ORD-7".into()])
+        );
         assert!(context.issue.is_none(), "not cached");
         assert!(context.worktrees.is_empty());
         assert_eq!(context.carnets.len(), 2);
@@ -808,6 +854,27 @@ mod tests {
             "2026-04-01-ORD-7-other"
         );
         assert!(fake.calls().is_empty());
+
+        let fake = Fake::default().always("wt", None);
+        let context = describe(
+            &setup.state,
+            &setup.config,
+            &fake,
+            None,
+            Target::Key("ABC-1"),
+        )
+        .unwrap();
+        let paths: Vec<_> = context.worktrees.iter().map(|tree| &tree.path).collect();
+        assert_eq!(
+            paths,
+            [&setup.tree],
+            "the worktrees linking it, not its group"
+        );
+        let carnets: Vec<_> = (context.carnets.iter())
+            .map(|carnet| carnet.name.as_str())
+            .collect();
+        assert_eq!(carnets, ["notes"]);
+        assert_eq!(context.issue.unwrap().issue.key, "ABC-1");
     }
 
     #[test]
@@ -827,7 +894,7 @@ mod tests {
         assert_eq!(
             json,
             serde_json::json!({
-                "item": null, "workspace": null, "group": null, "issue": null,
+                "item": null, "workspace": null, "group": null, "issue_keys": [], "issue": null,
                 "worktrees": [], "carnets": [], "carnet": null,
             })
         );

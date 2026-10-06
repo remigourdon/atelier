@@ -6,7 +6,7 @@ use color_eyre::eyre::{Result, WrapErr, eyre};
 use regex::Regex;
 use serde::Deserialize;
 
-pub const DEFAULT_TICKET_PATTERN: &str = "[A-Z][A-Z0-9]{1,9}-[1-9][0-9]{0,5}";
+pub const DEFAULT_ISSUE_KEY_PATTERN: &str = "[A-Z][A-Z0-9]{1,9}-[1-9][0-9]{0,5}";
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
@@ -14,7 +14,7 @@ pub struct Config {
     pub default_workspace: Option<String>,
     pub editor: Option<String>,
     pub agent_command: Option<String>,
-    pub ticket_pattern: Option<String>,
+    pub issue_key_pattern: Option<String>,
     pub browser: Option<String>,
     /// What `g` runs on an item, in its directory.
     pub tool: Option<String>,
@@ -143,28 +143,37 @@ impl Config {
             .or_else(|| non_empty_var("EDITOR"))
     }
 
-    /// The ticket key pattern, undelimited.
-    pub fn ticket_pattern(&self) -> &str {
-        self.ticket_pattern
+    /// The issue key pattern, undelimited.
+    pub fn issue_key_pattern(&self) -> &str {
+        self.issue_key_pattern
             .as_deref()
-            .unwrap_or(DEFAULT_TICKET_PATTERN)
+            .unwrap_or(DEFAULT_ISSUE_KEY_PATTERN)
     }
 
-    /// The ticket key pattern, delimited so it never matches inside a longer word.
-    pub fn ticket_regex(&self) -> Result<Regex> {
-        let pattern = self.ticket_pattern();
+    /// The issue key pattern, delimited so it never matches inside a longer word.
+    pub fn issue_key_regex(&self) -> Result<Regex> {
+        let pattern = self.issue_key_pattern();
         Ok(Regex::new(&format!(
             "(?:^|[^A-Za-z0-9])({pattern})(?:$|[^A-Za-z0-9])"
         ))?)
     }
 }
 
-/// The group a branch or name belongs to: its first ticket key, or `""`.
-pub fn group_from_name(ticket: &Regex, name: &str) -> String {
-    ticket
-        .captures(name)
-        .map(|captures| captures[1].to_owned())
-        .unwrap_or_default()
+/// Every issue key in a branch or name, in order and without duplicates. A delimiter between
+/// two keys serves both.
+pub fn issue_keys(pattern: &Regex, name: &str) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    let mut start = 0;
+    while let Some(key) = pattern
+        .captures_at(name, start)
+        .and_then(|found| found.get(1))
+    {
+        if !keys.iter().any(|known| known == key.as_str()) {
+            keys.push(key.as_str().to_owned());
+        }
+        start = key.end();
+    }
+    keys
 }
 
 /// A path with a leading `~/` resolved against the home directory.
@@ -208,31 +217,38 @@ pub fn cache_home() -> PathBuf {
 mod tests {
     use super::*;
 
-    fn group(name: &str) -> String {
-        group_from_name(&Config::default().ticket_regex().unwrap(), name)
+    fn keys(name: &str) -> Vec<String> {
+        issue_keys(&Config::default().issue_key_regex().unwrap(), name)
     }
 
     #[test]
-    fn ticket_in_branch() {
-        assert_eq!(group("feature/ORD-3479-investigate"), "ORD-3479");
-        assert_eq!(group("ORD-1"), "ORD-1");
+    fn issue_key_in_branch() {
+        assert_eq!(keys("feature/ORD-3479-investigate"), ["ORD-3479"]);
+        assert_eq!(keys("ORD-1"), ["ORD-1"]);
     }
 
     #[test]
-    fn lowercase_dates_and_underscores_are_not_tickets() {
-        assert_eq!(group("atelier-verification-20260930"), "");
-        assert_eq!(group("feature/ord-3479-investigate"), "");
-        assert_eq!(group("feature/ord_3479-investigate"), "");
-        assert_eq!(group("meeting_notes"), "");
-        assert_eq!(group("XORD-12a"), "");
+    fn every_key_in_order_without_duplicates() {
+        assert_eq!(keys("ABC-1-DEF-2-fix"), ["ABC-1", "DEF-2"]);
+        assert_eq!(keys("DEF-2 then ABC-1, DEF-2 again"), ["DEF-2", "ABC-1"]);
+        assert_eq!(keys("xABC-1 ABC-12"), ["ABC-12"]);
     }
 
     #[test]
-    fn custom_ticket_pattern() {
-        let config = Config::parse(r##"ticket_pattern = "#[0-9]+""##).unwrap();
+    fn lowercase_dates_and_underscores_are_not_issue_keys() {
+        assert!(keys("atelier-verification-20260930").is_empty());
+        assert!(keys("feature/ord-3479-investigate").is_empty());
+        assert!(keys("feature/ord_3479-investigate").is_empty());
+        assert!(keys("meeting_notes").is_empty());
+        assert!(keys("XORD-12a").is_empty());
+    }
+
+    #[test]
+    fn custom_issue_key_pattern() {
+        let config = Config::parse(r##"issue_key_pattern = "#[0-9]+""##).unwrap();
         assert_eq!(
-            group_from_name(&config.ticket_regex().unwrap(), "fix-#42-x"),
-            "#42"
+            issue_keys(&config.issue_key_regex().unwrap(), "fix-#42-x"),
+            ["#42"]
         );
     }
 

@@ -709,7 +709,14 @@ mod tests {
         state.add_workspace("w").unwrap();
         state.add_repo("/r", None, "w").unwrap();
         state
-            .add_item("/r/a", ItemKind::Worktree, Some(Path::new("/r")), "", "w")
+            .add_item(
+                "/r/a",
+                ItemKind::Worktree,
+                Some(Path::new("/r")),
+                "",
+                &[],
+                "w",
+            )
             .unwrap();
         state
     }
@@ -798,7 +805,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
         state
-            .add_item(path, ItemKind::Carnet, None, "", "w")
+            .add_item(path, ItemKind::Carnet, None, "", &[], "w")
             .unwrap();
         state
             .set_tab(&Tab {
@@ -828,7 +835,7 @@ mod tests {
         for path in [&alive, &gone] {
             let path = path.to_str().unwrap();
             state
-                .add_item(path, ItemKind::Carnet, None, "", "w")
+                .add_item(path, ItemKind::Carnet, None, "", &[], "w")
                 .unwrap();
             state
                 .set_tab(&Tab {
@@ -840,7 +847,7 @@ mod tests {
                 .unwrap();
         }
         state
-            .add_item("/missing", ItemKind::Carnet, None, "", "w")
+            .add_item("/missing", ItemKind::Carnet, None, "", &[], "w")
             .unwrap();
         state
             .set_tab(&Tab {
@@ -873,7 +880,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
         state
-            .add_item(path, ItemKind::Carnet, None, "", "w")
+            .add_item(path, ItemKind::Carnet, None, "", &[], "w")
             .unwrap();
         state
             .set_tab(&Tab {
@@ -916,7 +923,14 @@ mod tests {
     fn closing_a_duplicate_renames_the_remaining_tab() {
         let state = state();
         state
-            .add_item("/r/b", ItemKind::Worktree, Some(Path::new("/r")), "", "w")
+            .add_item(
+                "/r/b",
+                ItemKind::Worktree,
+                Some(Path::new("/r")),
+                "",
+                &[],
+                "w",
+            )
             .unwrap();
         for (path, id) in [("/r/a", 1), ("/r/b", 2)] {
             state
@@ -934,6 +948,7 @@ mod tests {
                 ItemKind::Worktree,
                 Some(Path::new("/r")),
                 "G-1",
+                &[],
                 "w",
             )
             .unwrap();
@@ -943,6 +958,7 @@ mod tests {
                 ItemKind::Worktree,
                 Some(Path::new("/r")),
                 "G-1",
+                &[],
                 "w",
             )
             .unwrap();

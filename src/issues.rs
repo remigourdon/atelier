@@ -6,6 +6,7 @@ use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use color_eyre::eyre::{Report, Result, WrapErr, eyre};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::process::Runner;
@@ -42,7 +43,6 @@ impl Tracker {
         match self {
             Tracker::GitHub => Box::new(Gh {
                 runner,
-                qualified: tracker.qualified(&scope),
                 repo: scope,
                 since: days_ago(CLOSED_DAYS),
             }),
@@ -79,8 +79,7 @@ impl State {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Issue {
     pub tracker: Tracker,
-    /// `ABC-123`, or `repo#12` on GitHub (`owner/repo#12` when two configured repos share a
-    /// name). It is also the group of the issue's linked work.
+    /// `ABC-123`, or `owner/repo#12` on GitHub; [`TrackerConfig::display_key`] shortens it.
     pub key: String,
     pub title: String,
     /// Its web page; for Jira, unknown when no site is configured or reported.
@@ -248,13 +247,57 @@ impl TrackerConfig {
         scopes
     }
 
-    /// Whether a GitHub repo's issue keys need its owner: another configured repo has its name.
-    fn qualified(&self, repo: &str) -> bool {
-        let name = |repo: &str| repo.rsplit('/').next().unwrap_or_default().to_lowercase();
-        let repos = self.github.iter().flat_map(|github| &github.repos);
-        repos
-            .filter(|other| !other.eq_ignore_ascii_case(repo))
-            .any(|other| name(other) == name(repo))
+    /// The configured GitHub repos, `owner/name`.
+    fn github_repos(&self) -> impl Iterator<Item = &String> {
+        self.github.iter().flat_map(|github| &github.repos)
+    }
+
+    /// How an issue key is shown: a GitHub key `owner/repo#12` as `repo#12` unless another
+    /// configured repo shares that name; any other key as it is.
+    pub fn display_key(&self, key: &str) -> String {
+        let Some(found) = GITHUB_KEY.captures(key) else {
+            return key.to_owned();
+        };
+        let (owner, name, number) = (&found[1], &found[2], &found[3]);
+        let ambiguous = (self.github_repos()).any(|repo| match repo.split_once('/') {
+            Some((other_owner, other_name)) => {
+                other_name.eq_ignore_ascii_case(name) && !other_owner.eq_ignore_ascii_case(owner)
+            }
+            None => false,
+        });
+        match ambiguous {
+            true => key.to_owned(),
+            false => format!("{name}#{number}"),
+        }
+    }
+
+    /// An issue key as typed or written by hand, trimmed, with a short GitHub key `repo#12`
+    /// made `owner/repo#12` when exactly one configured repo has that name. A registered
+    /// repo's alias never counts. Any other key stays as written.
+    pub fn resolve_key(&self, key: &str) -> String {
+        let key = key.trim();
+        let Some(found) = SHORT_GITHUB_KEY.captures(key) else {
+            return key.to_owned();
+        };
+        let (name, number) = (&found[1], &found[2]);
+        let mut matching = (self.github_repos()).filter(|repo| {
+            (repo.split_once('/')).is_some_and(|(_, other)| other.eq_ignore_ascii_case(name))
+        });
+        match (matching.next(), matching.next()) {
+            (Some(repo), None) => format!("{repo}#{number}"),
+            _ => key.to_owned(),
+        }
+    }
+
+    /// Each key resolved, empty ones dropped, without duplicates, in order.
+    pub fn resolve_keys<'a>(&self, keys: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+        let mut resolved: Vec<String> = Vec::new();
+        for key in keys.into_iter().map(|key| self.resolve_key(key)) {
+            if !key.is_empty() && !resolved.contains(&key) {
+                resolved.push(key);
+            }
+        }
+        resolved
     }
 
     /// Jira's web address for issue links, when it is known.
@@ -266,6 +309,14 @@ impl TrackerConfig {
             .filter(|url| !url.is_empty())
     }
 }
+
+/// A GitHub issue key, `owner/repo#12`.
+static GITHUB_KEY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^([\w.-]+)/([\w.-]+)#([1-9][0-9]*)$").unwrap());
+
+/// A GitHub issue key without its owner, `repo#12`.
+static SHORT_GITHUB_KEY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^([\w.-]+)#([1-9][0-9]*)$").unwrap());
 
 /// The moment `days` ago, as GitHub's `DateTime`.
 fn days_ago(days: u64) -> String {
@@ -298,8 +349,6 @@ pub struct Gh<'a> {
     pub runner: &'a dyn Runner,
     /// `owner/name`.
     pub repo: String,
-    /// Whether its keys carry the owner.
-    pub qualified: bool,
     pub since: String,
 }
 
@@ -338,7 +387,7 @@ impl Gh<'_> {
         ];
         args.extend(extra.iter().cloned());
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        parse_gh(&self.runner.output("gh", &args)?, self.qualified)
+        parse_gh(&self.runner.output("gh", &args)?)
     }
 }
 
@@ -402,17 +451,13 @@ impl Issues for Acli<'_> {
 
 /// Parses the pages of `gh api graphql`'s repository issues. A closed issue is `done`, with why
 /// as its status; an open one is `in_progress` while a pull request that closes it is open,
-/// else `todo`. With `qualified`, keys carry the repo's owner.
-pub fn parse_gh(json: &str, qualified: bool) -> Result<Vec<Issue>> {
+/// else `todo`. Keys are `owner/repo#12`.
+pub fn parse_gh(json: &str) -> Result<Vec<Issue>> {
     let pages: Vec<raw::GhResponse> = serde_json::from_str(json).wrap_err("parsing gh issues")?;
     Ok(pages
         .into_iter()
         .flat_map(|page| {
             let repo = page.data.repository;
-            let prefix = match repo.name_with_owner.rsplit_once('/') {
-                Some((_, name)) if !qualified => name.to_owned(),
-                _ => repo.name_with_owner.clone(),
-            };
             repo.issues.nodes.into_iter().map(move |node| {
                 let pull_open = (node.closed_by_pull_requests_references.nodes.iter())
                     .any(|pull| pull.state == "OPEN");
@@ -430,7 +475,7 @@ pub fn parse_gh(json: &str, qualified: bool) -> Result<Vec<Issue>> {
                 };
                 Issue {
                     tracker: Tracker::GitHub,
-                    key: format!("{prefix}#{}", node.number),
+                    key: format!("{}#{}", repo.name_with_owner, node.number),
                     title: node.title,
                     url: Some(node.url),
                     project: repo.name_with_owner.clone(),
@@ -675,9 +720,17 @@ pub mod tests {
 
     #[test]
     fn gh_open_issues_parse_every_page_with_labels_blockers_and_pull_requests() {
-        let issues = parse_gh(GH, false).unwrap();
+        let issues = parse_gh(GH).unwrap();
         let keys: Vec<&str> = issues.iter().map(|issue| issue.key.as_str()).collect();
-        assert_eq!(keys, ["atelier#5", "atelier#6", "atelier#7"], "two pages");
+        assert_eq!(
+            keys,
+            [
+                "remigourdon/atelier#5",
+                "remigourdon/atelier#6",
+                "remigourdon/atelier#7"
+            ],
+            "two pages, always with the owner"
+        );
         let first = &issues[0];
         assert_eq!(first.title, "Phase 4: Issues panel");
         assert_eq!(first.project, "remigourdon/atelier");
@@ -699,13 +752,12 @@ pub mod tests {
         );
         let blocked: Vec<bool> = issues.iter().map(|issue| issue.blocked).collect();
         assert_eq!(blocked, [false, true, false]);
-        assert_eq!(parse_gh(GH, true).unwrap()[0].key, "remigourdon/atelier#5");
-        assert!(parse_gh("{\"errors\":[]}", false).is_err());
+        assert!(parse_gh("{\"errors\":[]}").is_err());
     }
 
     #[test]
     fn gh_closed_issues_are_done_with_their_reason() {
-        let issues = parse_gh(GH_CLOSED, false).unwrap();
+        let issues = parse_gh(GH_CLOSED).unwrap();
         assert!(issues.iter().all(|issue| issue.state == State::Done));
         let statuses: Vec<&str> = issues.iter().map(|issue| issue.status.as_str()).collect();
         assert_eq!(
@@ -754,7 +806,6 @@ pub mod tests {
         let gh = Gh {
             runner: &fake,
             repo: "remigourdon/atelier".into(),
-            qualified: false,
             since: "2026-09-20T00:00:00Z".into(),
         };
         assert_eq!(gh.issues().unwrap().len(), 7);
@@ -806,7 +857,7 @@ pub mod tests {
 
     #[test]
     fn branches_start_with_the_key_or_number() {
-        let issues = parse_gh(GH, true).unwrap();
+        let issues = parse_gh(GH).unwrap();
         assert_eq!(issues[0].branch(), "5-phase-4-issues-panel");
         let jira = parse_acli(ACLI, None).unwrap();
         assert_eq!(jira[0].branch(), "ORD-3479-cache-tariff-lookups");
@@ -940,12 +991,35 @@ pub mod tests {
                 (Tracker::Jira, vec!["assignee = currentUser()".to_owned()]),
             ]
         );
-        assert!(tracker.qualified("o/a") && tracker.qualified("p/a"));
-        assert!(
-            !tracker.qualified("o/b"),
-            "only repos sharing a name carry the owner"
-        );
         assert_eq!(tracker.jira_site().as_deref(), Some("https://j"));
+    }
+
+    #[test]
+    fn github_keys_show_without_their_owner_unless_another_repo_shares_the_name() {
+        let tracker = config("[tracker.github]\nrepos = [\"o/a\", \"o/b\", \"p/A\"]\n");
+        assert_eq!(tracker.display_key("o/b#3"), "b#3");
+        assert_eq!(tracker.display_key("o/a#3"), "o/a#3", "p/A shares the name");
+        assert_eq!(tracker.display_key("q/c#3"), "c#3", "an unconfigured repo");
+        assert_eq!(tracker.display_key("ABC-1"), "ABC-1");
+        assert_eq!(config("").display_key("o/a#3"), "a#3");
+    }
+
+    #[test]
+    fn short_github_keys_resolve_against_one_configured_repo() {
+        let tracker = config("[tracker.github]\nrepos = [\"o/a\", \"o/Web\", \"p/a\"]\n");
+        assert_eq!(tracker.resolve_key(" web#4 "), "o/Web#4");
+        assert_eq!(
+            tracker.resolve_key("a#4"),
+            "a#4",
+            "ambiguous: kept as written"
+        );
+        assert_eq!(tracker.resolve_key("api#4"), "api#4", "no such repo");
+        assert_eq!(tracker.resolve_key("p/a#4"), "p/a#4");
+        assert_eq!(tracker.resolve_key("ABC-1"), "ABC-1");
+        assert_eq!(
+            tracker.resolve_keys(["web#4", " ", "ABC-1", "o/Web#4"]),
+            ["o/Web#4", "ABC-1"]
+        );
     }
 
     /// Issues that count their calls and fail when told to.
@@ -968,7 +1042,7 @@ pub mod tests {
             if self.fail {
                 return Err(eyre!("offline"));
             }
-            parse_gh(GH, false)
+            parse_gh(GH)
         }
     }
 

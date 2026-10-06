@@ -174,7 +174,8 @@ pub enum Job {
         workspace: String,
         review: Box<Review>,
     },
-    /// Creates a worktree on `branch` for an issue, in the issue's group.
+    /// Creates a worktree on `branch` for an issue, linking its key, in the one group of its
+    /// linked work.
     Start {
         repo: PathBuf,
         branch: String,

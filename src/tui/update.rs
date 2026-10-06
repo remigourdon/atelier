@@ -851,6 +851,13 @@ pub mod tests {
     use crate::state::Repo;
     use crate::worktrunk::{Forge, Worktree};
 
+    /// The issue keys in `name`, as the default pattern finds them.
+    fn keys(name: &str) -> Vec<String> {
+        let config = crate::config::Config::default();
+        crate::config::issue_keys(&config.issue_key_regex().unwrap(), name)
+    }
+
+    /// A worktree linking the issue keys in its branch.
     pub fn work(repo: &str, branch: &str, group: &str, workspace: &str) -> Work {
         let main = branch == "main";
         let path = if main {
@@ -862,6 +869,7 @@ pub mod tests {
             path: path.clone(),
             workspace: workspace.into(),
             group: group.into(),
+            issue_keys: keys(branch),
             tab: false,
             kind: WorkKind::Worktree {
                 repo: PathBuf::from(format!("/src/{repo}")),
@@ -880,18 +888,15 @@ pub mod tests {
         }
     }
 
-    /// A carnet whose one ticket, if any, is `group`.
+    /// A carnet in `group`, linking the issue keys in its name.
     pub fn carnet(name: &str, group: &str, workspace: &str) -> Work {
         Work {
             path: PathBuf::from(format!("/data/{name}")),
             workspace: workspace.into(),
             group: group.into(),
+            issue_keys: keys(name),
             tab: false,
             kind: WorkKind::Carnet {
-                tickets: Some(group.to_owned())
-                    .filter(|group| !group.is_empty())
-                    .into_iter()
-                    .collect(),
                 closed: false,
                 summary: String::new(),
                 readme: None,
@@ -1164,6 +1169,7 @@ pub mod tests {
             scope,
             Scope::Issue {
                 key: "ABC-1".into(),
+                label: "ABC-1".into(),
                 state: "to do".into()
             }
         );
@@ -1432,11 +1438,8 @@ pub mod tests {
         model.snapshot.work[1].workspace = "side".into();
         let mut shared = carnet("shared", "ABC-1", "side");
         shared.tab = true;
-        if let WorkKind::Carnet {
-            tickets, closed, ..
-        } = &mut shared.kind
-        {
-            tickets.push("api#4".into());
+        shared.issue_keys = vec!["ABC-1".into(), "api#4".into()];
+        if let WorkKind::Carnet { closed, .. } = &mut shared.kind {
             *closed = true;
         }
         model.snapshot.carnets.push(shared);
@@ -2092,7 +2095,7 @@ pub mod tests {
     }
 
     /// The triage label scheme, with an issue in each section and in Other, one hidden, and a
-    /// Jira issue whose key groups the ABC-1 worktrees.
+    /// Jira issue whose key the ABC-1 worktrees link.
     pub fn with_issues(mut model: Model) -> Model {
         use crate::issues::tests::{SCHEME, issue};
         model.tracker_config = crate::config::Config::parse(SCHEME).unwrap().tracker;
@@ -2246,7 +2249,7 @@ pub mod tests {
                 "/src/api.ABC-1-login".into(),
                 "/src/web.ABC-1-form".into()
             ])],
-            "the Jira issue's key groups its linked work"
+            "the Jira issue's key links its work"
         );
         press(&mut model, "n");
         press(&mut model, "2");
@@ -2271,7 +2274,7 @@ pub mod tests {
     fn the_repo_menu_suggests_the_linked_works_repo_before_the_issues_own() {
         let mut model = with_issues(model());
         // A tracker-only api: the work on api#1 happens in web.
-        model.snapshot.work[3].group = "api#1".into();
+        model.snapshot.work[3].issue_keys = vec!["api#1".into()];
         press(&mut model, "4]n");
         assert_eq!(menu_labels(&model), ["web", "api"]);
         press(&mut model, "\n");
@@ -2494,14 +2497,11 @@ pub mod tests {
     }
 
     #[test]
-    fn a_carnet_listing_an_issues_key_is_its_linked_work() {
+    fn an_item_linking_an_issues_key_is_its_linked_work() {
         let mut model = with_issues(with_carnets(model()));
-        let mut linked = carnet("2026-07-01-notes", "", "side");
-        if let WorkKind::Carnet {
-            tickets, closed, ..
-        } = &mut linked.kind
-        {
-            *tickets = vec!["XYZ-1".into(), "api#4".into()];
+        let mut linked = carnet("2026-07-01-notes", "OTHER", "side");
+        linked.issue_keys = vec!["XYZ-1".into(), "api#4".into()];
+        if let WorkKind::Carnet { closed, .. } = &mut linked.kind {
             *closed = true;
         }
         model.snapshot.carnets.push(linked);
@@ -2517,7 +2517,7 @@ pub mod tests {
         assert_eq!(
             titles(issue("api#4")),
             ["2026-07-01-notes"],
-            "a closed carnet, by a later ticket"
+            "a closed carnet, by a later key, in another group"
         );
         assert_eq!(
             titles(issue("ABC-1")),
