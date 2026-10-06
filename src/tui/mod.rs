@@ -301,11 +301,12 @@ mod tests {
         cells[at].style()
     }
 
-    /// The style of the cell `offset` characters into `text`'s first occurrence on screen.
+    /// The style of the cell `offset` characters into `text`'s first occurrence on screen,
+    /// before it when negative.
     fn style_in(
         buffer: &ratatui::buffer::Buffer,
         text: &str,
-        offset: usize,
+        offset: isize,
     ) -> ratatui::style::Style {
         let width = buffer.area.width as usize;
         let chars: Vec<char> = text.chars().collect();
@@ -317,7 +318,7 @@ mod tests {
                         .all(|(i, c)| cells[start + i].symbol() == c.to_string())
             })
             .unwrap_or_else(|| panic!("{text:?} is not on screen"));
-        cells[at + offset].style()
+        cells[at.checked_add_signed(offset).unwrap()].style()
     }
 
     #[test]
@@ -340,13 +341,17 @@ mod tests {
             update(&mut model, Action::Key(key(c)));
         }
         let buffer = draw(&model, &palette);
+        let linked = "ABC-1 Issue ABC-1";
         assert_eq!(
-            style_in(&buffer, "ABC-1 Issue ABC-1", 0).fg,
+            style_in(&buffer, linked, -2).fg,
             Some(palette.issue_key),
-            "an issue's key, when items link it"
+            "the linked-work marker"
         );
-        let unlinked = style_in(&buffer, "api#1 Issue api#1", 0);
-        assert_eq!(unlinked.fg, Some(palette.dim), "else subtle");
+        assert_eq!(
+            style_in(&buffer, linked, 0).fg,
+            Some(palette.dim),
+            "the issue's own key, subtle as any"
+        );
     }
 
     fn draw(model: &Model, palette: &Palette) -> ratatui::buffer::Buffer {

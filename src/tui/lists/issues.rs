@@ -4,7 +4,8 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use super::{
-    ListKind, close_tabs, key_style, kind, pair, paths, plan, subtle, tab_mark, tab_word, tag_style,
+    ListKind, close_tabs, key_style, kind, pair, paths, plan, subtle, tab, tab_mark, tab_word,
+    tag_style,
 };
 use crate::finish::Scope;
 use crate::issues::{Issue, State};
@@ -155,23 +156,16 @@ impl ListKind for Issues {
             .map(|issue| {
                 let glyphs = &palette.glyphs;
                 let work = model.issue_work(issue);
+                // Linked work is marked in the colour of the issue keys that link it.
                 let marker = if work.is_empty() {
                     Span::raw("  ")
                 } else {
-                    tab_mark(work.iter().any(|work| work.tab), palette)
+                    let (glyph, _) = tab(work.iter().any(|work| work.tab), palette);
+                    Span::styled(format!("{glyph} "), key_style(palette))
                 };
                 let mut spans = vec![marker];
                 spans.extend(icon(glyphs.issue, dim));
-                // A key items link stands out as theirs do.
-                let key_style = if work.is_empty() {
-                    dim
-                } else {
-                    key_style(palette)
-                };
-                spans.push(Span::styled(
-                    format!("{} ", model.issue_label(issue)),
-                    key_style,
-                ));
+                spans.push(Span::styled(format!("{} ", model.issue_label(issue)), dim));
                 if issue.state != State::Todo {
                     let label = format!("{} ", issue.state.label().to_lowercase());
                     spans.push(Span::styled(label, state_style(issue.state, palette)));
