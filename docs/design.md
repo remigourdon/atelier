@@ -156,7 +156,7 @@ Lazygit defaults. The keymap is one table in code that also feeds `?` and the hi
 | `E` | export the retained command log to a new file |
 | `Esc` · `q` `C-c` | back · quit |
 
-`Space`, `x`, `d` and `p` on a group header act on every item in the group. `e` on an item's row moves it to a group, or out of any when the text is cleared; on a group header it renames the group, regrouping every member in every workspace, closed carnets included. Every prompt for a group completes with `Tab` from the existing groups, cycling through those starting with what was typed. `?` lists the focused panel's actions, then the global ones.
+`Space`, `x`, `d` and `p` on a group header act on every item in the group. `e` on an item's row moves it to a group, or out of any when the text is cleared; on a group header it renames the group, regrouping every member in every workspace, closed carnets included; cleared there, it ungroups them all. Every prompt for a group completes with `Tab` from the existing groups, cycling through those starting with what was typed. `?` lists the focused panel's actions, then the global ones.
 
 Each session runs its own TUI. One starts with Work focused and the Workspaces cursor on its own session, listed first, and `Space` on a workspace inside zellij leaves the TUI in that same state (clearing the Workspaces filter) as it switches away, so switching back into any session lands on its Work. Attaching from outside zellij leaves the TUI as it is.
 

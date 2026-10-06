@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use super::app::{
-    Cmd, Focus, KEYMAP, List, Model, Panel, Popup, Row, Screen, Source, Work, popup_hints,
+    Cmd, Focus, KEYMAP, List, Model, Panel, Popup, Screen, Source, Work, popup_hints,
 };
 use super::lists;
 use super::markdown::Markdown;
@@ -41,6 +41,7 @@ pub struct Palette {
     pub filter: Color,
     /// A group's label, set apart from issue keys.
     pub group: Color,
+    /// An issue key, set apart from groups.
     pub issue_key: Color,
     /// How a carnet's README is drawn.
     pub markdown: Markdown,
@@ -486,9 +487,9 @@ fn render_hints(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect)
     }
 }
 
-/// Whether `l` has an item to edit the issue keys of: not on a group header.
+/// Whether `l` has an item to edit the issue keys of: not on a group header or in an empty list.
 fn links_selection(model: &Model, list: List) -> bool {
-    list != List::Work || matches!(model.work_row(), Some(Row::Item(_)))
+    lists::of(list).item(model, list).is_some()
 }
 
 /// Short help for the hint bar, keeping tab closing distinct from carnet closing.

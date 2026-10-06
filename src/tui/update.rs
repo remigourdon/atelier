@@ -147,10 +147,14 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
             match group {
                 Ok(Some(group)) => effects.push(run(model, pending.job(Some(group)))),
                 Ok(None) => effects.extend(ask_group(model, pending)),
-                Err(error) => model.push_log([Logged {
-                    command: "linked group".into(),
-                    error: Some(error),
-                }]),
+                // Not knowing the linked group is no reason to drop the worktree.
+                Err(error) => {
+                    model.push_log([Logged {
+                        command: "linked group".into(),
+                        error: Some(error),
+                    }]);
+                    effects.extend(ask_group(model, pending));
+                }
             }
             effects
         }
@@ -1057,6 +1061,7 @@ pub mod tests {
                 '\n' => KeyCode::Enter,
                 '\x1b' => KeyCode::Esc,
                 '\t' => KeyCode::Tab,
+                '\x08' => KeyCode::Backspace,
                 c => KeyCode::Char(c),
             };
             effects.extend(update(
@@ -2815,12 +2820,7 @@ pub mod tests {
         );
         press(&mut model, "\x1b");
         press(&mut model, "e");
-        for _ in 0.."ABC-1".len() {
-            update(
-                &mut model,
-                Action::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
-            );
-        }
+        press(&mut model, &"\x08".repeat("ABC-1".len()));
         assert_eq!(
             jobs(press(&mut model, " slow pages\n")),
             [Job::Regroup {
@@ -2989,15 +2989,35 @@ pub mod tests {
     }
 
     #[test]
+    fn a_failed_group_lookup_still_asks_for_the_group() {
+        let mut model = with_issues(model());
+        press(&mut model, "4] \n");
+        let [Job::LinkedGroup(pending)] = &jobs(press(&mut model, "\n"))[..] else {
+            panic!("no group lookup");
+        };
+        let failed = Action::Linked {
+            pending: pending.clone(),
+            group: Err("no database".into()),
+            log: Vec::new(),
+        };
+        assert!(update(&mut model, failed).is_empty());
+        assert_eq!(
+            model.log.last().unwrap().error.as_deref(),
+            Some("no database")
+        );
+        assert!(
+            prompt(&model)
+                .0
+                .starts_with("Group of the worktree for api#1")
+        );
+        assert_eq!(started_group(press(&mut model, "x\n")), Group::parse("X"));
+    }
+
+    #[test]
     fn starting_on_a_branch_already_checked_out_asks_nothing() {
         let mut model = with_issues(model());
         press(&mut model, "4]n1");
-        for _ in 0.."1-issue-api-1".len() {
-            update(
-                &mut model,
-                Action::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
-            );
-        }
+        press(&mut model, &"\x08".repeat("1-issue-api-1".len()));
         let effects = press(&mut model, "ABC-1-login\n");
         assert_eq!(started_group(effects), None, "the worktree keeps its group");
     }
