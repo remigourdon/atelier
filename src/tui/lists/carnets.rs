@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, close_tabs, pair, tab_detail, tab_mark, tag_style};
+use super::{ListKind, close_tabs, issue_keys, pair, tab_detail, tab_mark, tag_style};
+use crate::issues::TrackerConfig;
+use crate::links::group_text;
 use crate::tui::app::{Action, Cmd, Effect, Job, Kind, List, Model, Submit, Work, WorkKind};
 use crate::tui::update::{run, update};
 use crate::tui::view::{Palette, icon};
@@ -23,20 +25,19 @@ pub struct Search {
 
 impl Model {
     /// The Carnets rows, newest first: those the search found, matching the filter on their
-    /// folder name, tickets and summary.
+    /// folder name, group, issue keys and summary.
     pub fn carnet_rows(&self) -> Vec<&Work> {
         (self.snapshot.carnets.iter())
             .filter(|work| {
                 (self.search.as_ref()).is_none_or(|search| search.hits.contains_key(&work.path))
             })
             .filter(|work| {
-                let (tickets, summary) = match &work.kind {
-                    WorkKind::Carnet {
-                        tickets, summary, ..
-                    } => (tickets.join(" "), summary.as_str()),
-                    WorkKind::Worktree { .. } => (String::new(), ""),
+                let summary = match &work.kind {
+                    WorkKind::Carnet { summary, .. } => summary.as_str(),
+                    WorkKind::Worktree { .. } => "",
                 };
-                self.matches(List::Carnets, &[&work.title(), &tickets, summary])
+                let (group, keys) = (group_text(work.group()), work.links.issue_keys.join(" "));
+                self.matches(List::Carnets, &[&work.title(), group, &keys, summary])
             })
             .collect()
     }
@@ -60,21 +61,23 @@ fn closed_mark(palette: &Palette) -> Span<'static> {
 }
 
 /// A carnet's detail, in either list.
-pub fn detail(work: &Work, palette: &Palette) -> Vec<(String, Line<'static>)> {
-    let (tickets, closed, summary) = match &work.kind {
+pub fn detail(
+    work: &Work,
+    tracker: &TrackerConfig,
+    palette: &Palette,
+) -> Vec<(String, Line<'static>)> {
+    let (closed, summary) = match &work.kind {
         WorkKind::Carnet {
-            tickets,
-            closed,
-            summary,
-            ..
-        } => (tickets.join(", "), *closed, summary.clone()),
+            closed, summary, ..
+        } => (*closed, summary.clone()),
         WorkKind::Worktree { .. } => return Vec::new(),
     };
     let mut pairs = vec![
         pair("Carnet", work.title()),
         pair("Path", work.path.display().to_string()),
         pair("Workspace", work.workspace.clone()),
-        pair("Tickets", Span::styled(tickets, tag_style(palette))),
+        pair("Group", group_text(work.group()).to_owned()),
+        pair("Issue keys", issue_keys(work, tracker, ", ", palette)),
         pair("Summary", summary),
         pair("Tab", tab_detail(work.tab, palette)),
     ];
@@ -111,12 +114,13 @@ impl ListKind for Carnets {
                 let mut spans = vec![tab_mark(work.tab, palette)];
                 spans.extend(icon(glyphs.carnet, dim));
                 spans.push(Span::raw(work.title()));
-                let tickets = work.tickets();
-                if !tickets.is_empty() {
-                    spans.push(Span::styled(
-                        format!(" {}", tickets.join(",")),
-                        tag_style(palette),
-                    ));
+                if let Some(group) = work.group() {
+                    spans.push(Span::styled(format!(" {group}"), tag_style(palette)));
+                }
+                if !work.links.issue_keys.is_empty() {
+                    let keys = issue_keys(work, &model.tracker_config, ",", palette);
+                    spans.push(Span::raw(" "));
+                    spans.push(keys);
                 }
                 if work.closed() {
                     spans.push(Span::raw(" "));
@@ -139,7 +143,7 @@ impl ListKind for Carnets {
         _list: List,
     ) -> Vec<(String, Line<'static>)> {
         (model.carnet())
-            .map(|work| detail(work, palette))
+            .map(|work| detail(work, &model.tracker_config, palette))
             .unwrap_or_default()
     }
 

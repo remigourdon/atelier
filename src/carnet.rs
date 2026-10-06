@@ -6,49 +6,33 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use color_eyre::eyre::{Result, WrapErr, bail};
+use color_eyre::eyre::{Result, WrapErr, bail, eyre};
 use regex::Regex;
 use toml_edit::{Array, DocumentMut, value};
 
+use crate::config::Config;
 use crate::git;
+use crate::issues::TrackerConfig;
+use crate::links::{Group, IssueKeys, Links, group_text};
 use crate::process::{Runner, exited_with};
 use crate::state::{ItemKind, State, dir_name};
 
 /// The line that opens and closes a README's front matter.
 const FENCE: &str = "+++";
 
-/// How carnet names carry a ticket key: right after the date in a folder name, and at the
-/// start of a typed name.
+/// How carnets are named: a folder by its date, and an issue key typed at the start of a name.
 #[derive(Debug, Clone)]
-pub struct Names {
+struct Names {
     dated: Regex,
-    folder: Regex,
     typed: Regex,
-    key: Regex,
-    github: Regex,
 }
 
 impl Names {
-    pub fn new(ticket_pattern: &str) -> Result<Self> {
-        let key = format!("((?:{ticket_pattern}))");
+    fn new(issue_key_pattern: &str) -> Result<Self> {
         Ok(Self {
             dated: Regex::new(r"^(\d{4}-\d{2}-\d{2})-(.+)$")?,
-            folder: Regex::new(&format!(r"^\d{{4}}-\d{{2}}-\d{{2}}-{key}(?:-|$)"))?,
-            typed: Regex::new(&format!(r"^{key}(?:[\s_-]+|$)"))?,
-            key: Regex::new(&format!("^{key}$"))?,
-            github: Regex::new(r"^(?:[\w.-]+/)?[\w.-]+#[1-9][0-9]*$")?,
+            typed: Regex::new(&format!(r"^((?:{issue_key_pattern}))(?:[\s_-]+|$)"))?,
         })
-    }
-
-    /// The group a carnet's folder name gives: the ticket key right after its date, or `""`.
-    pub fn group(&self, folder: &str) -> String {
-        (self.folder.captures(folder)).map_or_else(String::new, |captures| captures[1].to_owned())
-    }
-
-    /// Whether `group` is a ticket key or a GitHub issue key (`repo#12`, `owner/repo#12`),
-    /// rather than a label set by hand.
-    fn is_ticket(&self, group: &str) -> bool {
-        self.key.is_match(group) || self.github.is_match(group)
     }
 
     /// The folder name, after the date, of a carnet named `name`, and the key typed at its
@@ -78,19 +62,11 @@ pub struct Carnet {
     pub name: String,
     /// `YYYY-MM-DD`.
     pub date: String,
-    /// Its first ticket is its group.
-    pub tickets: Vec<String>,
+    pub links: Links,
     pub closed: bool,
     pub summary: String,
     /// Its README's stamp, `None` when it has none.
     pub readme: Option<Stamp>,
-}
-
-impl Carnet {
-    /// Its group: its first ticket, or `""`.
-    pub fn group(&self) -> &str {
-        self.tickets.first().map_or("", String::as_str)
-    }
 }
 
 /// A README's size and modification time, which change when it is written, so a copy read
@@ -134,8 +110,8 @@ fn read_front(readme: &Path) -> String {
 }
 
 /// Every carnet directly under `root`: a directory named `YYYY-MM-DD-…` with a `.git`, newest
-/// first. A missing root holds none.
-pub fn scan(root: &Path, names: &Names) -> Result<Vec<Carnet>> {
+/// first, its front matter normalised. A missing root holds none.
+fn scan(root: &Path, names: &Names, tracker: &TrackerConfig) -> Result<Vec<Carnet>> {
     let Ok(root) = root.canonicalize() else {
         return Ok(Vec::new());
     };
@@ -151,7 +127,10 @@ pub fn scan(root: &Path, names: &Names) -> Result<Vec<Carnet>> {
         }
         let front = Front::parse(&read_front(&path.join("README.md"))).unwrap_or_default();
         carnets.push(Carnet {
-            tickets: front.tickets().unwrap_or_else(|| fallback(names, &folder)),
+            links: Links {
+                group: front.group(),
+                issue_keys: front.issues(tracker),
+            },
             closed: front.closed(),
             summary: front.summary(),
             date: captures[1].to_owned(),
@@ -162,21 +141,6 @@ pub fn scan(root: &Path, names: &Names) -> Result<Vec<Carnet>> {
     }
     carnets.sort_by(|a, b| b.path.cmp(&a.path));
     Ok(carnets)
-}
-
-/// The tickets of a carnet whose front matter names none: the key after its date, if any.
-fn fallback(names: &Names, folder: &str) -> Vec<String> {
-    Some(names.group(folder))
-        .filter(|key| !key.is_empty())
-        .into_iter()
-        .collect()
-}
-
-/// The newest open carnet listing `key` among its tickets.
-pub fn newest_open<'a>(carnets: &'a [Carnet], key: &str) -> Option<&'a Carnet> {
-    (carnets.iter())
-        .filter(|carnet| !carnet.closed && carnet.tickets.iter().any(|ticket| ticket == key))
-        .max_by(|a, b| a.path.cmp(&b.path))
 }
 
 /// A README's front matter and the rest of it.
@@ -204,19 +168,35 @@ impl Front {
         })
     }
 
-    fn tickets(&self) -> Option<Vec<String>> {
-        let tickets = self.doc.get("tickets")?.as_array()?;
-        Some(
-            tickets
-                .iter()
-                .filter_map(|ticket| ticket.as_str())
-                .map(Into::into)
-                .collect(),
-        )
+    /// Its `group`, normalised.
+    fn group(&self) -> Option<Group> {
+        Group::parse((self.doc.get("group")).and_then(|group| group.as_str())?)
     }
 
-    fn set_tickets(&mut self, tickets: &[String]) {
-        self.doc["tickets"] = value(tickets.iter().collect::<Array>());
+    fn set_group(&mut self, group: Option<&Group>) {
+        self.doc["group"] = value(group_text(group));
+    }
+
+    /// Its `issues`, each short GitHub key resolved against `tracker`.
+    fn issues(&self, tracker: &TrackerConfig) -> IssueKeys {
+        let issues = self.doc.get("issues").and_then(|issues| issues.as_array());
+        let keys = issues.into_iter().flatten().filter_map(|key| key.as_str());
+        IssueKeys::resolve(keys, tracker)
+    }
+
+    fn set_issues(&mut self, keys: &IssueKeys) {
+        self.doc["issues"] = value(keys.iter().map(|key| key.as_str()).collect::<Array>());
+    }
+
+    /// Writes every key in its normal form, in order: `group`, `issues`, `summary` and
+    /// `closed`, each as read, the absent ones empty.
+    fn normalise(&mut self, tracker: &TrackerConfig) {
+        let (group, keys) = (self.group(), self.issues(tracker));
+        let (summary, closed) = (self.summary(), self.closed());
+        self.set_group(group.as_ref());
+        self.set_issues(&keys);
+        self.doc["summary"] = value(summary);
+        self.doc["closed"] = value(closed);
     }
 
     fn closed(&self) -> bool {
@@ -268,124 +248,177 @@ pub fn body(readme: &str) -> &str {
     split(readme).map_or(readme, |(_, body)| body)
 }
 
-/// Edits a carnet's front matter with `edit`, which says how to describe the change, or that
-/// there is none. Writes the README and commits only it.
-fn edit(
-    runner: &dyn Runner,
-    path: &Path,
-    edit: impl FnOnce(&mut Front) -> Option<String>,
-) -> Result<()> {
-    let readme_path = path.join("README.md");
-    let readme = std::fs::read_to_string(&readme_path).unwrap_or_default();
-    let mut front = Front::parse(&readme)?;
-    let Some(message) = edit(&mut front) else {
-        return Ok(());
-    };
-    std::fs::write(&readme_path, front.render())?;
-    commit(runner, path, &message)
-}
-
 fn commit(runner: &dyn Runner, path: &Path, message: &str) -> Result<()> {
     git::add(runner, path, "README.md")?;
     git::commit(runner, path, message, "README.md")
 }
 
-/// Sets a carnet's first ticket, keeping the others; an empty `key` removes the first one.
-/// Returns its tickets.
-pub fn set_first_ticket(
-    runner: &dyn Runner,
-    names: &Names,
-    path: &Path,
-    key: &str,
-) -> Result<Vec<String>> {
-    let mut tickets = Vec::new();
-    edit(runner, path, |front| {
-        tickets = front
-            .tickets()
-            .unwrap_or_else(|| fallback(names, &dir_name(path)));
-        let message = if key.is_empty() {
-            if tickets.is_empty() {
-                return None;
-            }
-            format!("Unlink {}", tickets.remove(0))
-        } else {
-            if tickets.first().map(String::as_str) == Some(key) {
-                return None;
-            }
-            tickets.retain(|ticket| ticket != key);
-            match tickets.first_mut() {
-                Some(first) => *first = key.to_owned(),
-                None => tickets.push(key.to_owned()),
-            }
-            format!("Link {key}")
-        };
-        front.set_tickets(&tickets);
-        Some(message)
-    })?;
-    Ok(tickets)
+/// The carnets under the configured root, named by the issue key pattern, their issue keys
+/// resolved against the configured trackers.
+pub struct Carnets<'a> {
+    /// `None` while carnets are disabled.
+    root: Option<PathBuf>,
+    names: Names,
+    tracker: &'a TrackerConfig,
 }
 
-pub fn set_closed(runner: &dyn Runner, path: &Path, closed: bool) -> Result<()> {
-    edit(runner, path, |front| {
-        if front.closed() == closed {
-            return None;
+impl<'a> Carnets<'a> {
+    pub fn new(config: &'a Config) -> Result<Self> {
+        Ok(Self {
+            root: config.carnet_root(),
+            names: Names::new(config.issue_key_pattern())?,
+            tracker: &config.tracker,
+        })
+    }
+
+    /// Where carnets live, or why there are none.
+    pub fn root(&self) -> Result<&Path> {
+        (self.root.as_deref())
+            .ok_or_else(|| eyre!("carnets are disabled: set `root` under [carnets] in the config"))
+    }
+
+    /// Every carnet, newest first; none while carnets are disabled.
+    pub fn scan(&self) -> Result<Vec<Carnet>> {
+        match &self.root {
+            Some(root) => scan(root, &self.names, self.tracker),
+            None => Ok(Vec::new()),
         }
-        front.doc["closed"] = value(closed);
-        Some(if closed { "Close" } else { "Reopen" }.into())
-    })
-}
+    }
 
-/// Creates `<root>/<today>-<name in kebab case>`, keeping a key typed at the start of `name`,
-/// with a README titled `name` whose ticket is that key, else `group` when it is a ticket key.
-/// Makes it a git repo, commits the README, and records the carnet in `workspace`. Returns its
-/// path.
-pub fn create(
-    state: &State,
-    runner: &dyn Runner,
-    names: &Names,
-    root: &Path,
-    name: &str,
-    workspace: &str,
-    group: &str,
-) -> Result<PathBuf> {
-    let name = name.trim();
-    if name.contains('/') {
-        bail!("a carnet name must not contain /");
-    }
-    let (slug, key) = names.slug(name);
-    if slug.is_empty() {
-        bail!("a carnet name must not be empty");
-    }
-    state.require_workspace(workspace)?;
-    let path = root.join(format!("{}-{slug}", state.today()?));
-    if path.exists() {
-        bail!("{} already exists", path.display());
-    }
-    let tickets: Vec<String> = key
-        .or_else(|| Some(group.to_owned()).filter(|group| names.is_ticket(group)))
-        .into_iter()
-        .collect();
-    std::fs::create_dir_all(&path)?;
-    let path = path.canonicalize()?;
-    let made = (|| {
-        let mut front = Front {
-            body: format!("# {name}\n"),
-            ..Front::default()
+    /// Edits a carnet's front matter, in its normal form, with `edit`, which says how to
+    /// describe the change, or that there is none. Writes the README and commits only it.
+    fn edit(
+        &self,
+        runner: &dyn Runner,
+        path: &Path,
+        edit: impl FnOnce(&mut Front) -> Option<String>,
+    ) -> Result<()> {
+        let readme_path = path.join("README.md");
+        let readme = std::fs::read_to_string(&readme_path).unwrap_or_default();
+        let mut front = Front::parse(&readme)?;
+        front.normalise(self.tracker);
+        let Some(message) = edit(&mut front) else {
+            return Ok(());
         };
-        front.set_tickets(&tickets);
-        front.doc["summary"] = value("");
-        std::fs::write(path.join("README.md"), front.render())?;
-        git::init(runner, &path)?;
-        commit(runner, &path, "Create carnet")?;
-        let group = tickets.first().map_or("", String::as_str);
-        state.add_item(&path, ItemKind::Carnet, None, group, workspace)
-    })();
-    // A half-made folder would block retrying under the same name.
-    if let Err(err) = made {
-        let _ = std::fs::remove_dir_all(&path);
-        return Err(err);
+        std::fs::write(&readme_path, front.render())?;
+        commit(runner, path, &message)
     }
-    Ok(path)
+
+    /// Puts a carnet in `group`, or in none.
+    pub fn set_group(&self, runner: &dyn Runner, path: &Path, group: Option<&Group>) -> Result<()> {
+        self.edit(runner, path, |front| {
+            if front.group().as_ref() == group {
+                return None;
+            }
+            front.set_group(group);
+            Some(match group {
+                None => "Ungroup".into(),
+                Some(group) => format!("Set group {group}"),
+            })
+        })
+    }
+
+    pub fn set_closed(&self, runner: &dyn Runner, path: &Path, closed: bool) -> Result<()> {
+        self.edit(runner, path, |front| {
+            if front.closed() == closed {
+                return None;
+            }
+            front.doc["closed"] = value(closed);
+            Some(if closed { "Close" } else { "Reopen" }.into())
+        })
+    }
+
+    /// Creates `<root>/<today>-<name in kebab case>`, keeping an issue key typed at the start
+    /// of `name`, with a README titled `name` in `group` and linking that key. Makes it a git
+    /// repo, commits the README, and records the carnet in `workspace`. Returns its path.
+    pub fn create(
+        &self,
+        state: &State,
+        runner: &dyn Runner,
+        name: &str,
+        workspace: &str,
+        group: Option<&Group>,
+    ) -> Result<PathBuf> {
+        let root = self.root()?;
+        let name = name.trim();
+        if name.contains('/') {
+            bail!("a carnet name must not contain /");
+        }
+        let (slug, key) = self.names.slug(name);
+        if slug.is_empty() {
+            bail!("a carnet name must not be empty");
+        }
+        state.require_workspace(workspace)?;
+        let path = root.join(format!("{}-{slug}", state.today()?));
+        if path.exists() {
+            bail!("{} already exists", path.display());
+        }
+        let links = Links {
+            group: group.cloned(),
+            issue_keys: IssueKeys::resolve(key.as_deref(), self.tracker),
+        };
+        std::fs::create_dir_all(&path)?;
+        let path = path.canonicalize()?;
+        let made = (|| {
+            let mut front = Front {
+                body: format!("# {name}\n"),
+                ..Front::default()
+            };
+            front.normalise(self.tracker);
+            front.set_group(links.group.as_ref());
+            front.set_issues(&links.issue_keys);
+            std::fs::write(path.join("README.md"), front.render())?;
+            git::init(runner, &path)?;
+            commit(runner, &path, "Create carnet")?;
+            state.add_item(&path, ItemKind::Carnet, None, &links, workspace)
+        })();
+        // A half-made folder would block retrying under the same name.
+        if let Err(err) = made {
+            let _ = std::fs::remove_dir_all(&path);
+            return Err(err);
+        }
+        Ok(path)
+    }
+
+    /// Searches every carnet for `text` with `rg`, its output on the terminal.
+    pub fn search(&self, runner: &dyn Runner, text: &str) -> Result<()> {
+        let root = self.root()?;
+        if !on_path("rg") {
+            bail!(NO_RIPGREP);
+        }
+        let root = root.to_string_lossy();
+        match runner.interactive("rg", &search_args(text, &root)) {
+            // `rg` exits 1 when nothing matches.
+            Err(err) if exited_with(&err, 1) => {
+                eprintln!("no carnet mentions {text}");
+                Ok(())
+            }
+            result => result,
+        }
+    }
+
+    /// Searches every carnet for `text` with `rg`, as the TUI does: each carnet with hits, and
+    /// its hit lines as `<file>:<line>:<text>`.
+    pub fn hits(&self, runner: &dyn Runner, text: &str) -> Result<BTreeMap<PathBuf, Vec<String>>> {
+        let root = self.root()?;
+        if !on_path("rg") {
+            bail!(NO_RIPGREP);
+        }
+        // Canonical, as the scan lists carnets.
+        let root = root
+            .canonicalize()
+            .wrap_err_with(|| format!("{}", root.display()))?;
+        let root_arg = root.to_string_lossy();
+        let mut args = vec!["--no-heading"];
+        args.extend(search_args(text, &root_arg));
+        let output = match runner.output("rg", &args) {
+            Ok(output) => output,
+            // `rg` exits 1 when nothing matches.
+            Err(err) if exited_with(&err, 1) => String::new(),
+            Err(err) => return Err(err),
+        };
+        Ok(group_hits(&root, &output))
+    }
 }
 
 /// The arguments of `rg` searching every carnet under `root` for `text`.
@@ -406,48 +439,6 @@ pub const NO_RIPGREP: &str = "carnet search needs ripgrep (rg) on PATH";
 pub fn on_path(program: &str) -> bool {
     std::env::var_os("PATH")
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(program).is_file()))
-}
-
-/// Searches every carnet under `root` for `text` with `rg`, its output on the terminal.
-pub fn search(runner: &dyn Runner, root: &Path, text: &str) -> Result<()> {
-    if !on_path("rg") {
-        bail!(NO_RIPGREP);
-    }
-    let root = root.to_string_lossy();
-    match runner.interactive("rg", &search_args(text, &root)) {
-        // `rg` exits 1 when nothing matches.
-        Err(err) if exited_with(&err, 1) => {
-            eprintln!("no carnet mentions {text}");
-            Ok(())
-        }
-        result => result,
-    }
-}
-
-/// Searches every carnet under `root` for `text` with `rg`, as the TUI does: each carnet with
-/// hits, and its hit lines as `<file>:<line>:<text>`.
-pub fn hits(
-    runner: &dyn Runner,
-    root: &Path,
-    text: &str,
-) -> Result<BTreeMap<PathBuf, Vec<String>>> {
-    if !on_path("rg") {
-        bail!(NO_RIPGREP);
-    }
-    // Canonical, as the scan lists carnets.
-    let root = root
-        .canonicalize()
-        .wrap_err_with(|| format!("{}", root.display()))?;
-    let root_arg = root.to_string_lossy();
-    let mut args = vec!["--no-heading"];
-    args.extend(search_args(text, &root_arg));
-    let output = match runner.output("rg", &args) {
-        Ok(output) => output,
-        // `rg` exits 1 when nothing matches.
-        Err(err) if exited_with(&err, 1) => String::new(),
-        Err(err) => return Err(err),
-    };
-    Ok(group_hits(&root, &output))
 }
 
 /// `rg --no-heading` output grouped by the carnet folder each hit is in.
@@ -472,7 +463,8 @@ pub mod tests {
     use rusqlite::Connection;
 
     use super::*;
-    use crate::config::Config;
+    use crate::links::IssueKey;
+    use crate::links::tests::{group, keys};
     use crate::process::fake::Fake;
 
     fn state() -> State {
@@ -482,8 +474,14 @@ pub mod tests {
         state
     }
 
-    pub fn names() -> Names {
-        Names::new(Config::default().ticket_pattern()).unwrap()
+    /// The carnets under `root`, GitHub issues coming from `o/atelier`, `o/web` and `p/web`.
+    pub fn carnets(root: &Path) -> Carnets<'static> {
+        let text = format!(
+            "[carnets]\nroot = {:?}\n[tracker.github]\nrepos = [\"o/atelier\", \"o/web\", \"p/web\"]\n",
+            root.display().to_string()
+        );
+        let config = Box::leak(Box::new(Config::parse(&text).unwrap()));
+        Carnets::new(config).unwrap()
     }
 
     /// A git repo `<dir>/<name>` with `readme`, as `git init` leaves it.
@@ -504,21 +502,30 @@ pub mod tests {
         ]
     }
 
+    fn make(
+        state: &State,
+        runner: &dyn Runner,
+        root: &Path,
+        name: &str,
+        workspace: &str,
+        group: &str,
+    ) -> Result<PathBuf> {
+        carnets(root).create(state, runner, name, workspace, self::group(group).as_ref())
+    }
+
+    /// The front matter written at `path`.
+    fn front(path: &Path) -> Front {
+        Front::parse(&std::fs::read_to_string(path.join("README.md")).unwrap()).unwrap()
+    }
+
     #[test]
     fn new_carnets_are_dated_git_repos_with_a_committed_readme() {
         let state = state();
         let root = tempfile::tempdir().unwrap();
         let fake = Fake::default();
-        let path = create(
-            &state,
-            &fake,
-            &names(),
-            &root.path().join("Data"),
-            " ABC-12 Slow login_page ",
-            "w",
-            "",
-        )
-        .unwrap();
+        let root_path = root.path().join("Data");
+        let name = " ABC-12 Slow login_page ";
+        let path = make(&state, &fake, &root_path, name, "w", " login ").unwrap();
         let name = format!("{}-ABC-12-slow-login-page", state.today().unwrap());
         assert_eq!(
             path,
@@ -526,61 +533,49 @@ pub mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(path.join("README.md")).unwrap(),
-            "+++\ntickets = [\"ABC-12\"]\nsummary = \"\"\n+++\n\n# ABC-12 Slow login_page\n"
+            "+++\ngroup = \"LOGIN\"\nissues = [\"ABC-12\"]\nsummary = \"\"\nclosed = false\n+++\n\n# ABC-12 Slow login_page\n"
         );
         let mut calls = vec![format!("git -C {} init --quiet", path.display())];
         calls.extend(commits(&path, "Create carnet"));
         assert_eq!(fake.calls(), calls);
         let item = state.require_item(&path).unwrap();
-        assert_eq!(
-            (
-                item.repo.as_deref(),
-                item.group.as_str(),
-                item.workspace.as_str()
-            ),
-            (None, "ABC-12", "w")
-        );
+        assert_eq!((item.repo.as_deref(), item.workspace.as_str()), (None, "w"));
+        assert_eq!(item.links, crate::links::tests::links("LOGIN", &["ABC-12"]));
     }
 
     #[test]
-    fn a_new_carnet_keeps_a_typed_key_else_takes_a_ticket_group() {
+    fn a_new_carnet_takes_the_group_as_given_and_links_a_typed_key() {
         let state = state();
         let root = tempfile::tempdir().unwrap();
         let fake = Fake::default();
         let today = state.today().unwrap();
-        let make = |name: &str, group: &str| {
-            let path = create(&state, &fake, &names(), root.path(), name, "w", group).unwrap();
-            let readme = std::fs::read_to_string(path.join("README.md")).unwrap();
-            let tickets = Front::parse(&readme).unwrap().tickets().unwrap();
+        let made = |name: &str, group: &str| {
+            let path = make(&state, &fake, root.path(), name, "w", group).unwrap();
+            let front = front(&path);
+            let links = Links {
+                group: front.group(),
+                issue_keys: front.issues(carnets(root.path()).tracker),
+            };
+            assert_eq!(state.require_item(&path).unwrap().links, links);
             let name = dir_name(&path);
             let name = name.strip_prefix(&format!("{today}-")).unwrap().to_owned();
-            let group = tickets.first().cloned().unwrap_or_default();
-            assert_eq!(state.require_item(&path).unwrap().group, group);
-            (name, tickets)
+            (name, links)
         };
-        let tickets = |keys: &[&str]| keys.iter().map(|key| key.to_string()).collect::<Vec<_>>();
+        let links = crate::links::tests::links;
         assert_eq!(
-            make("DEF-3 logs", "GH-1"),
-            ("DEF-3-logs".into(), tickets(&["DEF-3"]))
+            made("DEF-3 logs", "GH-1"),
+            ("DEF-3-logs".into(), links("GH-1", &["DEF-3"]))
         );
         assert_eq!(
-            make("Login timeout", "GH-1"),
-            ("login-timeout".into(), tickets(&["GH-1"]))
+            made("perf", "slow pages"),
+            ("perf".into(), links("SLOW PAGES", &[])),
+            "any group, never a key"
         );
         assert_eq!(
-            make("crash", "web#12"),
-            ("crash".into(), tickets(&["web#12"]))
+            made("notes about DEF-4", ""),
+            ("notes-about-def-4".into(), links("", &[]))
         );
-        assert_eq!(
-            make("leak", "o/web#3"),
-            ("leak".into(), tickets(&["o/web#3"]))
-        );
-        assert_eq!(make("perf", "slow pages"), ("perf".into(), tickets(&[])));
-        assert_eq!(
-            make("notes about DEF-4", ""),
-            ("notes-about-def-4".into(), tickets(&[]))
-        );
-        assert_eq!(make("XYZ-9", ""), ("XYZ-9".into(), tickets(&["XYZ-9"])));
+        assert_eq!(made("XYZ-9", ""), ("XYZ-9".into(), links("", &["XYZ-9"])));
     }
 
     #[test]
@@ -588,16 +583,25 @@ pub mod tests {
         let state = state();
         let root = tempfile::tempdir().unwrap();
         let fake = Fake::default();
-        let make = |name: &str| create(&state, &fake, &names(), root.path(), name, "w", "");
-        assert!(make("  ").unwrap_err().to_string().contains("empty"));
-        assert!(make(" _ - ").unwrap_err().to_string().contains("empty"));
-        assert!(make("a/b").unwrap_err().to_string().contains("/"));
-        make("notes").unwrap();
-        assert!(make("notes").unwrap_err().to_string().contains("exists"));
+        let named = |name: &str| make(&state, &fake, root.path(), name, "w", "");
+        assert!(named("  ").unwrap_err().to_string().contains("empty"));
+        assert!(named(" _ - ").unwrap_err().to_string().contains("empty"));
+        assert!(named("a/b").unwrap_err().to_string().contains("/"));
+        named("notes").unwrap();
+        assert!(named("notes").unwrap_err().to_string().contains("exists"));
         assert!(
-            create(&state, &fake, &names(), root.path(), "x", "nope", "").is_err(),
+            make(&state, &fake, root.path(), "x", "nope", "").is_err(),
             "an unknown workspace"
         );
+    }
+
+    #[test]
+    fn disabled_carnets_scan_none_and_create_none() {
+        let config = Config::parse("").unwrap();
+        let carnets = Carnets::new(&config).unwrap();
+        assert_eq!(carnets.scan().unwrap(), []);
+        let error = (carnets.create(&state(), &Fake::default(), "x", "w", None)).unwrap_err();
+        assert!(error.to_string().contains("[carnets]"), "{error}");
     }
 
     #[test]
@@ -605,66 +609,70 @@ pub mod tests {
         let state = state();
         let root = tempfile::tempdir().unwrap();
         let failing = Fake::default().always("git", None);
-        assert!(create(&state, &failing, &names(), root.path(), "notes", "w", "").is_err());
+        assert!(make(&state, &failing, root.path(), "notes", "w", "").is_err());
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
         assert_eq!(state.items().unwrap(), []);
-        create(
-            &state,
-            &Fake::default(),
-            &names(),
-            root.path(),
-            "notes",
-            "w",
-            "",
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn a_carnets_fallback_ticket_is_the_key_right_after_its_date() {
-        let names = names();
-        assert_eq!(names.group("2026-01-02-ORD-7-crash"), "ORD-7");
-        assert_eq!(names.group("2026-01-02-ORD-7"), "ORD-7");
-        assert_eq!(names.group("2026-01-02-crash-ORD-7"), "");
-        assert_eq!(names.group("2026-01-02-ORD-7x"), "");
-        assert_eq!(names.group("ORD-7-crash"), "");
+        make(&state, &Fake::default(), root.path(), "notes", "w", "").unwrap();
     }
 
     #[test]
     fn scan_finds_dated_git_folders_newest_first() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let front =
-            "+++\ntickets = [\"ABC-1\", \"web#2\"]\nclosed = true\nsummary = \"Slow\"\n+++\n# x\n";
+        let front = "+++\ngroup = \" login rewrite\"\nissues = [\"ABC-1\", \"o/web#2\"]\nclosed = true\nsummary = \"Slow\"\n+++\n# x\n";
         repo(root, "2026-01-02-ORD-7-crash", None);
         repo(root, "2026-03-04-notes", Some(front));
         repo(root, "2026-02-01-ORD-8-plain", Some("# no front matter\n"));
         repo(root, "undated", None);
         std::fs::create_dir(root.join("2026-05-05-not-git")).unwrap();
         std::fs::write(root.join("2026-06-06-file"), "").unwrap();
-        let carnets = scan(root, &names()).unwrap();
+        let carnets = self::carnets(root).scan().unwrap();
         let found: Vec<_> = (carnets.iter())
             .map(|carnet| {
                 (
                     carnet.date.as_str(),
                     carnet.name.as_str(),
-                    carnet.tickets.clone(),
+                    carnet.links.clone(),
                 )
             })
             .collect();
+        let links = crate::links::tests::links;
         assert_eq!(
             found,
             [
-                ("2026-03-04", "notes", vec!["ABC-1".into(), "web#2".into()]),
-                ("2026-02-01", "ORD-8-plain", vec!["ORD-8".into()]),
-                ("2026-01-02", "ORD-7-crash", vec!["ORD-7".into()]),
-            ]
+                (
+                    "2026-03-04",
+                    "notes",
+                    links("LOGIN REWRITE", &["ABC-1", "o/web#2"])
+                ),
+                ("2026-02-01", "ORD-8-plain", links("", &[])),
+                ("2026-01-02", "ORD-7-crash", links("", &[])),
+            ],
+            "without front matter, a carnet has no group and no keys, whatever its folder"
         );
         assert!(carnets[0].closed && carnets[0].summary == "Slow");
         assert!(!carnets[1].closed && carnets[1].summary.is_empty());
         assert_eq!(carnets[1].readme.map(|stamp| stamp.len), Some(18));
         assert_eq!(carnets[2].readme, None);
-        assert_eq!(scan(&root.join("missing"), &names()).unwrap(), []);
+        assert_eq!(self::carnets(&root.join("missing")).scan().unwrap(), []);
+    }
+
+    #[test]
+    fn short_github_keys_resolve_against_tracker_repos_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let front = "+++\nissues = [\"atelier#14\", \"web#3\", \"api#2\", \"ABC-1\"]\n+++\n";
+        let path = repo(dir.path(), "2026-01-02-x", Some(front));
+        let carnets = carnets(dir.path()).scan().unwrap();
+        assert_eq!(
+            carnets[0].links.issue_keys,
+            keys(&["o/atelier#14", "web#3", "api#2", "ABC-1"]),
+            "web is ambiguous, api is no tracker repo"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("README.md")).unwrap(),
+            front,
+            "reading never rewrites"
+        );
     }
 
     #[test]
@@ -682,48 +690,52 @@ pub mod tests {
     }
 
     #[test]
-    fn an_empty_tickets_key_overrides_the_folder_key() {
-        let dir = tempfile::tempdir().unwrap();
-        repo(
-            dir.path(),
-            "2026-01-02-ORD-7-crash",
-            Some("+++\ntickets = []\n+++\n"),
-        );
-        assert_eq!(
-            scan(dir.path(), &names()).unwrap()[0].tickets,
-            Vec::<String>::new()
-        );
-    }
-
-    #[test]
     fn front_matter_edits_keep_other_keys_comments_and_the_body() {
         let dir = tempfile::tempdir().unwrap();
-        let readme = "+++\n# why\nowner = \"me\" # mine\ntickets = [\"A-1\", \"B-2\"]\n+++\n# Title\n\n+++ not a fence\n";
+        let readme =
+            "+++\n# why\nowner = \"me\" # mine\ngroup = \"A\"\n+++\n# Title\n\n+++ not a fence\n";
         let path = repo(dir.path(), "2026-01-02-x", Some(readme));
         let fake = Fake::default();
-        let tickets = set_first_ticket(&fake, &names(), &path, "C-3").unwrap();
-        assert_eq!(tickets, ["C-3", "B-2"]);
+        let carnets = carnets(dir.path());
+        let login = group("login rewrite");
+        carnets.set_group(&fake, &path, login.as_ref()).unwrap();
         let written = std::fs::read_to_string(path.join("README.md")).unwrap();
         assert_eq!(
             written,
-            "+++\n# why\nowner = \"me\" # mine\ntickets = [\"C-3\", \"B-2\"]\n+++\n# Title\n\n+++ not a fence\n"
+            "+++\n# why\nowner = \"me\" # mine\ngroup = \"LOGIN REWRITE\"\nissues = []\nsummary = \"\"\nclosed = false\n+++\n# Title\n\n+++ not a fence\n"
         );
-        assert_eq!(fake.calls(), commits(&path, "Link C-3"));
-        set_closed(&fake, &path, true).unwrap();
+        assert_eq!(fake.calls(), commits(&path, "Set group LOGIN REWRITE"));
+        carnets.set_closed(&fake, &path, true).unwrap();
         let written = std::fs::read_to_string(path.join("README.md")).unwrap();
         assert!(
             written.contains("closed = true\n+++\n# Title\n"),
             "{written}"
         );
         assert_eq!(fake.calls()[2..], commits(&path, "Close"));
-        set_closed(&fake, &path, true).unwrap();
-        set_first_ticket(&fake, &names(), &path, "C-3").unwrap();
+        carnets.set_closed(&fake, &path, true).unwrap();
+        carnets.set_group(&fake, &path, login.as_ref()).unwrap();
         assert_eq!(fake.calls().len(), 4, "no change, no commit");
-        set_closed(&fake, &path, false).unwrap();
+        carnets.set_closed(&fake, &path, false).unwrap();
         assert_eq!(fake.calls()[4..], commits(&path, "Reopen"));
-        let tickets = set_first_ticket(&fake, &names(), &path, "").unwrap();
-        assert_eq!(tickets, ["B-2"]);
-        assert_eq!(fake.calls()[6..], commits(&path, "Unlink C-3"));
+        carnets.set_group(&fake, &path, None).unwrap();
+        assert_eq!(front(&path).group(), None);
+        assert_eq!(fake.calls()[6..], commits(&path, "Ungroup"));
+    }
+
+    #[test]
+    fn an_edit_writes_every_key_in_its_normal_form() {
+        let dir = tempfile::tempdir().unwrap();
+        let readme = "+++\ngroup = \"login\"\nissues = [\"atelier#14\", \"ABC-1\"]\n+++\n";
+        let path = repo(dir.path(), "2026-01-02-x", Some(readme));
+        (carnets(dir.path()).set_closed(&Fake::default(), &path, true)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(path.join("README.md")).unwrap(),
+            "+++\ngroup = \"LOGIN\"\nissues = [\"o/atelier#14\", \"ABC-1\"]\nsummary = \"\"\nclosed = true\n+++\n"
+        );
+        assert_eq!(
+            front(&path).issues(carnets(dir.path()).tracker).first(),
+            Some(&IssueKey::listed("o/atelier#14".into()))
+        );
     }
 
     #[test]
@@ -731,20 +743,20 @@ pub mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = repo(dir.path(), "2026-01-02-ORD-7-crash", Some("# Crash\n"));
         let fake = Fake::default();
-        assert_eq!(
-            set_first_ticket(&fake, &names(), &path, "web#4").unwrap(),
-            ["web#4"]
-        );
+        let carnets = carnets(dir.path());
+        carnets
+            .set_group(&fake, &path, group("crash").as_ref())
+            .unwrap();
         assert_eq!(
             std::fs::read_to_string(path.join("README.md")).unwrap(),
-            "+++\ntickets = [\"web#4\"]\n+++\n\n# Crash\n",
-            "the folder's key was its one ticket"
+            "+++\ngroup = \"CRASH\"\nissues = []\nsummary = \"\"\nclosed = false\n+++\n\n# Crash\n",
+            "the folder's key is no issue key"
         );
         let bare = repo(dir.path(), "2026-01-03-bare", None);
-        set_closed(&fake, &bare, true).unwrap();
+        carnets.set_closed(&fake, &bare, true).unwrap();
         assert_eq!(
             std::fs::read_to_string(bare.join("README.md")).unwrap(),
-            "+++\nclosed = true\n+++\n"
+            "+++\ngroup = \"\"\nissues = []\nsummary = \"\"\nclosed = true\n+++\n"
         );
         let broken = repo(
             dir.path(),
@@ -752,7 +764,7 @@ pub mod tests {
             Some("+++\nnot toml\n+++\n"),
         );
         assert!(
-            set_closed(&fake, &broken, true).is_err(),
+            carnets.set_closed(&fake, &broken, true).is_err(),
             "never overwritten"
         );
     }
@@ -762,23 +774,6 @@ pub mod tests {
         assert_eq!(body("+++\na = 1\n+++\n# T\n"), "# T\n");
         assert_eq!(body("# T\n+++\n"), "# T\n+++\n");
         assert_eq!(body("+++\nunclosed\n"), "+++\nunclosed\n");
-    }
-
-    #[test]
-    fn the_newest_open_carnet_of_a_key() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        repo(root, "2026-01-01-ORD-7-a", None);
-        repo(root, "2026-01-02-ORD-7-b", None);
-        repo(
-            root,
-            "2026-01-03-ORD-7-c",
-            Some("+++\nclosed = true\n+++\n"),
-        );
-        let carnets = scan(root, &names()).unwrap();
-        let found = newest_open(&carnets, "ORD-7").unwrap();
-        assert_eq!(found.name, "ORD-7-b");
-        assert!(newest_open(&carnets, "ORD-8").is_none());
     }
 
     #[test]

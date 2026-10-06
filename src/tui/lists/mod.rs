@@ -18,6 +18,7 @@ use super::app::{Cmd, Effect, Job, Kind, List, Model, Work};
 use super::update::run;
 use super::view::Palette;
 use crate::finish::Scope;
+use crate::issues::TrackerConfig;
 
 /// A kind of list. Methods take the `List`, so the issue sections share one implementation;
 /// operations a list doesn't support do nothing.
@@ -134,9 +135,20 @@ pub(super) fn subtle(text: impl Into<Cow<'static, str>>, palette: &Palette) -> S
     Span::styled(text, Style::new().fg(palette.dim))
 }
 
-/// A carnet's tickets and an issue's labels.
+/// A group, an item's issue keys and an issue's labels.
 fn tag_style(palette: &Palette) -> Style {
     Style::new().fg(palette.info)
+}
+
+/// An item's issue keys as shown, joined by `separator`.
+fn issue_keys(
+    work: &Work,
+    tracker: &TrackerConfig,
+    separator: &str,
+    palette: &Palette,
+) -> Span<'static> {
+    let keys = work.links.issue_keys.display(tracker, separator);
+    Span::styled(keys, tag_style(palette))
 }
 
 /// The mark of an item whose tab is open or closed, and its style.

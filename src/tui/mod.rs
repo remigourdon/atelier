@@ -154,6 +154,7 @@ mod tests {
     use super::*;
     use crate::config::Icons;
     use crate::git::Commit;
+    use crate::links::tests::key as issue_key;
 
     #[test]
     fn base64_pads() {
@@ -250,8 +251,8 @@ mod tests {
         use crate::issues::{parse_gh, tests};
         let mut model = loaded(120, 30);
         model.tracker_config = crate::config::Config::parse(tests::SCHEME).unwrap().tracker;
-        let mut issues = parse_gh(tests::GH, false).unwrap();
-        issues.extend(parse_gh(tests::GH_CLOSED, false).unwrap());
+        let mut issues = parse_gh(tests::GH).unwrap();
+        issues.extend(parse_gh(tests::GH_CLOSED).unwrap());
         update(
             &mut model,
             Action::Fetched {
@@ -339,9 +340,9 @@ mod tests {
         let code = style_of(&buffer, "notes.md");
         assert_eq!(code.fg, Some(colors.maroon.into()));
         assert_eq!(code.bg, Some(colors.mantle.into()));
-        assert_eq!(style_of(&buffer, "Tickets").fg, Some(palette.label));
+        assert_eq!(style_of(&buffer, "Issue keys").fg, Some(palette.label));
         assert_eq!(
-            style_of(&buffer, "Tickets    none").fg,
+            style_of(&buffer, "Issue keys  none").fg,
             Some(palette.label),
             "an empty value reads none"
         );
@@ -370,16 +371,16 @@ mod tests {
     #[test]
     fn carnets_sub_tab() {
         let mut model = update::tests::with_carnets(loaded(120, 30));
-        // One open carnet, with a tab, a second ticket and a summary, and one closed.
+        // One open carnet, with a tab, a second issue key and a summary, and one closed.
         model.snapshot.carnets.retain(|work| {
             work.path.ends_with("2026-10-01-ABC-1-logs") || work.path.ends_with("2026-08-01-done")
         });
         model.snapshot.carnets[0].tab = true;
-        if let WorkKind::Carnet {
-            tickets, summary, ..
-        } = &mut model.snapshot.carnets[0].kind
-        {
-            tickets.push("api#4".into());
+        model.snapshot.carnets[0]
+            .links
+            .issue_keys
+            .push(issue_key("o/api#4"));
+        if let WorkKind::Carnet { summary, .. } = &mut model.snapshot.carnets[0].kind {
             *summary = "Login fails after the token refresh".into();
         }
         update(&mut model, Action::Key(key(']')));

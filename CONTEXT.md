@@ -7,17 +7,18 @@ Atelier organises git worktrees into zellij sessions, on top of worktrunk (`wt`)
 - **Item** — something atelier can open in a tab: a worktree or a carnet. Each item belongs to exactly one workspace.
 - **Worktree** — a git worktree of a registered repo, created and removed through worktrunk.
 - **Main worktree** — a repo's primary checkout. Always listed.
-- **Carnet** — an investigation folder `<root>/YYYY-MM-DD-<name>` that is its own git repo, with only its main worktree; together the carnets are a searchable history of investigations. The folder itself is the record: the front matter of its README names its tickets, whether it is closed, and a one-line summary. An item of its own kind, never a registered repo: worktrees made of it by hand are not tracked. Its group is its first ticket. Optional.
+- **Carnet** — an investigation folder `<root>/YYYY-MM-DD-<name>` that is its own git repo, with only its main worktree; together the carnets are a searchable history of investigations. The folder itself is the record: the front matter of its README holds its `group`, the `issues` it links, whether it is `closed`, and a one-line `summary`. Without front matter it has no group and links nothing, whatever its folder is named. An item of its own kind, never a registered repo: worktrees made of it by hand are not tracked. Optional.
 - **Closed carnet** — a carnet whose investigation is over: out of the Work panel, still listed and searchable with every other carnet.
-- **Group** — a label shared by items about the same ticket, derived from a ticket key (`ABC-123`) in the branch or name, or a carnet's first ticket, or set by hand.
+- **Group** — a free-form label that helps a person see what they are working on, trimmed and uppercased wherever it comes in (`LOGIN REWRITE`). Optional, independent of workspaces, and able to span them. A group never carries issue keys.
 - **Tab** — the zellij tab opened for an item, recorded as session, tab id and anchor pane id.
 - **Anchor pane** — the pane named `editor` in the worktree layout; atelier finds a tab's pane by this name.
 - **Review** — an open GitHub pull request or GitLab merge request, either to review or authored by me.
 - **CI** — worktrunk's status of a worktree's branch: its checks (passed, running, failed), merge conflicts, or its review's decision (changes requested, approval pending); stale when the local head is not the one checked. A default branch has its own workflow's checks and no review.
-- **Issue** — a tracker item (GitHub or Jira) normalised to `state`, `labels` and `blocked`.
+- **Issue** — a tracker record (GitHub or Jira) normalised to `state`, `labels` and `blocked`.
+- **Issue key** — an issue's identifier: `ABC-5` on Jira; on GitHub always `owner/repo#12`, shown as `repo#12` when no other configured repo shares the name. Every item links issues through its own ordered list of issue keys.
 - **State** — an issue's normalised progress: `todo`, `in_progress` or `done`.
 - **Section** — an ordered rule that places issues in an Issues sub-tab; first match wins.
-- **Linked work** — the worktrees whose group is an issue's key (`ABC-123`, or `repo#12` on GitHub, with the owner when two configured repos share a name), and the carnets that list that key among their tickets.
+- **Linked work** — every item, worktree or carnet, that links an issue's key, in any group.
 - **Finished worktree** — a worktree other than a main one whose work is merged, as of the last fetch: worktrunk reports its branch integrated into the default branch, or its branch's upstream is gone. Integrated wins when both hold.
-- **Finish plan** — the toggleable lines `f` shows for a group, a workspace or an issue's linked work: remove each finished worktree, close the group's carnet, pull each main worktree, and why the rest stays.
+- **Finish plan** — the toggleable lines `f` shows for a group, a workspace or an issue (the whole groups of its linked work, and its linked items in no group alone): remove each finished worktree, close each open carnet of the group, pull each main worktree, and why the rest stays.
 - **Command log** — the TUI's record of every external command atelier ran and its result.

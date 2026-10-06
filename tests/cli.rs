@@ -254,7 +254,7 @@ fn carnets_are_folders_under_the_configured_root() {
     assert!(path.to_string_lossy().ends_with("-ABC-1-slow-login"));
     let readme = std::fs::read_to_string(path.join("README.md")).unwrap();
     assert!(
-        readme.starts_with("+++\ntickets = [\"ABC-1\"]\n"),
+        readme.starts_with("+++\ngroup = \"\"\nissues = [\"ABC-1\"]\n"),
         "{readme}"
     );
     let log = Command::new("git")
@@ -264,29 +264,36 @@ fn carnets_are_folders_under_the_configured_root() {
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&log.stdout), "Create carnet\n");
 
-    home.git_repo("Data/2026-01-02-ORD-7-old-notes");
+    let old = home.git_repo("Data/2026-01-02-ORD-7-old-notes");
+    std::fs::write(
+        Path::new(&old).join("README.md"),
+        "+++\ngroup = \"orders\"\nissues = [\"ORD-7\"]\n+++\n",
+    )
+    .unwrap();
     let closed = home.git_repo("Data/2026-01-03-done");
     std::fs::write(
         Path::new(&closed).join("README.md"),
-        "+++\ntickets = [\"ORD-7\"]\nclosed = true\nsummary = \"Fixed\"\n+++\n",
+        "+++\nissues = [\"ORD-7\"]\nclosed = true\nsummary = \"Fixed\"\n+++\n",
     )
     .unwrap();
     home.git_repo("Data/undated");
     let name = path.file_name().unwrap().to_string_lossy();
     assert_eq!(
         home.ok(&["carnet", "ls"]),
-        format!("{name}\tABC-1\t\n2026-01-02-ORD-7-old-notes\tORD-7\t\n")
+        format!("{name}\t\tABC-1\t\n2026-01-02-ORD-7-old-notes\tORDERS\tORD-7\t\n"),
+        "folder, group, issue keys and summary"
     );
     assert!(
         home.ok(&["carnet", "ls", "--closed"])
-            .contains("2026-01-03-done\tORD-7\tFixed\n")
+            .contains("2026-01-03-done\t\tORD-7\tFixed\n")
     );
 
     let json = home.ok(&["context", "--json", &path.join("notes").to_string_lossy()]);
     let context: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(context["item"]["kind"], "carnet");
     assert_eq!(context["workspace"]["name"], "default");
-    assert_eq!(context["group"], "ABC-1");
+    assert_eq!(context["group"], serde_json::Value::Null);
+    assert_eq!(context["issue_keys"], serde_json::json!(["ABC-1"]));
     assert_eq!(context["carnet"], path.to_string_lossy().as_ref());
     let mut statusline = home.command(&["statusline"]);
     let output = statusline.current_dir(path).output().unwrap();

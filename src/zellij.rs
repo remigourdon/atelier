@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 use crate::config::Config;
 use crate::git;
+use crate::links::group_text;
 use crate::process::Runner;
 use crate::state::{State, Tab};
 
@@ -539,7 +540,13 @@ impl<'a> Zellij<'a> {
             Some(repo) if !item.is_carnet() => repo,
             _ => {
                 let name = crate::state::dir_name(path);
-                return Ok(tab_name(&item.group, &name, "", true, false));
+                return Ok(tab_name(
+                    group_text(item.links.group.as_ref()),
+                    &name,
+                    "",
+                    true,
+                    false,
+                ));
             }
         };
         let repo = state
@@ -548,7 +555,7 @@ impl<'a> Zellij<'a> {
         let siblings = self.open_siblings(state, &item)?;
         let branch = git::branch(self.runner, path).unwrap_or_else(|| crate::state::dir_name(path));
         Ok(tab_name(
-            &item.group,
+            group_text(item.links.group.as_ref()),
             &repo.name(),
             &branch,
             path == repo_path,
@@ -564,7 +571,7 @@ impl<'a> Zellij<'a> {
         for other in state.repo_items(repo)? {
             if other.path != item.path
                 && other.workspace == item.workspace
-                && other.group == item.group
+                && other.links.group == item.links.group
                 && state.tab(&other.path)?.is_some()
             {
                 siblings.push(other.path);
@@ -608,6 +615,7 @@ mod tests {
     use rusqlite::Connection;
 
     use super::*;
+    use crate::links::tests::links;
     use crate::process::fake::Fake;
     use crate::state::ItemKind;
 
@@ -709,7 +717,13 @@ mod tests {
         state.add_workspace("w").unwrap();
         state.add_repo("/r", None, "w").unwrap();
         state
-            .add_item("/r/a", ItemKind::Worktree, Some(Path::new("/r")), "", "w")
+            .add_item(
+                "/r/a",
+                ItemKind::Worktree,
+                Some(Path::new("/r")),
+                &links("", &[]),
+                "w",
+            )
             .unwrap();
         state
     }
@@ -798,7 +812,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
         state
-            .add_item(path, ItemKind::Carnet, None, "", "w")
+            .add_item(path, ItemKind::Carnet, None, &links("", &[]), "w")
             .unwrap();
         state
             .set_tab(&Tab {
@@ -828,7 +842,7 @@ mod tests {
         for path in [&alive, &gone] {
             let path = path.to_str().unwrap();
             state
-                .add_item(path, ItemKind::Carnet, None, "", "w")
+                .add_item(path, ItemKind::Carnet, None, &links("", &[]), "w")
                 .unwrap();
             state
                 .set_tab(&Tab {
@@ -840,7 +854,7 @@ mod tests {
                 .unwrap();
         }
         state
-            .add_item("/missing", ItemKind::Carnet, None, "", "w")
+            .add_item("/missing", ItemKind::Carnet, None, &links("", &[]), "w")
             .unwrap();
         state
             .set_tab(&Tab {
@@ -873,7 +887,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
         state
-            .add_item(path, ItemKind::Carnet, None, "", "w")
+            .add_item(path, ItemKind::Carnet, None, &links("", &[]), "w")
             .unwrap();
         state
             .set_tab(&Tab {
@@ -916,7 +930,13 @@ mod tests {
     fn closing_a_duplicate_renames_the_remaining_tab() {
         let state = state();
         state
-            .add_item("/r/b", ItemKind::Worktree, Some(Path::new("/r")), "", "w")
+            .add_item(
+                "/r/b",
+                ItemKind::Worktree,
+                Some(Path::new("/r")),
+                &links("", &[]),
+                "w",
+            )
             .unwrap();
         for (path, id) in [("/r/a", 1), ("/r/b", 2)] {
             state
@@ -933,7 +953,7 @@ mod tests {
                 "/r/c",
                 ItemKind::Worktree,
                 Some(Path::new("/r")),
-                "G-1",
+                &links("G-1", &[]),
                 "w",
             )
             .unwrap();
@@ -942,7 +962,7 @@ mod tests {
                 "/r/d",
                 ItemKind::Worktree,
                 Some(Path::new("/r")),
-                "G-1",
+                &links("G-1", &[]),
                 "w",
             )
             .unwrap();

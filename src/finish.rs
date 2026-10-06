@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::items::{Removal, Snapshot, Work};
+use crate::links::{Group, IssueKey};
 use crate::worktrunk::Worktree;
 
 /// Why a worktree is finished.
@@ -52,29 +53,33 @@ pub fn tree_signal(tree: &Worktree) -> Option<Signal> {
 pub enum Scope {
     /// Whole groups, across repos and workspaces, and items in no group on their own.
     Work {
-        groups: Vec<String>,
+        groups: Vec<Group>,
         items: Vec<PathBuf>,
     },
     /// A sweep of a workspace: each of its groups with a finished worktree, and its finished
     /// worktrees in no group. It touches only the workspace's own items.
     Workspace(String),
-    /// An issue's linked work: the worktrees in its group and the carnets whose first ticket
-    /// it is. `state` is the issue's, for the title.
-    Issue { key: String, state: String },
+    /// An issue's linked work: the whole groups of the items linking `key`, and those in no
+    /// group on their own. `label` is the key as shown, and `state` the issue's, for the title.
+    Issue {
+        key: IssueKey,
+        label: String,
+        state: String,
+    },
 }
 
 /// What a plan covers: a group, or an item in no group.
 enum Cover {
-    Group(String),
+    Group(Group),
     Item(PathBuf),
 }
 
 impl Scope {
     /// One group's scope, as `f` on a group's row makes it, for tests.
     #[cfg(test)]
-    pub fn group(key: &str) -> Self {
+    pub fn group(name: &str) -> Self {
         Scope::Work {
-            groups: vec![key.to_owned()],
+            groups: Group::parse(name).into_iter().collect(),
             items: Vec::new(),
         }
     }
@@ -85,18 +90,13 @@ impl Scope {
                 .chain(items.iter().cloned().map(Cover::Item))
                 .collect(),
             Scope::Workspace(_) => {
-                let own = || (snapshot.work.iter()).filter(|work| self.touches(work));
-                let groups: BTreeSet<&String> = (own().map(|work| &work.group))
-                    .filter(|group| !group.is_empty())
-                    .collect();
-                let ungrouped = own()
-                    .filter(|work| work.group.is_empty() && work.removable())
-                    .map(|work| Cover::Item(work.path.clone()));
-                (groups.into_iter().cloned().map(Cover::Group))
-                    .chain(ungrouped)
-                    .collect()
+                let own = (snapshot.work.iter()).filter(|work| self.touches(work));
+                covers(own, |work| work.removable())
             }
-            Scope::Issue { key, .. } => vec![Cover::Group(key.clone())],
+            Scope::Issue { key, .. } => {
+                let linked = (snapshot.work.iter()).filter(|work| work.links_to(key));
+                covers(linked, |_| true)
+            }
         }
     }
 
@@ -133,16 +133,30 @@ impl Scope {
                 format!("Finish {}", names.join(", "))
             }
             Scope::Workspace(name) => format!("Finish workspace {name}"),
-            Scope::Issue { key, state } => format!("Finish {key} · issue {state}"),
+            Scope::Issue { label, state, .. } => format!("Finish {label} · issue {state}"),
         }
     }
+}
+
+/// The groups of `work`, each once, then the items in no group that `alone` keeps, each on its
+/// own.
+fn covers<'a>(work: impl Iterator<Item = &'a Work>, alone: impl Fn(&Work) -> bool) -> Vec<Cover> {
+    let (grouped, ungrouped): (Vec<&Work>, Vec<&Work>) =
+        work.partition(|work| work.group().is_some());
+    let groups: BTreeSet<&Group> = grouped.into_iter().filter_map(Work::group).collect();
+    let items = (ungrouped.into_iter())
+        .filter(|work| alone(work))
+        .map(|work| Cover::Item(work.path.clone()));
+    (groups.into_iter().cloned().map(Cover::Group))
+        .chain(items)
+        .collect()
 }
 
 /// Everything `cover` holds, in any workspace.
 fn members<'a>(snapshot: &'a Snapshot, cover: &Cover) -> Vec<&'a Work> {
     (snapshot.work.iter())
         .filter(|work| match cover {
-            Cover::Group(key) => work.group == *key,
+            Cover::Group(group) => work.group() == Some(group),
             Cover::Item(path) => work.path == *path,
         })
         .collect()
@@ -150,7 +164,7 @@ fn members<'a>(snapshot: &'a Snapshot, cover: &Cover) -> Vec<&'a Work> {
 
 fn cover_name(snapshot: &Snapshot, cover: &Cover) -> String {
     match cover {
-        Cover::Group(key) => key.clone(),
+        Cover::Group(group) => group.to_string(),
         Cover::Item(path) => (members(snapshot, cover).first())
             .map_or_else(|| path.display().to_string(), |work| work.title()),
     }
@@ -303,7 +317,7 @@ fn part(snapshot: &Snapshot, scope: &Scope, cover: &Cover) -> Part {
             checked: !dirty,
         });
     }
-    // An open carnet: in a group, one whose first ticket is the group, as its group is.
+    // Every open carnet: in a group, each of its carnets.
     for carnet in (own.iter()).filter(|work| work.is_carnet() && !work.closed()) {
         lines.push(Line::Step {
             step: Step::CloseCarnet(carnet.path.clone()),
@@ -401,9 +415,14 @@ mod tests {
 
     use super::*;
     use crate::items::WorkKind;
+    use crate::links::tests::{key, links};
     use crate::worktrunk::Worktree;
 
     fn work(repo: &str, branch: &str, group: &str, workspace: &str) -> Work {
+        linking(repo, branch, group, &[], workspace)
+    }
+
+    fn linking(repo: &str, branch: &str, group: &str, keys: &[&str], workspace: &str) -> Work {
         let main = branch == "main";
         let path = if main {
             PathBuf::from(format!("/src/{repo}"))
@@ -413,7 +432,7 @@ mod tests {
         Work {
             path: path.clone(),
             workspace: workspace.into(),
-            group: group.into(),
+            links: links(group, keys),
             tab: false,
             kind: WorkKind::Worktree {
                 repo: PathBuf::from(format!("/src/{repo}")),
@@ -447,14 +466,13 @@ mod tests {
         work
     }
 
-    fn carnet(name: &str, tickets: &[&str]) -> Work {
+    fn carnet(name: &str, group: &str, keys: &[&str]) -> Work {
         Work {
             path: PathBuf::from(format!("/data/{name}")),
             workspace: "default".into(),
-            group: tickets.first().copied().unwrap_or("").into(),
+            links: links(group, keys),
             tab: false,
             kind: WorkKind::Carnet {
-                tickets: tickets.iter().map(|&ticket| ticket.into()).collect(),
                 closed: false,
                 summary: String::new(),
                 readme: None,
@@ -503,7 +521,7 @@ mod tests {
         );
         assert_eq!(signal(&work("api", "a", "", "d")), None);
         assert_eq!(signal(&integrated(work("api", "main", "", "d"))), None);
-        assert_eq!(signal(&carnet("2026-10-01-x", &[])), None);
+        assert_eq!(signal(&carnet("2026-10-01-x", "", &[])), None);
     }
 
     #[test]
@@ -582,17 +600,21 @@ mod tests {
     }
 
     #[test]
-    fn the_carnet_closes_only_once_all_the_groups_work_goes() {
+    fn the_carnets_close_only_once_all_the_groups_work_goes() {
         let all = snapshot(vec![
             integrated(work("api", "ABC-1-a", "ABC-1", "default")),
             gone(work("api", "ABC-1-b", "ABC-1", "default")),
-            carnet("2026-10-01-ABC-1-flake", &["ABC-1"]),
-            carnet("2026-10-02-other", &["XYZ-9", "ABC-1"]),
+            carnet("2026-10-01-ABC-1-flake", "ABC-1", &[]),
+            carnet("2026-10-02-more", "ABC-1", &["XYZ-9"]),
+            carnet("2026-10-03-other", "XYZ-9", &["ABC-1"]),
         ]);
         assert_eq!(
             shown(&plan(&all, &Scope::group("ABC-1"), &[]))[2..],
-            ["[x] close carnet 2026-10-01-ABC-1-flake · "],
-            "a carnet listing the key only later is not closed"
+            [
+                "[x] close carnet 2026-10-01-ABC-1-flake · ",
+                "[x] close carnet 2026-10-02-more · ",
+            ],
+            "every open carnet of the group, none of another group linking the same key"
         );
         let mut in_flight = all.clone();
         in_flight
@@ -601,7 +623,7 @@ mod tests {
         let lines = shown(&plan(&in_flight, &Scope::group("ABC-1"), &[]));
         assert_eq!(
             lines.last().unwrap(),
-            "[ ] close carnet 2026-10-01-ABC-1-flake · work still in flight"
+            "[ ] close carnet 2026-10-02-more · work still in flight"
         );
         let mut kept_dirty = all;
         kept_dirty.work[0] = dirty(kept_dirty.work[0].clone());
@@ -609,7 +631,7 @@ mod tests {
         assert!(lines.last().unwrap().starts_with("[ ] close carnet"));
         let only_main = snapshot(vec![
             work("api", "main", "ABC-1", "default"),
-            carnet("2026-10-01-ABC-1-flake", &["ABC-1"]),
+            carnet("2026-10-01-ABC-1-flake", "ABC-1", &[]),
         ]);
         assert_eq!(
             shown(&plan(&only_main, &Scope::group("ABC-1"), &[])),
@@ -652,7 +674,7 @@ mod tests {
             integrated(work("api", "ABC-1-a", "ABC-1", "default")),
             work("web", "ABC-1-b", "ABC-1", "side"),
             integrated(work("web", "ABC-1-c", "ABC-1", "side")),
-            carnet("2026-10-01-ABC-1-x", &["ABC-1"]),
+            carnet("2026-10-01-ABC-1-x", "ABC-1", &[]),
             work("api", "XYZ-2", "XYZ-2", "default"),
             gone(work("api", "DEF-3", "DEF-3", "default")),
             integrated(work("api", "loose", "", "default")),
@@ -695,14 +717,25 @@ mod tests {
     }
 
     #[test]
-    fn an_issue_plans_its_linked_work() {
+    fn an_issue_plans_the_whole_groups_of_its_linked_work() {
         let snapshot = snapshot(vec![
-            integrated(work("api", "1-login", "api#1", "default")),
-            carnet("2026-10-01-login", &["api#1"]),
-            integrated(work("api", "2-other", "api#2", "default")),
+            integrated(linking("api", "1-login", "LOGIN", &["o/api#1"], "default")),
+            integrated(work("web", "form", "LOGIN", "side")),
+            carnet("2026-10-01-login", "LOGIN", &[]),
+            integrated(linking(
+                "api",
+                "fix",
+                "",
+                &["o/api#2", "o/api#1"],
+                "default",
+            )),
+            integrated(work("api", "loose", "", "default")),
+            carnet("2026-10-02-notes", "", &["o/api#1"]),
+            integrated(work("api", "2-other", "OTHER", "default")),
         ]);
         let scope = Scope::Issue {
-            key: "api#1".into(),
+            key: key("o/api#1"),
+            label: "api#1".into(),
             state: "done".into(),
         };
         let plan = plan(&snapshot, &scope, &[]);
@@ -710,10 +743,17 @@ mod tests {
         assert_eq!(
             shown(&plan),
             [
+                "# LOGIN",
                 "[x] remove api:1-login · integrated",
+                "[x] remove web:form · integrated",
                 "[x] close carnet 2026-10-01-login · ",
+                "# api:fix",
+                "[x] remove api:fix · integrated",
+                "# 2026-10-02-notes",
+                "[x] close carnet 2026-10-02-notes · ",
             ],
-            "no main worktree in the snapshot, no pull line"
+            "the group's members linking no key too; ungrouped items linking it alone; \
+             no main worktree in the snapshot, no pull line"
         );
     }
 

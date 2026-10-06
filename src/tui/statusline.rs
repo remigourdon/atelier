@@ -22,11 +22,11 @@ use crate::worktrunk::{Forge, Statusline, Worktree};
 /// What the line is about.
 #[derive(Debug, Default)]
 pub struct Subject {
-    /// The ticket key, empty for none.
-    pub ticket: String,
+    /// The first issue key, as shown; empty for none.
+    pub label: String,
     /// The cached issue title, or a carnet's summary: last, so the first cut when space is short.
     pub title: String,
-    /// A repo's main worktree, named so instead of a ticket.
+    /// A repo's main worktree, named so instead of a key.
     pub main: bool,
     /// A closed carnet.
     pub closed: bool,
@@ -40,23 +40,27 @@ pub fn line(state: &State, config: &Config, runner: &dyn Runner, dir: &Path) -> 
     let Some(located) = context::locate(state, config, dir)? else {
         return Ok(String::new());
     };
+    let first = located.links.issue_keys.first();
+    let key = first.map_or(String::new(), |key| key.display(&config.tracker));
     let subject = match located.item.kind {
         ItemKind::Carnet => Subject {
             title: (located.carnet.as_ref()).map_or(String::new(), |carnet| carnet.summary.clone()),
             closed: located.carnet.is_some_and(|carnet| carnet.closed),
-            ticket: located.group,
+            label: key,
             ..Subject::default()
         },
         ItemKind::Worktree => {
             let tree = context::current_tree(runner, &located.item).ok();
-            let title = match located.group.as_str() {
-                "" => None,
-                key => issues::cached(state, &config.tracker, key)?.map(|(issue, _)| issue.title),
+            let title = match first {
+                None => None,
+                Some(first) => {
+                    issues::cached(state, &config.tracker, first)?.map(|(issue, _)| issue.title)
+                }
             };
             Subject {
                 main: tree.as_ref().is_some_and(|statusline| statusline.tree.main),
                 title: title.unwrap_or_default(),
-                ticket: located.group,
+                label: key,
                 tree,
                 ..Subject::default()
             }
@@ -78,9 +82,9 @@ pub fn spans(subject: &Subject, palette: &Palette) -> Vec<Span<'static>> {
             glyph
         };
         parts.push(Span::styled(name, Style::new().fg(palette.accent).bold()));
-    } else if !subject.ticket.is_empty() {
+    } else if !subject.label.is_empty() {
         parts.push(Span::styled(
-            subject.ticket.clone(),
+            subject.label.clone(),
             Style::new().fg(palette.accent).bold(),
         ));
     }
@@ -163,6 +167,7 @@ mod tests {
     use super::*;
     use crate::config::Icons;
     use crate::issues::tests::issue;
+    use crate::links::tests::links;
     use crate::process::fake::Fake;
     use crate::worktrunk::Listing;
 
@@ -200,9 +205,9 @@ mod tests {
     }
 
     #[test]
-    fn a_worktree_shows_its_ticket_then_cells_then_title() {
+    fn a_worktree_shows_its_key_then_cells_then_title() {
         let subject = Subject {
-            ticket: "ABC-1".into(),
+            label: "ABC-1".into(),
             title: "Fix the login".into(),
             tree: Some(recorded()),
             ..Subject::default()
@@ -250,7 +255,7 @@ mod tests {
         tree.upstream = None;
         tree.gone = true;
         let subject = Subject {
-            ticket: "ABC-1".into(),
+            label: "ABC-1".into(),
             tree: Some(Statusline { tree, forge: None }),
             ..Subject::default()
         };
@@ -258,9 +263,9 @@ mod tests {
     }
 
     #[test]
-    fn a_carnet_shows_its_ticket_whether_closed_then_summary() {
+    fn a_carnet_shows_its_key_whether_closed_then_summary() {
         let subject = Subject {
-            ticket: "ABC-1".into(),
+            label: "ABC-1".into(),
             title: "Notes".into(),
             closed: true,
             ..Subject::default()
@@ -294,7 +299,7 @@ mod tests {
             &tree,
             ItemKind::Worktree,
             Some(Path::new("/a")),
-            "ABC-1",
+            &links("LOGIN", &["ABC-1", "DEF-2"]),
             "default",
         ))
         .unwrap();
@@ -306,7 +311,11 @@ mod tests {
             Some(include_str!("../../tests/fixtures/wt-statusline.json")),
         );
         let line = line(&state, &config, &fake, &tree).unwrap();
-        assert_eq!(plain(&line), "ABC-1 !?↕ ↓2 ◆ #31 approved Issue ABC-1");
+        assert_eq!(
+            plain(&line),
+            "ABC-1 !?↕ ↓2 ◆ #31 approved Issue ABC-1",
+            "the first key and its cached title"
+        );
         let wt = (fake.calls().into_iter())
             .filter(|call| call.starts_with("wt"))
             .count();

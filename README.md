@@ -26,7 +26,7 @@ Without Nix, `atelier hooks install` adds the hooks to worktrunk's config.
 
 ## Status bar
 
-`atelier statusline` prints one line about the worktree or carnet holding the current directory: its ticket, the cached issue title, and worktrunk's dirty, ahead/behind, CI, review and finished cells. Outside one it prints nothing.
+`atelier statusline` prints one line about the worktree or carnet holding the current directory: its first issue key, that issue's cached title, and worktrunk's dirty, ahead/behind, CI, review and finished cells. Outside one it prints nothing.
 
 When [zjstatus](https://github.com/dj95/zjstatus) is at `$XDG_CONFIG_HOME/zellij/plugins/zjstatus.wasm` (or `[zellij] zjstatus`), the built-in layouts add a row under the tab bar that runs `atelier statusline` every 10 seconds in the focused pane's directory, so it follows the visible tab. Atelier does not install the plugin: without it the layouts keep only zellij's tab and status bars. On first launch the row asks for zjstatus's permissions: focus it, press `y`. zjstatus never truncates, so an overlong line is clipped at its right edge; the issue title comes last, to be cut first.
 

@@ -7,11 +7,13 @@ use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::engine::{ArgValueCandidates, CompletionCandidate};
 use color_eyre::eyre::{Result, WrapErr, bail};
 
+use crate::carnet::Carnets;
 use crate::config::Config;
 use crate::context::{self, Target};
 use crate::git;
 use crate::hooks::{self, Phase};
 use crate::items::Items;
+use crate::links::group_text;
 use crate::process::System;
 use crate::state::{self, State};
 use crate::worktrunk::{self, HooksConfig};
@@ -64,13 +66,14 @@ enum Command {
         #[arg(add = ArgValueCandidates::new(complete_workspaces))]
         workspace: String,
     },
-    /// Describe a directory's worktree or carnet: its workspace, its group's issue, worktrees
-    /// and carnets. Reads atelier's records, the issue cache and `wt list`; changes nothing.
+    /// Describe a directory's worktree or carnet: its workspace, group, issue keys and first
+    /// issue, its group's worktrees and carnets. Reads atelier's records, the issue cache and
+    /// `wt list`; changes nothing.
     Context {
         /// A directory inside the item to describe.
         #[arg(default_value = ".", conflicts_with = "key")]
         path: PathBuf,
-        /// Describe a ticket key's issue, worktrees and carnets instead.
+        /// Describe an issue key's issue, worktrees and carnets instead.
         #[arg(short, long)]
         key: Option<String>,
         /// Print JSON, for scripts and coding agents.
@@ -78,7 +81,8 @@ enum Command {
         json: bool,
     },
     /// Print one ANSI line for zjstatus about the worktree or carnet holding the current
-    /// directory: its ticket, issue title and worktrunk's cells. Empty outside one.
+    /// directory: its first issue key, that issue's title and worktrunk's cells. Empty outside
+    /// one.
     Statusline,
     /// Manage carnets, the investigation folders under `[carnets] root`.
     #[command(subcommand)]
@@ -118,7 +122,7 @@ enum Carnet {
         #[arg(short, long, add = ArgValueCandidates::new(complete_workspaces))]
         workspace: Option<String>,
     },
-    /// List open carnets, newest first: folder, tickets and summary.
+    /// List open carnets, newest first: folder, group, issue keys and summary.
     Ls {
         /// Include closed carnets.
         #[arg(long)]
@@ -174,7 +178,7 @@ pub fn run() -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&context)?);
             } else {
-                print!("{}", context::render(&context));
+                print!("{}", context::render(&context, &config.tracker));
             }
             Ok(())
         }
@@ -272,8 +276,9 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
             Zellij::new(&System, config, Layouts::resolve(config)?).open_session(&workspace)
         }
         Command::Carnet(command) => {
-            let root = config.require_carnet_root()?;
-            let names = crate::carnet::Names::new(config.ticket_pattern())?;
+            let carnets = Carnets::new(config)?;
+            // Disabled carnets are an error here, not an empty list.
+            carnets.root()?;
             match command {
                 Carnet::New { name, workspace } => {
                     let items = items(state, config)?;
@@ -284,22 +289,23 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
                     }
                     let workspace =
                         items.workspace(workspace.as_deref(), state.default_workspace());
-                    let path = items.create_carnet(&name, &workspace, "")?;
+                    let path = items.create_carnet(&name, &workspace, None)?;
                     println!("created {} in {workspace}", path.display());
                 }
                 Carnet::Ls { closed } => {
-                    for carnet in crate::carnet::scan(&root, &names)? {
+                    for carnet in carnets.scan()? {
                         if closed || !carnet.closed {
                             println!(
-                                "{}\t{}\t{}",
+                                "{}\t{}\t{}\t{}",
                                 state::dir_name(&carnet.path),
-                                carnet.tickets.join(","),
+                                group_text(carnet.links.group.as_ref()),
+                                carnet.links.issue_keys.display(&config.tracker, ","),
                                 carnet.summary
                             );
                         }
                     }
                 }
-                Carnet::Search { text } => crate::carnet::search(&System, &root, &text)?,
+                Carnet::Search { text } => carnets.search(&System, &text)?,
             }
             Ok(())
         }

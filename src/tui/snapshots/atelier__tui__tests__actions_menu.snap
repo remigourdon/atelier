@@ -3,8 +3,8 @@ source: src/tui/mod.rs
 expression: "render(&model, 100, 30)"
 ---
 "╭[1] Workspaces │ Repos─────────╮╭ Main ───────────────────────────────────────────────────────────╮"
-"│default (here) 1 open          ││Repo       api                                                   │"
-"│side                           ││Branch     ABC-1-login                                           │"
+"│default (here) 1 open          ││Repo        api                                                  │"
+"│side                           ││Branch      ABC-1-login                                          │"
 "│             ╭ Actions ─────────────────────────────────────────────────────────────╮             │"
 "│             │Space  open tab · check out review · start issue · switch workspace   │             │"
 "╰─────────────│Enter  fold group · focus the main view                               │             │"
