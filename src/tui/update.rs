@@ -2939,6 +2939,17 @@ pub mod tests {
     }
 
     #[test]
+    fn a_group_header_has_no_issue_keys_to_edit() {
+        let mut model = spread();
+        press(&mut model, "e");
+        assert_eq!(prompt(&model).0, "Rename group ABC-1");
+        let [Job::Regroup { group, .. }] = &jobs(press(&mut model, "i\n"))[..] else {
+            panic!("`i` is typed into the rename, not an issue keys entry");
+        };
+        assert_eq!(group, &Group::parse("ABC-1I"));
+    }
+
+    #[test]
     fn h_and_l_move_between_panels_as_in_lazygit() {
         let mut model = spread();
         assert_eq!(model.panel, Panel::Work);
