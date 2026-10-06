@@ -451,8 +451,8 @@ pub enum Action {
         title: String,
         initial: String,
         then: Submit,
-        /// What `Tab` completes the text to.
-        completions: Vec<String>,
+        /// The groups `Tab` completes the text to, when it asks for one.
+        groups: Vec<Group>,
     },
     Copy(String),
     /// Commands that ran outside any job, for the command log.
@@ -493,6 +493,18 @@ pub enum Action {
         log: Vec<Logged>,
         error: Option<String>,
     },
+}
+
+impl Action {
+    /// Asks for text that completes to nothing.
+    pub fn ask(title: impl Into<String>, initial: impl Into<String>, then: Submit) -> Action {
+        Action::Ask {
+            title: title.into(),
+            initial: initial.into(),
+            then,
+            groups: Vec::new(),
+        }
+    }
 }
 
 /// Every command a key can trigger.

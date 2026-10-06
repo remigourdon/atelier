@@ -209,12 +209,7 @@ impl ListKind for Carnets {
                 let initial = (model.search.as_ref())
                     .map(|search| search.text.clone())
                     .unwrap_or_default();
-                let action = Action::Ask {
-                    title: "Search inside carnets".into(),
-                    initial,
-                    then: Submit::Search,
-                    completions: Vec::new(),
-                };
+                let action = Action::ask("Search inside carnets", initial, Submit::Search);
                 update(model, action)
             }
             _ => Vec::new(),

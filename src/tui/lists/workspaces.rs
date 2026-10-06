@@ -134,15 +134,7 @@ impl ListKind for Workspaces {
     }
 
     fn create(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        update(
-            model,
-            Action::Ask {
-                title: "New workspace".into(),
-                initial: String::new(),
-                then: Submit::Workspace,
-                completions: Vec::new(),
-            },
-        )
+        update(model, Action::ask("New workspace", "", Submit::Workspace))
     }
 
     fn remove(&self, model: &mut Model, _list: List) -> Vec<Effect> {

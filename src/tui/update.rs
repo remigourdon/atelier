@@ -47,13 +47,13 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
             title,
             initial,
             then,
-            completions,
+            groups,
         } => {
             model.modal = Some(Modal::Prompt {
                 title,
                 input: Input::new(initial),
                 then,
-                completion: Completion::new(completions),
+                completion: Completion::new(groups.iter().map(Group::to_string).collect()),
             });
             Vec::new()
         }
@@ -601,7 +601,7 @@ fn ask_group(model: &mut Model, pending: Pending) -> Vec<Effect> {
         ),
         initial: String::new(),
         then: Submit::Join(pending),
-        completions: model.group_names(),
+        groups: model.groups(),
     };
     update(model, action)
 }
@@ -2863,7 +2863,13 @@ pub mod tests {
             .snapshot
             .work
             .push(work("api", "x", "slow pages", "side"));
-        assert_eq!(model.group_names(), ["ABC-1", "SLOW PAGES"]);
+        assert_eq!(
+            model.groups(),
+            [
+                Group::parse("ABC-1").unwrap(),
+                Group::parse("SLOW PAGES").unwrap()
+            ]
+        );
         press(&mut model, ">eg");
         press(&mut model, "s\t");
         assert_eq!(prompt(&model).1, "SLOW PAGES");

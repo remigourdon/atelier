@@ -86,16 +86,15 @@ fn ask_start(model: &mut Model, issue: Issue) -> Vec<Effect> {
         .map(|(index, repo)| MenuEntry {
             key: (index + 1).to_string(),
             label: repo.name(),
-            action: Action::Ask {
-                title: format!("New worktree of {} for {label}: branch", repo.name()),
-                initial: issue.branch(),
-                then: Submit::Start {
+            action: Action::ask(
+                format!("New worktree of {} for {label}: branch", repo.name()),
+                issue.branch(),
+                Submit::Start {
                     repo: repo.path.clone(),
                     workspace: workspace(repo),
                     issue: Box::new(issue.clone()),
                 },
-                completions: Vec::new(),
-            },
+            ),
         })
         .collect();
     if entries.is_empty() {

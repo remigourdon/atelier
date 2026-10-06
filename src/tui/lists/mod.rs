@@ -112,14 +112,13 @@ fn edit_links(model: &mut Model, work: &Work) -> Vec<Effect> {
         title: format!("Group of {}", work.title()),
         initial: group_text(work.group()).to_owned(),
         then: Submit::Group(vec![work.path.clone()]),
-        completions: model.group_names(),
+        groups: model.groups(),
     };
-    let issue_keys = Action::Ask {
-        title: format!("Issue keys of {}", work.title()),
-        initial: work.links.issue_keys.join(", "),
-        then: Submit::IssueKeys(work.path.clone()),
-        completions: Vec::new(),
-    };
+    let issue_keys = Action::ask(
+        format!("Issue keys of {}", work.title()),
+        work.links.issue_keys.join(", "),
+        Submit::IssueKeys(work.path.clone()),
+    );
     let entry = |key: &str, label: &str, action| MenuEntry {
         key: key.into(),
         label: label.into(),

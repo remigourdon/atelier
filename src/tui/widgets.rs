@@ -36,7 +36,8 @@ fn popup(frame: &mut Frame, hints: String, title: &str, rect: Rect, palette: &Pa
     inner
 }
 
-/// What `Tab` completes a prompt to: the matches of the text typed, the one shown picked out.
+/// The groups `Tab` completes a prompt to: the matches of the text typed, the one shown picked
+/// out in the group colour.
 fn completions(text: &str, completion: &Completion, palette: &Palette) -> Line<'static> {
     let dim = Style::new().fg(palette.dim);
     let (typed, at) = match &completion.cycle {

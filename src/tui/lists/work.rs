@@ -49,12 +49,12 @@ impl Model {
 
     /// Every group of every item in every workspace, carnets included, once each, sorted: what
     /// a group prompt completes to.
-    pub fn group_names(&self) -> Vec<String> {
+    pub fn groups(&self) -> Vec<Group> {
         let groups: BTreeSet<&Group> = (self.snapshot.work.iter())
             .chain(&self.snapshot.carnets)
             .filter_map(Work::group)
             .collect();
-        groups.into_iter().map(Group::to_string).collect()
+        groups.into_iter().cloned().collect()
     }
 
     /// Every item in `group`, in every workspace, closed carnets included, once each.
@@ -384,15 +384,16 @@ impl ListKind for WorkList {
             Some(Row::Item(index)) => model.snapshot.work[index].group().cloned(),
             None => None,
         };
-        let ask = |repo: PathBuf, name: String| Action::Ask {
-            title: format!("New worktree of {name}: branch"),
-            initial: String::new(),
-            then: Submit::Branch {
-                repo,
-                workspace: workspace.clone(),
-                group: group.clone(),
-            },
-            completions: Vec::new(),
+        let ask = |repo: PathBuf, name: String| {
+            Action::ask(
+                format!("New worktree of {name}: branch"),
+                "",
+                Submit::Branch {
+                    repo,
+                    workspace: workspace.clone(),
+                    group: group.clone(),
+                },
+            )
         };
         // The selected worktree's repo, else every repo.
         let selected = (model.targets().first()).and_then(|work| match &work.kind {
@@ -424,12 +425,7 @@ impl ListKind for WorkList {
             entries.push(MenuEntry {
                 key: "c".into(),
                 label: "carnet".into(),
-                action: Action::Ask {
-                    title: "New carnet: name".into(),
-                    initial: String::new(),
-                    then: Submit::Carnet { workspace, group },
-                    completions: Vec::new(),
-                },
+                action: Action::ask("New carnet: name", "", Submit::Carnet { workspace, group }),
             });
         }
         if entries.is_empty() {
@@ -464,7 +460,7 @@ impl ListKind for WorkList {
                     title: format!("Rename group {group}"),
                     initial: group.to_string(),
                     then: Submit::Group(model.group_members(&group)),
-                    completions: model.group_names(),
+                    groups: model.groups(),
                 };
                 update(model, action)
             }
