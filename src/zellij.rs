@@ -35,7 +35,10 @@ impl Layouts {
             Ok(path.to_string_lossy().into_owned())
         };
         let zjstatus = Some(config.zjstatus()).filter(|path| path.exists());
-        let bar = zjstatus.as_deref().map(info_bar).unwrap_or_default();
+        let background = config.flavor().colors.mantle.hex.to_string();
+        let bar = (zjstatus.as_deref())
+            .map(|path| info_bar(path, &background))
+            .unwrap_or_default();
         Ok(Self {
             session: match &config.zellij.session_layout {
                 Some(layout) => expand(layout),
@@ -67,22 +70,23 @@ fn kdl_string(value: &str) -> String {
 
 /// The row under the tab bar: zjstatus running `atelier statusline` in the focused pane's
 /// directory, so it follows the visible tab. Found through `PATH`, which stays current across
-/// updates where the binary's own store path would not.
-pub fn info_bar(zjstatus: &Path) -> String {
+/// updates where the binary's own store path would not. The whole row takes `background`, the
+/// theme's mantle that zellij's catppuccin tab bar is drawn on, so the two read as one header.
+pub fn info_bar(zjstatus: &Path, background: &str) -> String {
     let location = kdl_string(&format!("file:{}", zjstatus.display()));
     format!(
-        r#"
+        r##"
         pane size=1 borderless=true {{
             plugin location={location} {{
-                format_left "{{command_atelier}}"
-                format_space ""
+                format_left "#[bg={background}]{{command_atelier}}"
+                format_space "#[bg={background}]"
                 command_atelier_command "atelier statusline"
                 command_atelier_format "{{stdout}}"
                 command_atelier_interval "10"
                 command_atelier_rendermode "raw"
                 command_atelier_cwd "{{focused_pane_cwd}}"
             }}
-        }}"#
+        }}"##
     )
 }
 
@@ -682,7 +686,8 @@ mod tests {
 
     #[test]
     fn the_info_bar_sits_under_the_tab_bar_only_when_given() {
-        let bar = info_bar(Path::new("/p/zjstatus.wasm"));
+        let bar = info_bar(Path::new("/p/zjstatus.wasm"), "#181825");
+        assert!(bar.contains(r##"format_space "#[bg=#181825]""##));
         assert!(bar.contains(r#"plugin location="file:/p/zjstatus.wasm""#));
         assert!(bar.contains(r#"command_atelier_cwd "{focused_pane_cwd}""#));
         for layout in [
