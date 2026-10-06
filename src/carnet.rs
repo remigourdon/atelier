@@ -188,6 +188,10 @@ impl Front {
         self.doc["issues"] = value(keys.iter().map(|key| key.as_str()).collect::<Array>());
     }
 
+    fn set_summary(&mut self, summary: &str) {
+        self.doc["summary"] = value(summary);
+    }
+
     /// Writes every key in its normal form, in order: `group`, `issues`, `summary` and
     /// `closed`, each as read, the absent ones empty.
     fn normalise(&mut self, tracker: &TrackerConfig) {
@@ -195,7 +199,7 @@ impl Front {
         let (summary, closed) = (self.summary(), self.closed());
         self.set_group(group.as_ref());
         self.set_issues(&keys);
-        self.doc["summary"] = value(summary);
+        self.set_summary(&summary);
         self.doc["closed"] = value(closed);
     }
 
@@ -245,7 +249,7 @@ fn split(readme: &str) -> Option<(&str, &str)> {
 
 /// How a commit names the change from `old` to `new` links and whether the summary changed
 /// (`Set group A, link B-2, unlink C-3, set summary`), or `None` when nothing did.
-fn describe(old: &Links, new: &Links, summary: bool) -> Option<String> {
+fn describe(old: &Links, new: &Links, summary_changed: bool) -> Option<String> {
     let mut parts = Vec::new();
     if old.group != new.group {
         parts.push(match &new.group {
@@ -270,7 +274,7 @@ fn describe(old: &Links, new: &Links, summary: bool) -> Option<String> {
     if added.is_empty() && removed.is_empty() && old.issue_keys != new.issue_keys {
         parts.push(format!("reorder {}", new.issue_keys.join(", ")));
     }
-    if summary {
+    if summary_changed {
         parts.push("set summary".into());
     }
     let message = parts.join(", ");
@@ -372,7 +376,7 @@ impl<'a> Carnets<'a> {
             let message = describe(&old, &new, summary != front.summary());
             front.set_group(new.group.as_ref());
             front.set_issues(&new.issue_keys);
-            front.doc["summary"] = value(summary.as_str());
+            front.set_summary(&summary);
             edited = Some((new, summary));
             message
         })?;
@@ -434,7 +438,7 @@ impl<'a> Carnets<'a> {
             front.normalise(self.tracker);
             front.set_group(links.group.as_ref());
             front.set_issues(&links.issue_keys);
-            front.doc["summary"] = value(summary);
+            front.set_summary(summary);
             std::fs::write(path.join("README.md"), front.render())?;
             git::init(runner, &path)?;
             commit(runner, &path, "Create carnet")?;

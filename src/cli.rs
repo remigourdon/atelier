@@ -331,10 +331,7 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
                         items.workspace(workspace.as_deref(), state.default_workspace());
                     let links = Links {
                         group: group.as_deref().and_then(Group::parse),
-                        issue_keys: IssueKeys::resolve(
-                            issues.iter().map(String::as_str),
-                            &config.tracker,
-                        ),
+                        issue_keys: resolve(&issues, config),
                     };
                     let summary = summary.as_deref().unwrap_or_default();
                     let carnet = items.create_carnet(&name, &workspace, &links, summary)?;
@@ -355,10 +352,8 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
                     let Some(located) = located.filter(|located| located.item.is_carnet()) else {
                         bail!("{} is not in a carnet", path.display());
                     };
-                    let issue_keys = (!issues.is_empty()).then(|| {
-                        IssueKeys::resolve(issues.iter().map(String::as_str), &config.tracker)
-                    });
-                    items(state, config)?.amend_carnet(&located.item.path, |links, old| {
+                    let issue_keys = (!issues.is_empty()).then(|| resolve(&issues, config));
+                    items(state, config)?.amend_carnet(&located.item.path, |links, kept| {
                         if let Some(group) = &group {
                             links.group = Group::parse(group);
                         }
@@ -366,7 +361,7 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
                             links.issue_keys = issue_keys;
                         }
                         if let Some(summary) = summary {
-                            *old = summary;
+                            *kept = summary;
                         }
                     })?;
                 }
@@ -396,6 +391,11 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
             unreachable!()
         }
     }
+}
+
+/// Issue keys typed on the command line, resolved as front matter's are, blank ones dropped.
+fn resolve(issues: &[String], config: &Config) -> IssueKeys {
+    IssueKeys::resolve(issues.iter().map(String::as_str), &config.tracker)
 }
 
 fn run_hook(phase: Phase) -> Result<()> {
