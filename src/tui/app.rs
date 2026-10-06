@@ -10,7 +10,9 @@ use super::lists;
 pub use super::lists::carnets::Search;
 pub use super::lists::work::Row;
 use super::schedule::Schedule;
+use super::view::Legend;
 use crate::carnet::Stamp;
+use crate::config::Icons;
 use crate::finish::{Plan, Scope, Step};
 use crate::git::Commit;
 use crate::issues::{self, Issue, TrackerConfig};
@@ -385,6 +387,10 @@ pub enum Modal {
         title: String,
         entries: Vec<MenuEntry>,
         selected: usize,
+        /// What the marks of the focused list mean, below the entries and never selected.
+        legend: Vec<&'static Legend>,
+        /// Lines scrolled past the last entry to read the legend.
+        peek: usize,
     },
     /// A finish plan, its lines toggled before running; `selected` indexes its lines.
     Finish { plan: Plan, selected: usize },
@@ -393,6 +399,18 @@ pub enum Modal {
         plan: Plan<IssueStep>,
         selected: usize,
     },
+}
+
+impl Modal {
+    pub fn menu(title: impl Into<String>, entries: Vec<MenuEntry>) -> Self {
+        Self::Menu {
+            title: title.into(),
+            entries,
+            selected: 0,
+            legend: Vec::new(),
+            peek: 0,
+        }
+    }
 }
 
 /// What a line of `Space`'s plan on an issue does.
@@ -840,6 +858,8 @@ pub struct Model {
     /// Worktrees waiting to ask for their group while another popup is open, oldest first.
     pub waiting: VecDeque<Pending>,
     pub size: (u16, u16),
+    /// The glyphs drawn, so the legend leaves out the empty ones.
+    pub icons: Icons,
 }
 
 impl Model {
@@ -871,6 +891,7 @@ impl Model {
             modal: None,
             waiting: VecDeque::new(),
             size,
+            icons: Icons::default(),
         }
     }
 
