@@ -11,12 +11,13 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use super::app::{
-    Action, Binding, Cmd, Completion, Effect, Feed, Focus, Job, KEYMAP, List, MenuEntry, Modal,
-    Model, On, Panel, Pending, Popup, PopupCmd, Row, Rows, Screen, Search, Snapshot, Source,
+    Action, Binding, Cmd, Completion, Effect, Feed, Focus, IssueStep, Job, KEYMAP, List, MenuEntry,
+    Modal, Model, On, Panel, Pending, Popup, PopupCmd, Row, Rows, Screen, Search, Snapshot, Source,
     Submit, Work, WorkKind, lookup, popup_lookup,
 };
 use super::lists;
 use super::view::{areas, main_len, offset};
+use crate::finish::Plan;
 use crate::links::{Group, IssueKeys};
 use crate::process::Logged;
 use crate::reviews::Provider;
@@ -388,7 +389,13 @@ fn key_press(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
         return command(model, Cmd::Quit);
     }
     if let Some(modal) = model.modal.take() {
-        return modal_key(model, modal, key);
+        let mut effects = modal_key(model, modal, key);
+        if model.modal.is_none()
+            && let Some(pending) = model.waiting.pop_front()
+        {
+            effects.extend(ask_group(model, pending));
+        }
+        return effects;
     }
     if let Some(list) = model.filtering {
         return filter_key(model, list, key);
@@ -491,30 +498,71 @@ fn modal_key(model: &mut Model, modal: Modal, key: KeyEvent) -> Vec<Effect> {
             });
             Vec::new()
         }
-        Modal::Finish { mut plan, selected } => {
-            let last = plan.lines.len().saturating_sub(1);
-            let selected = match popup_lookup(Popup::Finish, &key) {
-                Some(PopupCmd::Accept) => {
-                    let steps = plan.checked();
-                    return if steps.is_empty() {
-                        Vec::new()
-                    } else {
-                        vec![run(model, Job::Finish(steps))]
-                    };
-                }
-                Some(PopupCmd::Cancel) => return Vec::new(),
-                Some(PopupCmd::Toggle) => {
-                    plan.toggle(selected);
-                    selected
-                }
-                Some(PopupCmd::Down) => (selected + 1).min(last),
-                Some(PopupCmd::Up) => selected.saturating_sub(1),
-                _ => selected,
-            };
-            model.modal = Some(Modal::Finish { plan, selected });
-            Vec::new()
+        Modal::Finish { mut plan, selected } => match plan_key(&mut plan, selected, &key) {
+            PlanKey::Run(steps) if steps.is_empty() => Vec::new(),
+            PlanKey::Run(steps) => vec![run(model, Job::Finish(steps))],
+            PlanKey::Cancel => Vec::new(),
+            PlanKey::Keep(selected) => {
+                model.modal = Some(Modal::Finish { plan, selected });
+                Vec::new()
+            }
+        },
+        Modal::IssuePlan { mut plan, selected } => match plan_key(&mut plan, selected, &key) {
+            PlanKey::Run(steps) => run_issue_plan(model, steps),
+            PlanKey::Cancel => Vec::new(),
+            PlanKey::Keep(selected) => {
+                model.modal = Some(Modal::IssuePlan { plan, selected });
+                Vec::new()
+            }
+        },
+    }
+}
+
+/// What a key does in a plan's popup.
+enum PlanKey<S> {
+    /// Runs the checked steps.
+    Run(Vec<S>),
+    /// Closes the popup, running nothing.
+    Cancel,
+    /// Keeps the popup open with this line selected.
+    Keep(usize),
+}
+
+/// Moves through a plan's lines and toggles them, as a finish plan's keys do.
+fn plan_key<S: Clone>(plan: &mut Plan<S>, selected: usize, key: &KeyEvent) -> PlanKey<S> {
+    let last = plan.lines.len().saturating_sub(1);
+    PlanKey::Keep(match popup_lookup(Popup::Finish, key) {
+        Some(PopupCmd::Accept) => return PlanKey::Run(plan.checked()),
+        Some(PopupCmd::Cancel) => return PlanKey::Cancel,
+        Some(PopupCmd::Toggle) => {
+            plan.toggle(selected);
+            selected
+        }
+        Some(PopupCmd::Down) => (selected + 1).min(last),
+        Some(PopupCmd::Up) => selected.saturating_sub(1),
+        _ => selected,
+    })
+}
+
+/// Opens the checked items' tabs, then checks out the checked reviews, each joining its linked
+/// group or asking for one.
+fn run_issue_plan(model: &mut Model, steps: Vec<IssueStep>) -> Vec<Effect> {
+    let mut paths = Vec::new();
+    let mut checkouts = Vec::new();
+    for step in steps {
+        match step {
+            IssueStep::Open(path) => paths.push(path),
+            IssueStep::Checkout(pending) => checkouts.push(pending),
         }
     }
+    let mut effects = Vec::new();
+    if !paths.is_empty() {
+        effects.push(run(model, Job::Open(paths)));
+    }
+    for pending in checkouts {
+        effects.extend(join_linked_group(model, pending));
+    }
+    effects
 }
 
 fn submit(model: &mut Model, then: Submit, value: &str) -> Vec<Effect> {
@@ -592,8 +640,13 @@ pub(super) fn join_linked_group(model: &mut Model, pending: Pending) -> Vec<Effe
     vec![run(model, job)]
 }
 
-/// Asks for the group of a pending worktree whose linked work is not in exactly one group.
+/// Asks for the group of a pending worktree whose linked work is not in exactly one group,
+/// once no other popup is open.
 fn ask_group(model: &mut Model, pending: Pending) -> Vec<Effect> {
+    if model.modal.is_some() {
+        model.waiting.push_back(pending);
+        return Vec::new();
+    }
     let action = Action::Ask {
         title: format!(
             "Group of the worktree for {} (empty: none)",
@@ -918,7 +971,7 @@ pub mod tests {
     use crate::carnet::Stamp;
     use crate::finish::{self, Scope, Step};
     use crate::git::Commit;
-    use crate::links::tests::{key, keys};
+    use crate::links::tests::{group, key, keys};
     use crate::links::{Group, IssueKey, Links};
     use crate::reviews::{Review, Role};
     use crate::state::Repo;
@@ -1941,6 +1994,7 @@ pub mod tests {
             base: "main".into(),
             draft: false,
             updated_at: format!("2026-10-0{number}T00:00:00Z"),
+            issue_keys: Default::default(),
         }
     }
 
@@ -2167,9 +2221,24 @@ pub mod tests {
             model.review_work(&review).map(|work| work.path().clone()),
             Some("/src/api.ABC-1-login".into())
         );
+        assert_eq!(model.review_group(&review), group("ABC-1"));
         let other = model.reviews(List::ToReview)[1].clone();
         assert_eq!(model.review_project(&other), "org/other");
         assert!(model.review_work(&other).is_none());
+        assert_eq!(model.review_group(&other), None);
+    }
+
+    #[test]
+    fn a_review_never_matches_another_repos_worktree_on_its_branch() {
+        let mut model = with_reviews(model());
+        model.snapshot.work[2].tree_mut().branch = Some("change-2".into());
+        let review = model.reviews(List::ToReview)[0].clone();
+        assert_eq!(review.branch, "change-2");
+        assert!(
+            model.review_work(&review).is_none(),
+            "web:change-2 is not api's"
+        );
+        assert_eq!(model.review_group(&review), None);
     }
 
     /// The triage label scheme, with an issue in each section and in Other, one hidden, and a
@@ -2321,8 +2390,9 @@ pub mod tests {
             )
         );
         press(&mut model, "j");
+        press(&mut model, " ");
         assert_eq!(
-            jobs(press(&mut model, " ")),
+            jobs(press(&mut model, "\n")),
             [Job::Open(vec![
                 "/src/api.ABC-1-login".into(),
                 "/src/web.ABC-1-form".into()
@@ -2346,6 +2416,132 @@ pub mod tests {
             "in the linked work's workspace, not web's own"
         );
         assert!(jobs(press(&mut model, "\x1b")).is_empty());
+    }
+
+    fn issue_plan(model: &Model) -> Vec<(String, bool)> {
+        let Some(Modal::IssuePlan { plan, .. }) = &model.modal else {
+            panic!("no plan: {:?}", model.modal);
+        };
+        (plan.lines.iter())
+            .map(|line| match line {
+                finish::Line::Step { label, checked, .. } => (label.clone(), *checked),
+                finish::Line::Info { label, note } => (format!("{label}: {note}"), false),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// The api#2 and org/other#1 reviews link ABC-1, as does a review of api already checked out.
+    fn reviewing_abc_1(model: Model) -> Model {
+        let mut model = with_reviews(with_issues(model));
+        model.snapshot.work[0].tree_mut().branch = Some("change-3".into());
+        for review in &mut model.reviews {
+            review.issue_keys = keys(&["ABC-1"]);
+        }
+        model
+    }
+
+    #[test]
+    fn space_on_an_issue_lists_its_linked_work_checked_and_its_reviews_unchecked() {
+        let mut model = reviewing_abc_1(model());
+        press(&mut model, "4]j");
+        assert!(press(&mut model, " ").is_empty());
+        assert_eq!(
+            issue_plan(&model),
+            [
+                ("open api:ABC-1-login".into(), true),
+                ("open web:ABC-1-form".into(), true),
+                ("check out api#2 (@alice)".into(), false),
+                (
+                    "check out org/other#1 (@alice): not registered".into(),
+                    false
+                ),
+            ],
+            "api#3 is checked out already"
+        );
+        press(&mut model, "jj ");
+        let effects = jobs(press(&mut model, "\n"));
+        let [
+            Job::Open(paths),
+            Job::LinkedGroup(Pending::Checkout { review, .. }),
+        ] = &effects[..]
+        else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(paths.len(), 2);
+        assert_eq!(review.number, 2);
+        assert!(model.modal.is_none());
+    }
+
+    #[test]
+    fn an_issue_plan_runs_only_its_checked_lines_and_cancels() {
+        let mut model = reviewing_abc_1(model());
+        press(&mut model, "4]j ");
+        press(&mut model, " j ");
+        assert_eq!(jobs(press(&mut model, "\n")), [], "nothing checked");
+        assert!(model.modal.is_none());
+        press(&mut model, " ");
+        assert!(jobs(press(&mut model, "\x1b")).is_empty());
+        assert!(model.modal.is_none());
+    }
+
+    #[test]
+    fn space_on_an_issue_with_only_a_review_lists_its_checkout() {
+        let mut model = with_reviews(with_issues(model()));
+        let api = (model.reviews.iter_mut()).find(|review| review.number == 2);
+        api.unwrap().issue_keys = keys(&["api#1"]);
+        press(&mut model, "4]");
+        press(&mut model, " ");
+        assert_eq!(
+            issue_plan(&model),
+            [("check out api#2 (@alice)".into(), false)]
+        );
+    }
+
+    #[test]
+    fn space_on_an_issue_with_nothing_to_list_asks_to_start_one() {
+        let mut model = with_reviews(with_issues(model()));
+        let other = (model.reviews.iter_mut()).find(|review| review.number == 1);
+        other.unwrap().issue_keys = keys(&["api#1"]);
+        press(&mut model, "4]");
+        press(&mut model, " ");
+        assert_eq!(
+            menu_labels(&model),
+            ["api", "web"],
+            "an unregistered review checks nothing out"
+        );
+    }
+
+    #[test]
+    fn group_prompts_wait_for_the_one_open() {
+        let mut model = with_reviews(model());
+        let pendings: Vec<Pending> = (model.reviews.iter())
+            .filter(|review| review.number < 3)
+            .map(|review| Pending::Checkout {
+                repo: "/src/api".into(),
+                workspace: "default".into(),
+                review: Box::new(review.clone()),
+            })
+            .collect();
+        for pending in &pendings {
+            let linked = Action::Linked {
+                pending: pending.clone(),
+                group: Ok(None),
+                log: Vec::new(),
+            };
+            assert!(update(&mut model, linked).is_empty());
+        }
+        let first = prompt(&model).0;
+        let [Job::Make { pending, .. }] = &jobs(press(&mut model, "a\n"))[..] else {
+            panic!();
+        };
+        assert_eq!(pending, &pendings[0]);
+        assert_ne!(prompt(&model).0, first, "the next one asks now");
+        let [Job::Make { pending, group }] = &jobs(press(&mut model, "\n"))[..] else {
+            panic!();
+        };
+        assert_eq!((pending, group), (&pendings[1], &None));
+        assert!(model.modal.is_none());
     }
 
     #[test]

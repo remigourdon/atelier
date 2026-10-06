@@ -1,4 +1,4 @@
-//! Popups: prompts, confirmations, menus and finish plans.
+//! Popups: prompts, confirmations, menus and plans.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Position, Rect};
@@ -139,36 +139,66 @@ pub fn modal(frame: &mut Frame, modal: &Modal, palette: &Palette) {
             frame.render_widget(Paragraph::new(lines), inner);
         }
         Modal::Finish { plan, selected } => {
-            let lines = finish_lines(plan, palette);
-            let hints = finish_hints(plan.checked().len());
-            // As wide as its longest line, title or keys, so notes are not cut.
-            let widest = (lines.iter().map(Line::width))
-                .chain([plan.title.chars().count(), hints.chars().count()].map(|len| len + 4))
-                .max()
-                .unwrap_or(0);
-            let width = (widest as u16 + 2).max(width).min(area.width);
-            let height = (plan.lines.len() as u16 + 2).min(area.height.saturating_sub(2));
-            let rect = centered(area, width, height);
-            let inner = popup(frame, hints, &plan.title, rect, palette);
-            let start = offset(*selected, inner.height);
-            let lines: Vec<Line> = (lines.into_iter().enumerate())
-                .skip(start)
-                .take(inner.height as usize)
-                .map(|(index, line)| {
-                    if index == *selected {
-                        line.style(Style::new().bg(palette.selection).bold())
-                    } else {
-                        line
-                    }
-                })
-                .collect();
-            frame.render_widget(Paragraph::new(lines), inner);
+            plan_popup(frame, plan, *selected, width, palette, |step| match step {
+                // A removal's reason, or `!` when it discards changes.
+                Step::Remove { removal, .. } if removal.force => {
+                    Span::styled("! ", Style::new().fg(palette.warn))
+                }
+                Step::Remove { signal, .. } => Span::styled(
+                    format!("{} ", palette.glyphs.signal(*signal)),
+                    Style::new().fg(palette.dim),
+                ),
+                Step::CloseCarnet(_) | Step::Pull(_) => Span::raw("  "),
+            });
+        }
+        Modal::IssuePlan { plan, selected } => {
+            plan_popup(frame, plan, *selected, width, palette, |_| Span::raw("  "));
         }
     }
 }
 
-/// A finish plan's lines: a checkbox on each step, a mark and a note after each label.
-fn finish_lines<'a>(plan: &'a Plan, palette: &Palette) -> Vec<Line<'a>> {
+/// A plan's popup, as wide as its longest line, title or keys, so notes are not cut; `mark`
+/// is what each step shows between its label and its note.
+fn plan_popup<S: Clone>(
+    frame: &mut Frame,
+    plan: &Plan<S>,
+    selected: usize,
+    width: u16,
+    palette: &Palette,
+    mark: impl Fn(&S) -> Span<'static>,
+) {
+    let area = frame.area();
+    let lines = plan_lines(plan, palette, mark);
+    let hints = finish_hints(plan.checked().len());
+    let widest = (lines.iter().map(Line::width))
+        .chain([plan.title.chars().count(), hints.chars().count()].map(|len| len + 4))
+        .max()
+        .unwrap_or(0);
+    let width = (widest as u16 + 2).max(width).min(area.width);
+    let height = (plan.lines.len() as u16 + 2).min(area.height.saturating_sub(2));
+    let rect = centered(area, width, height);
+    let inner = popup(frame, hints, &plan.title, rect, palette);
+    let start = offset(selected, inner.height);
+    let lines: Vec<Line> = (lines.into_iter().enumerate())
+        .skip(start)
+        .take(inner.height as usize)
+        .map(|(index, line)| {
+            if index == selected {
+                line.style(Style::new().bg(palette.selection).bold())
+            } else {
+                line
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// A plan's lines: a checkbox on each step, a mark and a note after each label.
+fn plan_lines<'a, S>(
+    plan: &'a Plan<S>,
+    palette: &Palette,
+    mark: impl Fn(&S) -> Span<'static>,
+) -> Vec<Line<'a>> {
     let dim = Style::new().fg(palette.dim);
     let label_width = (plan.lines.iter())
         .filter_map(|line| match line {
@@ -198,20 +228,10 @@ fn finish_lines<'a>(plan: &'a Plan, palette: &Palette) -> Vec<Line<'a>> {
                 checked,
             } => {
                 let checkbox = if *checked { "[x] " } else { "[ ] " };
-                // A removal's reason, or `!` when it discards changes.
-                let mark = match step {
-                    Step::Remove { removal, .. } if removal.force => {
-                        Span::styled("! ", Style::new().fg(palette.warn))
-                    }
-                    Step::Remove { signal, .. } => {
-                        Span::styled(format!("{} ", palette.glyphs.signal(*signal)), dim)
-                    }
-                    Step::CloseCarnet(_) | Step::Pull(_) => Span::raw("  "),
-                };
                 Line::from(vec![
                     Span::styled(checkbox, Style::new().fg(palette.accent)),
                     Span::raw(format!("{label:label_width$}  ")),
-                    mark,
+                    mark(step),
                     Span::styled(note.as_str(), dim),
                 ])
             }

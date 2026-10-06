@@ -3,17 +3,15 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{
-    ListKind, close_tabs, key_style, kind, pair, paths, plan, subtle, tab, tab_mark, tab_word,
-    tag_style,
-};
-use crate::finish::Scope;
+use super::{ListKind, close_tabs, key_style, kind, pair, plan, subtle, tab, tag_style, work_line};
+use crate::finish::{Line as PlanLine, Plan, Scope};
 use crate::issues::{Issue, State};
 use crate::state::Repo;
 use crate::tui::app::{
-    Action, Cmd, Effect, Feed, Job, Kind, List, MenuEntry, Modal, Model, Source, Submit, Work,
+    Action, Cmd, Effect, Feed, IssueStep, Kind, List, MenuEntry, Modal, Model, Pending, Source,
+    Submit, Work,
 };
-use crate::tui::update::{note, run};
+use crate::tui::update::note;
 use crate::tui::view::{Palette, icon};
 
 pub struct Issues;
@@ -112,6 +110,47 @@ fn ask_start(model: &mut Model, issue: Issue) -> Vec<Effect> {
     Vec::new()
 }
 
+/// `Space`'s plan on an issue: open each linked item, checked, then check out each open review
+/// linking it that no worktree has checked out yet, unchecked. A review of an unregistered
+/// project can't be checked out, and says why.
+fn issue_plan(model: &Model, issue: &Issue) -> Plan<IssueStep> {
+    let open = (model.issue_work(issue).into_iter()).map(|work| PlanLine::Step {
+        step: IssueStep::Open(work.path.clone()),
+        label: format!("open {}", work.title()),
+        note: String::new(),
+        checked: true,
+    });
+    let reviews = (model.issue_reviews(&issue.key).into_iter())
+        .filter(|review| model.review_work(review).is_none())
+        .map(|review| {
+            let label = format!(
+                "check out {} (@{})",
+                model.review_label(review),
+                review.author
+            );
+            match model.project_repo(&review.project_url) {
+                Some(repo) => PlanLine::Step {
+                    step: IssueStep::Checkout(Pending::Checkout {
+                        repo: repo.path.clone(),
+                        workspace: repo.default_workspace.clone(),
+                        review: Box::new(review.clone()),
+                    }),
+                    label,
+                    note: String::new(),
+                    checked: false,
+                },
+                None => PlanLine::Info {
+                    label,
+                    note: "not registered".into(),
+                },
+            }
+        });
+    Plan {
+        title: format!("Work on {}", model.issue_label(issue)),
+        lines: open.chain(reviews).collect(),
+    }
+}
+
 /// An issue's state: in progress or done stand out, to do does not.
 fn state_style(state: State, palette: &Palette) -> Style {
     match state {
@@ -119,6 +158,11 @@ fn state_style(state: State, palette: &Palette) -> Style {
         State::InProgress => Style::new().fg(palette.info),
         State::Done => Style::new().fg(palette.ok),
     }
+}
+
+/// The mark of an issue an open review links, apart from its linked work's.
+fn review_style(palette: &Palette) -> Style {
+    Style::new().fg(palette.info)
 }
 
 fn blocked_style(palette: &Palette) -> Style {
@@ -166,6 +210,10 @@ impl ListKind for Issues {
                 let mut spans = vec![marker];
                 spans.extend(icon(glyphs.issue, dim));
                 spans.push(Span::styled(format!("{} ", model.issue_label(issue)), dim));
+                if !model.issue_reviews(&issue.key).is_empty() {
+                    let glyph = palette.glyphs.reviewed;
+                    spans.push(Span::styled(format!("{glyph} "), review_style(palette)));
+                }
                 if issue.state != State::Todo {
                     let label = format!("{} ", issue.state.label().to_lowercase());
                     spans.push(Span::styled(label, state_style(issue.state, palette)));
@@ -224,13 +272,25 @@ impl ListKind for Issues {
             let none = subtle("none: Space or n creates one", palette);
             pairs.push(pair("Worktree", none));
         }
-        pairs.extend(work.into_iter().map(|work| {
+        pairs.extend((work.into_iter()).map(|work| pair(kind(work), work_line(work, palette))));
+        pairs.extend(model.issue_reviews(&issue.key).into_iter().map(|review| {
+            let checked_out = match model.review_work(review) {
+                Some(_) => Span::styled("checked out", Style::new().fg(palette.ok)),
+                None => subtle("not checked out", palette),
+            };
             let line = vec![
-                tab_mark(work.tab, palette),
-                Span::raw(format!("{} · {} · tab ", work.title(), work.workspace)),
-                tab_word(work.tab, palette),
+                Span::styled(
+                    format!("{} ", palette.glyphs.reviewed),
+                    review_style(palette),
+                ),
+                Span::raw(format!(
+                    "{} · @{} · ",
+                    model.review_label(review),
+                    review.author
+                )),
+                checked_out,
             ];
-            pair(kind(work), line)
+            pair("Review", line)
         }));
         pairs
     }
@@ -246,17 +306,18 @@ impl ListKind for Issues {
         }
     }
 
-    /// Opens the issue's linked work, else asks to start a worktree for it.
+    /// A plan to open the issue's linked work and check out its open reviews, else asks to
+    /// start a worktree for it.
     fn activate(&self, model: &mut Model, _list: List) -> Vec<Effect> {
         let Some(issue) = model.issue().cloned() else {
             return Vec::new();
         };
-        let paths = paths(&model.issue_work(&issue));
-        if paths.is_empty() {
-            ask_start(model, issue)
-        } else {
-            vec![run(model, Job::Open(paths))]
+        let plan = issue_plan(model, &issue);
+        if plan.checkable().is_empty() {
+            return ask_start(model, issue);
         }
+        model.modal = Some(Modal::IssuePlan { plan, selected: 0 });
+        Vec::new()
     }
 
     fn command(&self, model: &mut Model, _list: List, cmd: Cmd) -> Vec<Effect> {

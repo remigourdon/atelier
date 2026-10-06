@@ -9,6 +9,9 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use color_eyre::eyre::Result;
+
+use crate::config::{Config, issue_keys};
 use crate::issues::TrackerConfig;
 
 /// A free-form label, never empty, trimmed and uppercased wherever it comes in, so groups
@@ -197,6 +200,32 @@ impl<'de> Deserialize<'de> for IssueKeys {
         Ok(Vec::<IssueKey>::deserialize(deserializer)?
             .into_iter()
             .collect())
+    }
+}
+
+/// Finds the issue keys written in free text, such as a branch, a title or a review's body,
+/// and resolves them against the tracker config.
+#[derive(Debug, Clone)]
+pub struct KeyFinder<'a> {
+    pattern: Regex,
+    tracker: &'a TrackerConfig,
+}
+
+impl<'a> KeyFinder<'a> {
+    /// Finds keys with the configured issue key pattern, failing when it does not compile.
+    pub fn new(config: &'a Config) -> Result<Self> {
+        Ok(Self {
+            pattern: config.issue_key_regex()?,
+            tracker: &config.tracker,
+        })
+    }
+
+    /// Every issue key in `texts`, in order, never twice.
+    pub fn find(&self, texts: &[&str]) -> IssueKeys {
+        let found: Vec<String> = (texts.iter())
+            .flat_map(|text| issue_keys(&self.pattern, text))
+            .collect();
+        IssueKeys::resolve(found.iter().map(String::as_str), self.tracker)
     }
 }
 

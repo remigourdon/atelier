@@ -4,17 +4,25 @@
     "iid": 42,
     "project_id": 77,
     "title": "Draft: ORD-3479 Cache tariff lookups",
-    "description": "Speeds up the tariff page.",
+    "description": "Speeds up the tariff page. Part of ORD-3400, see ORD-3479.",
     "state": "opened",
     "created_at": "2026-09-30T08:12:01.000Z",
     "updated_at": "2026-10-02T14:03:55.120Z",
     "target_branch": "main",
     "source_branch": "ORD-3479-cache-tariffs",
-    "author": { "id": 9, "username": "alice", "name": "Alice" },
+    "author": {
+      "id": 9,
+      "username": "alice",
+      "name": "Alice"
+    },
     "draft": true,
     "work_in_progress": true,
     "web_url": "https://gitlab.example.com/billing/core/api/-/merge_requests/42",
-    "references": { "short": "!42", "relative": "!42", "full": "billing/core/api!42" },
+    "references": {
+      "short": "!42",
+      "relative": "!42",
+      "full": "billing/core/api!42"
+    },
     "detailed_merge_status": "draft_status"
   },
   {
@@ -26,9 +34,17 @@
     "updated_at": "2026-10-01T09:00:00.000Z",
     "target_branch": "develop",
     "source_branch": "fix-rounding",
-    "author": { "id": 12, "username": "bob", "name": "Bob" },
+    "author": {
+      "id": 12,
+      "username": "bob",
+      "name": "Bob"
+    },
     "draft": false,
     "web_url": "https://gitlab.example.com/billing/web/-/merge_requests/7",
-    "references": { "short": "!7", "relative": "!7", "full": "billing/web!7" }
+    "references": {
+      "short": "!7",
+      "relative": "!7",
+      "full": "billing/web!7"
+    }
   }
 ]

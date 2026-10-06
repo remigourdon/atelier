@@ -232,13 +232,24 @@ mod tests {
     fn reviews_panel() {
         let mut model = loaded(120, 30);
         model.snapshot.work[0].tree_mut().branch = Some("change-2".into());
+        model.snapshot.work[0].links.group = crate::links::Group::parse("login");
+        link_reviews(&mut model, "ABC-1");
         update(&mut model, Action::Key(key('3')));
         insta::assert_snapshot!(render(&model, 120, 30));
+    }
+
+    /// Both of api's to-review list's reviews link `key`; the last is api#2.
+    fn link_reviews(model: &mut Model, key: &str) {
+        for review in model.reviews.iter_mut().filter(|review| review.number < 3) {
+            review.issue_keys.push(issue_key(key));
+        }
     }
 
     #[test]
     fn issues_panel() {
         let mut model = update::tests::with_issues(loaded(120, 30));
+        model.snapshot.work[0].tree_mut().branch = Some("change-2".into());
+        link_reviews(&mut model, "ABC-1");
         update(&mut model, Action::Key(key('4')));
         update(&mut model, Action::Key(key(']')));
         update(&mut model, Action::Key(key('j')));

@@ -1,6 +1,6 @@
 //! The TUI's model: what is loaded, what is selected and focused, and the keymap.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
@@ -14,7 +14,6 @@ use crate::carnet::Stamp;
 use crate::finish::{Plan, Scope, Step};
 use crate::git::Commit;
 use crate::issues::{self, Issue, TrackerConfig};
-use crate::items::Items;
 pub use crate::items::{Removal, Snapshot, Work, WorkKind};
 use crate::links::{Group, IssueKeys};
 use crate::process::Logged;
@@ -209,10 +208,10 @@ impl Pending {
     }
 
     /// The issue keys its worktree links.
-    pub fn issue_keys(&self, items: &Items) -> IssueKeys {
+    pub fn issue_keys(&self) -> IssueKeys {
         match self {
             Pending::Start { issue, .. } => [issue.key.clone()].into_iter().collect(),
-            Pending::Checkout { review, .. } => items.review_keys(review),
+            Pending::Checkout { review, .. } => review.issue_keys.clone(),
         }
     }
 
@@ -232,11 +231,7 @@ impl Pending {
     pub fn label(&self, model: &Model) -> String {
         match self {
             Pending::Start { issue, .. } => model.issue_label(issue),
-            Pending::Checkout { review, .. } => format!(
-                "{}{}",
-                model.review_project(review),
-                review.provider.reference(review.number)
-            ),
+            Pending::Checkout { review, .. } => model.review_label(review),
         }
     }
 }
@@ -393,6 +388,20 @@ pub enum Modal {
     },
     /// A finish plan, its lines toggled before running; `selected` indexes its lines.
     Finish { plan: Plan, selected: usize },
+    /// `Space`'s plan on an issue, toggled and run as a finish plan is.
+    IssuePlan {
+        plan: Plan<IssueStep>,
+        selected: usize,
+    },
+}
+
+/// What a line of `Space`'s plan on an issue does.
+#[derive(Debug, Clone, PartialEq)]
+pub enum IssueStep {
+    /// Opens a linked item's tab.
+    Open(PathBuf),
+    /// Checks out an open review linking the issue.
+    Checkout(Pending),
 }
 
 /// What `Tab` completes a prompt's text to.
@@ -828,6 +837,8 @@ pub struct Model {
     /// The spinner's frame, advanced each tick.
     pub frame: usize,
     pub modal: Option<Modal>,
+    /// Worktrees waiting to ask for their group while another popup is open, oldest first.
+    pub waiting: VecDeque<Pending>,
     pub size: (u16, u16),
 }
 
@@ -858,6 +869,7 @@ impl Model {
             search: None,
             frame: 0,
             modal: None,
+            waiting: VecDeque::new(),
             size,
         }
     }

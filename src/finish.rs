@@ -193,8 +193,10 @@ impl Step {
     }
 }
 
+/// A plan's line; `S` is what a checked line runs, a finish step unless another plan reuses
+/// the lines.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Line {
+pub enum Line<S = Step> {
     /// A fetch that failed, so the plan shows the last known state.
     Warning(String),
     /// A group's heading, when the plan holds several.
@@ -203,7 +205,7 @@ pub enum Line {
     Info { label: String, note: String },
     /// What the plan can do, run when checked.
     Step {
-        step: Step,
+        step: S,
         label: String,
         note: String,
         checked: bool,
@@ -211,12 +213,12 @@ pub enum Line {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Plan {
+pub struct Plan<S = Step> {
     pub title: String,
-    pub lines: Vec<Line>,
+    pub lines: Vec<Line<S>>,
 }
 
-impl Plan {
+impl<S: Clone> Plan<S> {
     /// The indices of the lines that can be checked.
     pub fn checkable(&self) -> Vec<usize> {
         (self.lines.iter().enumerate())
@@ -233,7 +235,7 @@ impl Plan {
     }
 
     /// The checked steps, in the plan's order.
-    pub fn checked(&self) -> Vec<Step> {
+    pub fn checked(&self) -> Vec<S> {
         (self.lines.iter())
             .filter_map(|line| match line {
                 Line::Step {

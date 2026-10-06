@@ -12,7 +12,7 @@ Atelier organises git worktrees into zellij sessions, on top of worktrunk (`wt`)
 - **Group** — a free-form label that helps a person see what they are working on, trimmed and uppercased wherever it comes in (`LOGIN REWRITE`). Optional, independent of workspaces, and able to span them. A group never carries issue keys.
 - **Tab** — the zellij tab opened for an item, recorded as session, tab id and anchor pane id.
 - **Anchor pane** — the pane named `editor` in the worktree layout; atelier finds a tab's pane by this name.
-- **Review** — an open GitHub pull request or GitLab merge request, either to review or authored by me.
+- **Review** — an open GitHub pull request or GitLab merge request, either to review or authored by me. It links the issues its closing references and the issue keys in its title, branch and body name, found when it is listed, never stored; its worktree is the recorded worktree on its branch in its project's registered repo, and its group is that worktree's.
 - **CI** — worktrunk's status of a worktree's branch: its checks (passed, running, failed), merge conflicts, or its review's decision (changes requested, approval pending); stale when the local head is not the one checked. A default branch has its own workflow's checks and no review.
 - **Issue** — a tracker record (GitHub or Jira) normalised to `state`, `labels` and `blocked`.
 - **Issue key** — an issue's identifier: `ABC-5` on Jira; on GitHub always `owner/repo#12`, shown as `repo#12` when no other configured repo shares the name. Every item links issues through its own ordered list of issue keys.

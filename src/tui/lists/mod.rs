@@ -218,6 +218,15 @@ fn tab_word(open: bool, palette: &Palette) -> Span<'static> {
     Span::styled(if open { "open" } else { "closed" }, style)
 }
 
+/// An item in a detail: `repo:branch · workspace · tab open`.
+fn work_line(work: &Work, palette: &Palette) -> Line<'static> {
+    Line::from(vec![
+        tab_mark(work.tab, palette),
+        Span::raw(format!("{} · {} · tab ", work.title(), work.workspace)),
+        tab_word(work.tab, palette),
+    ])
+}
+
 /// The detail's tab state, marked as its row is.
 fn tab_detail(open: bool, palette: &Palette) -> Line<'static> {
     Line::from(vec![tab_mark(open, palette), tab_word(open, palette)])
