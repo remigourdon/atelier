@@ -162,7 +162,7 @@ fn ci(state: CiState, palette: &Palette) -> Style {
 }
 
 /// The legend: every mark the lists, the main view and the command log draw, in the order `?`
-/// lists them.
+/// lists them. The `status:` marks are worktrunk's, from `wt list`'s Status column.
 #[rustfmt::skip]
 pub const LEGEND: &[Legend] = &[
     Legend { mark: |g| g.workspace, style: dim, help: "workspace", on: On::Lists(&[Kind::Workspaces]) },
@@ -191,8 +191,31 @@ pub const LEGEND: &[Legend] = &[
     Legend { mark: |g| g.ci, style: |p| ci(CiState::ApprovalPending, p), help: "approval pending", on: On::Lists(WORK) },
     Legend { mark: |g| g.ci, style: |p| ci(CiState::Passed, p).add_modifier(Modifier::DIM), help: "CI dimmed: stale, or a draft review", on: On::Lists(WORK) },
     Legend { mark: |g| g.ci_error, style: |p| ci(CiState::Error, p), help: "CI status could not be fetched", on: On::Lists(WORK) },
-    Legend { mark: |_| "!", style: warn, help: "worktrunk status, as wt list shows it; yellow when dirty", on: On::Lists(WORK) },
-    Legend { mark: |_| "↓", style: warn, help: "behind its upstream", on: On::Lists(WORK) },
+    Legend { mark: |_| "+!?", style: warn, help: "status in yellow: the tree is dirty", on: On::Lists(WORK) },
+    Legend { mark: |_| "+", style: dim, help: "status: staged files", on: On::Lists(WORK) },
+    Legend { mark: |_| "!", style: dim, help: "status: modified files", on: On::Lists(WORK) },
+    Legend { mark: |_| "?", style: dim, help: "status: untracked files", on: On::Lists(WORK) },
+    Legend { mark: |_| "✘", style: dim, help: "status: merge conflicts", on: On::Lists(WORK) },
+    Legend { mark: |_| "↻", style: dim, help: "status: rebase, merge or other git operation in progress", on: On::Lists(WORK) },
+    Legend { mark: |_| "⊟", style: dim, help: "status: prunable, its directory or .git gone", on: On::Lists(WORK) },
+    Legend { mark: |_| "⊞", style: dim, help: "status: locked worktree", on: On::Lists(WORK) },
+    Legend { mark: |_| "⊘", style: dim, help: "status: detached HEAD", on: On::Lists(WORK) },
+    Legend { mark: |_| "⚐", style: dim, help: "status: branch in several worktrees, or not its path", on: On::Lists(WORK) },
+    Legend { mark: |_| "/", style: dim, help: "status: branch without a worktree", on: On::Lists(WORK) },
+    Legend { mark: |_| "^", style: dim, help: "status: the main worktree", on: On::Lists(WORK) },
+    Legend { mark: |_| "∅", style: dim, help: "status: no common ancestor with the default branch", on: On::Lists(WORK) },
+    Legend { mark: |_| "_", style: dim, help: "status: same commit as the default branch, clean", on: On::Lists(WORK) },
+    Legend { mark: |_| "–", style: dim, help: "status: same commit as the default branch, dirty", on: On::Lists(WORK) },
+    Legend { mark: |_| "⊂", style: dim, help: "status: integrated into the default branch", on: On::Lists(WORK) },
+    Legend { mark: |_| "✗", style: dim, help: "status: merging into the default branch would conflict", on: On::Lists(WORK) },
+    Legend { mark: |_| "↕", style: dim, help: "status: ahead of and behind the default branch", on: On::Lists(WORK) },
+    Legend { mark: |_| "↑", style: dim, help: "status: ahead of the default branch", on: On::Lists(WORK) },
+    Legend { mark: |_| "↓", style: dim, help: "status: behind the default branch", on: On::Lists(WORK) },
+    Legend { mark: |_| "|", style: dim, help: "status: in sync with the remote", on: On::Lists(WORK) },
+    Legend { mark: |_| "⇡", style: dim, help: "status: ahead of the remote", on: On::Lists(WORK) },
+    Legend { mark: |_| "⇣", style: dim, help: "status: behind the remote", on: On::Lists(WORK) },
+    Legend { mark: |_| "⇅", style: dim, help: "status: diverged from the remote", on: On::Lists(WORK) },
+    Legend { mark: |_| "↓N", style: warn, help: "behind its upstream by N commits", on: On::Lists(WORK) },
     Legend { mark: |g| g.integrated, style: dim, help: "finished, the row dimmed: integrated into the default branch", on: On::Lists(WORK) },
     Legend { mark: |g| g.gone, style: dim, help: "finished, the row dimmed: its upstream branch is gone", on: On::Lists(WORK) },
     Legend { mark: |_| "✓", style: |p| Style::new().fg(p.ok), help: "command log: the command succeeded", on: On::Global },
