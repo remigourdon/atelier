@@ -58,7 +58,6 @@ pub trait ListKind: Sync {
     fn edit(&self, _model: &mut Model, _list: List) -> Vec<Effect> {
         Vec::new()
     }
-    /// `l`: edits the selected item's issue keys.
     fn move_to(&self, _model: &mut Model, _list: List) -> Vec<Effect> {
         Vec::new()
     }
