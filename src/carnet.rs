@@ -13,7 +13,7 @@ use toml_edit::{Array, DocumentMut, value};
 use crate::config::Config;
 use crate::git;
 use crate::issues::TrackerConfig;
-use crate::links::{Group, IssueKey, IssueKeys, Links, group_text};
+use crate::links::{Group, IssueKeys, Links, group_text};
 use crate::process::{Runner, exited_with};
 use crate::state::{ItemKind, State, dir_name};
 
@@ -253,21 +253,19 @@ fn describe(old: &Links, new: &Links) -> Option<String> {
             None => "ungroup".into(),
         });
     }
-    let joined = |keys: Vec<&IssueKey>| {
-        let keys: Vec<&str> = keys.into_iter().map(IssueKey::as_str).collect();
-        keys.join(", ")
-    };
-    let added: Vec<&IssueKey> = (new.issue_keys.iter())
+    let added: IssueKeys = (new.issue_keys.iter())
         .filter(|key| !old.links(key))
+        .cloned()
         .collect();
-    let removed: Vec<&IssueKey> = (old.issue_keys.iter())
+    let removed: IssueKeys = (old.issue_keys.iter())
         .filter(|key| !new.links(key))
+        .cloned()
         .collect();
     if !added.is_empty() {
-        parts.push(format!("link {}", joined(added)));
+        parts.push(format!("link {}", added.join(", ")));
     }
     if !removed.is_empty() {
-        parts.push(format!("unlink {}", joined(removed)));
+        parts.push(format!("unlink {}", removed.join(", ")));
     }
     if parts.is_empty() && old.issue_keys != new.issue_keys {
         parts.push(format!("reorder {}", new.issue_keys.join(", ")));
@@ -509,6 +507,7 @@ pub mod tests {
     use rusqlite::Connection;
 
     use super::*;
+    use crate::links::IssueKey;
     use crate::links::tests::{group, keys};
     use crate::process::fake::Fake;
 

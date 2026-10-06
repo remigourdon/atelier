@@ -47,25 +47,25 @@ impl Model {
         }
     }
 
+    /// Every item in every workspace, closed carnets included; a carnet can be listed twice.
+    fn every_item(&self) -> impl Iterator<Item = &Work> {
+        (self.snapshot.work.iter()).chain(&self.snapshot.carnets)
+    }
+
     /// Every group of every item in every workspace, carnets included, once each, sorted: what
     /// a group prompt completes to.
     pub fn groups(&self) -> Vec<Group> {
-        let groups: BTreeSet<&Group> = (self.snapshot.work.iter())
-            .chain(&self.snapshot.carnets)
-            .filter_map(Work::group)
-            .collect();
+        let groups: BTreeSet<&Group> = self.every_item().filter_map(Work::group).collect();
         groups.into_iter().cloned().collect()
     }
 
     /// Every item in `group`, in every workspace, closed carnets included, once each.
     fn group_members(&self, group: &Group) -> Vec<PathBuf> {
-        let mut paths: Vec<PathBuf> = Vec::new();
-        for work in self.snapshot.work.iter().chain(&self.snapshot.carnets) {
-            if work.group() == Some(group) && !paths.contains(&work.path) {
-                paths.push(work.path.clone());
-            }
-        }
-        paths
+        let paths: BTreeSet<&PathBuf> = (self.every_item())
+            .filter(|work| work.group() == Some(group))
+            .map(|work| &work.path)
+            .collect();
+        paths.into_iter().cloned().collect()
     }
 
     /// Panel 2's rows: named groups, foldable, then the items in no group. Worktrees come
