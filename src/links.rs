@@ -212,6 +212,7 @@ pub struct KeyFinder<'a> {
 }
 
 impl<'a> KeyFinder<'a> {
+    /// Finds keys with the configured issue key pattern, failing when it does not compile.
     pub fn new(config: &'a Config) -> Result<Self> {
         Ok(Self {
             pattern: config.issue_key_regex()?,

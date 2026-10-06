@@ -216,7 +216,7 @@ impl<'a> Items<'a> {
     }
 
     /// The keys a worktree on `branch` is recorded with: `extra`, then those in the branch.
-    pub fn seeded(&self, extra: &IssueKeys, branch: &str) -> IssueKeys {
+    fn seeded(&self, extra: &IssueKeys, branch: &str) -> IssueKeys {
         let mut keys = extra.clone();
         keys.extend(self.keys(&[branch]).iter().cloned());
         keys

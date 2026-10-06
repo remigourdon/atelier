@@ -522,6 +522,7 @@ fn modal_key(model: &mut Model, modal: Modal, key: KeyEvent) -> Vec<Effect> {
 enum PlanKey<S> {
     /// Runs the checked steps.
     Run(Vec<S>),
+    /// Closes the popup, running nothing.
     Cancel,
     /// Keeps the popup open with this line selected.
     Keep(usize),

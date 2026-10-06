@@ -132,7 +132,7 @@ pub fn run(context: &Context, job: Job) -> Action {
                 .state()
                 .and_then(|state| {
                     let items = context.items(&state, &recorder)?;
-                    items.linked_group(&pending.issue_keys(&items))
+                    items.linked_group(&pending.issue_keys())
                 })
                 .map_err(|err| err.to_string());
             Action::Linked {
@@ -257,17 +257,20 @@ fn fetch(
     let mut reviews = Vec::new();
     let mut issues = Vec::new();
     let mut log = Vec::new();
+    // Reviews link the keys it finds; a pattern that does not compile is logged once.
+    let finder = match feed {
+        Feed::Reviews(_) => KeyFinder::new(config)
+            .map_err(|error| log.extend(fetch_failures(recorder, Some(error), feed.what())))
+            .ok(),
+        Feed::Issues(_) => None,
+    };
     for key in keys {
         match feed {
             Feed::Reviews(provider) => {
-                let finder = match KeyFinder::new(config) {
-                    Ok(finder) => finder,
-                    Err(error) => {
-                        log.extend(fetch_failures(recorder, Some(error), feed.what()));
-                        continue;
-                    }
+                let Some(finder) = &finder else {
+                    continue;
                 };
-                let api = provider.reviews(recorder, key.clone(), &finder);
+                let api = provider.reviews(recorder, key.clone(), finder);
                 for role in Role::ALL {
                     let (found, error) = reviews::fetch(state, api.as_ref(), role, force);
                     reviews.extend(found);

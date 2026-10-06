@@ -14,7 +14,6 @@ use crate::carnet::Stamp;
 use crate::finish::{Plan, Scope, Step};
 use crate::git::Commit;
 use crate::issues::{self, Issue, TrackerConfig};
-use crate::items::Items;
 pub use crate::items::{Removal, Snapshot, Work, WorkKind};
 use crate::links::{Group, IssueKeys};
 use crate::process::Logged;
@@ -209,10 +208,10 @@ impl Pending {
     }
 
     /// The issue keys its worktree links.
-    pub fn issue_keys(&self, items: &Items) -> IssueKeys {
+    pub fn issue_keys(&self) -> IssueKeys {
         match self {
             Pending::Start { issue, .. } => [issue.key.clone()].into_iter().collect(),
-            Pending::Checkout { review, .. } => items.seeded(&review.issue_keys, &review.branch),
+            Pending::Checkout { review, .. } => review.issue_keys.clone(),
         }
     }
 
@@ -838,7 +837,7 @@ pub struct Model {
     /// The spinner's frame, advanced each tick.
     pub frame: usize,
     pub modal: Option<Modal>,
-    /// Worktrees waiting to ask for their group while another popup is open, first first.
+    /// Worktrees waiting to ask for their group while another popup is open, oldest first.
     pub waiting: VecDeque<Pending>,
     pub size: (u16, u16),
 }

@@ -510,10 +510,15 @@ mod tests {
         )
         .unwrap();
         let finder = KeyFinder::new(&config).unwrap();
-        let json = r#"[{"data":{"search":{"nodes":[{"number":1,"title":"Fix web#4",
-            "repository":{"nameWithOwner":"o/web","url":"https://github.com/o/web"}}]}}}]"#;
+        let json = r#"[{"data":{"search":{"nodes":[{"number":1,"title":"Fix web#4 and web#5",
+            "repository":{"nameWithOwner":"o/web","url":"https://github.com/o/web"},
+            "closingIssuesReferences":{"nodes":[{"number":4,"repository":{"nameWithOwner":"o/web"}}]}}]}}}]"#;
         let reviews = parse_gh(json, Role::Mine, &finder).unwrap();
-        assert_eq!(reviews[0].issue_keys, keys(&["o/web#4"]));
+        assert_eq!(
+            reviews[0].issue_keys,
+            keys(&["o/web#4", "o/web#5"]),
+            "the closing reference the title also names is linked once"
+        );
     }
 
     #[test]
