@@ -6,8 +6,8 @@ use ratatui::text::{Line, Span};
 use super::{ListKind, close_tabs, pair, subtle, tab_mark};
 use crate::reviews::{Review, Role};
 use crate::state::Repo;
-use crate::tui::app::{Cmd, Effect, Feed, Job, Kind, List, Model, Source, Work};
-use crate::tui::update::{note, run};
+use crate::tui::app::{Cmd, Effect, Feed, Kind, List, Model, Pending, Source, Work};
+use crate::tui::update::{join_linked_group, note};
 use crate::tui::view::{Palette, icon};
 use crate::worktrunk;
 
@@ -205,12 +205,12 @@ impl ListKind for Reviews {
             );
             return note(model, &message);
         };
-        let job = Job::Checkout {
+        let pending = Pending::Checkout {
             repo: repo.path.clone(),
             workspace: repo.default_workspace.clone(),
             review: Box::new(review.clone()),
         };
-        vec![run(model, job)]
+        join_linked_group(model, pending)
     }
 
     fn command(&self, model: &mut Model, _list: List, cmd: Cmd) -> Vec<Effect> {

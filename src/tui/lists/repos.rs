@@ -99,11 +99,11 @@ impl ListKind for Repos {
         let Some(repo) = model.repo() else {
             return Vec::new();
         };
-        let action = Action::Ask {
-            title: format!("Alias of {} (empty clears it)", repo.path.display()),
-            initial: repo.alias.clone().unwrap_or_default(),
-            then: Submit::Alias(repo.path.clone()),
-        };
+        let action = Action::ask(
+            format!("Alias of {} (empty clears it)", repo.path.display()),
+            repo.alias.clone().unwrap_or_default(),
+            Submit::Alias(repo.path.clone()),
+        );
         update(model, action)
     }
 

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{Report, Result, eyre};
 
-use super::app::{Action, Feed, Job, Readme, Rows};
+use super::app::{Action, Feed, Job, Pending, Readme, Rows};
 use crate::carnet::{self, Carnets, Stamp};
 use crate::config::Config;
 use crate::finish::{self, Scope};
@@ -124,6 +124,20 @@ pub fn run(context: &Context, job: Job) -> Action {
             Action::Planned {
                 plan: plan.map_err(|err| err.to_string()),
                 log,
+            }
+        }
+        Job::LinkedGroup(pending) => {
+            let group = context
+                .state()
+                .and_then(|state| {
+                    let items = context.items(&state, &recorder)?;
+                    items.linked_group(&pending.issue_keys(&items))
+                })
+                .map_err(|err| err.to_string());
+            Action::Linked {
+                pending,
+                group,
+                log: recorder.take(),
             }
         }
         // Like refreshes, these run constantly: log only failures.
@@ -277,6 +291,7 @@ fn execute(context: &Context, state: &State, runner: &dyn Runner, job: Job) -> R
         | Job::SearchCarnets(_)
         | Job::ExportLog(_)
         | Job::Plan { .. }
+        | Job::LinkedGroup(_)
         | Job::Fetch { .. } => {
             unreachable!("run handles these")
         }
@@ -291,17 +306,19 @@ fn execute(context: &Context, state: &State, runner: &dyn Runner, job: Job) -> R
         } => items
             .create(&repo, &branch, &workspace, group.as_ref())
             .map(drop),
-        Job::Start {
-            repo,
-            branch,
-            workspace,
-            issue,
-        } => items.start(&repo, &branch, &workspace, &issue.key),
-        Job::Checkout {
-            repo,
-            workspace,
-            review,
-        } => items.checkout(&repo, &workspace, &review),
+        Job::Make { pending, group } => match pending {
+            Pending::Start {
+                repo,
+                branch,
+                workspace,
+                issue,
+            } => items.start(&repo, &branch, &workspace, &issue.key, group.as_ref()),
+            Pending::Checkout {
+                repo,
+                workspace,
+                review,
+            } => items.checkout(&repo, &workspace, &review, group.as_ref()),
+        },
         Job::NewCarnet {
             name,
             workspace,
@@ -316,6 +333,7 @@ fn execute(context: &Context, state: &State, runner: &dyn Runner, job: Job) -> R
         Job::ReopenCarnet(paths) => items.set_carnets_closed(&paths, false),
         Job::Move { paths, workspace } => items.move_to(&paths, &workspace),
         Job::Regroup { paths, group } => items.regroup(&paths, group.as_ref()),
+        Job::SetIssueKeys { path, issue_keys } => items.set_issue_keys(&path, &issue_keys),
         Job::SetAlias { repo, alias } => items.set_alias(&repo, &alias),
         Job::SetRepoWorkspace { repo, workspace } => items.set_repo_workspace(&repo, &workspace),
         Job::Forget(repo) => items.forget_repo(&repo),

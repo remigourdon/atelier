@@ -39,6 +39,10 @@ pub struct Palette {
     pub approval_pending: Color,
     /// A list's filter, as it is typed and once applied.
     pub filter: Color,
+    /// A group's label, set apart from issue keys.
+    pub group: Color,
+    /// An issue key, set apart from groups.
+    pub issue_key: Color,
     /// How a carnet's README is drawn.
     pub markdown: Markdown,
     pub glyphs: Glyphs,
@@ -146,6 +150,8 @@ impl Palette {
             changes_requested: colors.pink.into(),
             approval_pending: colors.teal.into(),
             filter: colors.yellow.into(),
+            group: colors.lavender.into(),
+            issue_key: colors.peach.into(),
             markdown: Markdown::new(&colors),
         }
     }

@@ -3,7 +3,10 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, close_tabs, kind, pair, paths, plan, subtle, tab_mark, tab_word, tag_style};
+use super::{
+    ListKind, close_tabs, key_style, kind, pair, paths, plan, subtle, tab, tab_mark, tab_word,
+    tag_style,
+};
 use crate::finish::Scope;
 use crate::issues::{Issue, State};
 use crate::state::Repo;
@@ -84,15 +87,15 @@ fn ask_start(model: &mut Model, issue: Issue) -> Vec<Effect> {
         .map(|(index, repo)| MenuEntry {
             key: (index + 1).to_string(),
             label: repo.name(),
-            action: Action::Ask {
-                title: format!("New worktree of {} for {label}: branch", repo.name()),
-                initial: issue.branch(),
-                then: Submit::Start {
+            action: Action::ask(
+                format!("New worktree of {} for {label}: branch", repo.name()),
+                issue.branch(),
+                Submit::Start {
                     repo: repo.path.clone(),
                     workspace: workspace(repo),
                     issue: Box::new(issue.clone()),
                 },
-            },
+            ),
         })
         .collect();
     if entries.is_empty() {
@@ -153,10 +156,12 @@ impl ListKind for Issues {
             .map(|issue| {
                 let glyphs = &palette.glyphs;
                 let work = model.issue_work(issue);
+                // Linked work is marked in the colour of the issue keys that link it.
                 let marker = if work.is_empty() {
                     Span::raw("  ")
                 } else {
-                    tab_mark(work.iter().any(|work| work.tab), palette)
+                    let (glyph, _) = tab(work.iter().any(|work| work.tab), palette);
+                    Span::styled(format!("{glyph} "), key_style(palette))
                 };
                 let mut spans = vec![marker];
                 spans.extend(icon(glyphs.issue, dim));

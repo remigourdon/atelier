@@ -87,11 +87,6 @@ impl Work {
         self.links.links(key)
     }
 
-    /// An ungrouped carnet, listed in the `Carnets` group.
-    pub fn in_carnets_group(&self) -> bool {
-        self.group().is_none() && self.is_carnet()
-    }
-
     /// A worktree's repo.
     pub fn repo(&self) -> Option<&PathBuf> {
         match &self.kind {
@@ -234,7 +229,7 @@ impl<'a> Items<'a> {
     /// The one group among the items linking any of `keys`; items in no group do not count.
     /// Carnets are read from their folders, so a README edited since the last refresh counts as
     /// it is now.
-    fn linked_group(&self, keys: &IssueKeys) -> Result<Option<Group>> {
+    pub fn linked_group(&self, keys: &IssueKeys) -> Result<Option<Group>> {
         let worktrees = (self.state.items()?.into_iter())
             .filter(|item| !item.is_carnet())
             .map(|item| item.links);
@@ -300,34 +295,44 @@ impl<'a> Items<'a> {
         Ok(path)
     }
 
+    /// The issue keys a review's checkout links beyond its branch's: those in its branch, then
+    /// its title.
+    pub fn review_keys(&self, review: &Review) -> IssueKeys {
+        self.keys(&[&review.branch, &review.title])
+    }
+
     /// Checks out a review's branch through worktrunk (`pr:N` or `mr:N`) and focuses its tab,
-    /// whether the worktree is new or was there already. A new one links the issue keys in the
-    /// review's branch, then its title, and joins the one group linked to any of them.
-    pub fn checkout(&self, repo: &Path, workspace: &str, review: &Review) -> Result<()> {
-        let issue_keys = self.keys(&[&review.branch, &review.title]);
+    /// whether the worktree is new or was there already. A new one is in `group` and links the
+    /// review's keys.
+    pub fn checkout(
+        &self,
+        repo: &Path,
+        workspace: &str,
+        review: &Review,
+        group: Option<&Group>,
+    ) -> Result<()> {
         let links = Links {
-            group: self.linked_group(&issue_keys)?,
-            issue_keys,
+            group: group.cloned(),
+            issue_keys: self.review_keys(review),
         };
         let target = review.provider.shortcut(review.number);
         let path = self.switch(repo, &[&target], &review.branch, workspace, &links)?;
         self.zellij.open_tab(self.state, &path).map(drop)
     }
 
-    /// Creates a worktree on `branch` for an issue, linking the issue's key, then the keys in the
-    /// branch, in the one group among the issue's linked work. A worktree that already existed
-    /// gains the key and keeps its group.
+    /// Creates a worktree on `branch` for an issue, in `group`, linking the issue's key, then the
+    /// keys in the branch. A worktree that already existed gains the key and keeps its group.
     pub fn start(
         &self,
         repo: &Path,
         branch: &str,
         workspace: &str,
         issue_key: &IssueKey,
+        group: Option<&Group>,
     ) -> Result<()> {
-        let issue_keys: IssueKeys = [issue_key.clone()].into_iter().collect();
         let links = Links {
-            group: self.linked_group(&issue_keys)?,
-            issue_keys,
+            group: group.cloned(),
+            issue_keys: [issue_key.clone()].into_iter().collect(),
         };
         let path = self.switch_branch(repo, branch, workspace, &links)?;
         let mut linked = self.state.require_item(&path)?.links.issue_keys;
@@ -453,21 +458,46 @@ impl<'a> Items<'a> {
         })
     }
 
-    /// Puts each item in `group`, or in none, and renames the tabs it changes. A carnet's group
-    /// is written to its front matter.
+    /// Edits an item's group and issue keys with `edit`: a worktree's in the database, a carnet's
+    /// in its front matter, in one commit, and in its cached row. Returns the item, as it was.
+    fn relink(&self, path: &Path, edit: impl FnOnce(&mut Links)) -> Result<state::Item> {
+        let item = self.state.require_item(path)?;
+        let links = if item.is_carnet() {
+            self.carnets.relink(self.runner, path, edit)?
+        } else {
+            let mut links = item.links.clone();
+            edit(&mut links);
+            links
+        };
+        if links.group != item.links.group {
+            self.state.set_group(path, links.group.as_ref())?;
+        }
+        if links.issue_keys != item.links.issue_keys {
+            self.state.set_issue_keys(path, &links.issue_keys)?;
+        }
+        Ok(item)
+    }
+
+    /// Replaces the issue keys an item links.
+    pub fn set_issue_keys(&self, path: &Path, keys: &IssueKeys) -> Result<()> {
+        self.relink(path, |links| links.issue_keys = keys.clone())
+            .map(drop)
+    }
+
+    /// Puts each item in `group`, or in none, and renames the tabs of those it moves. A carnet's
+    /// group is written to its front matter.
     pub fn regroup(&self, paths: &[PathBuf], group: Option<&Group>) -> Result<()> {
         let mut repos = BTreeSet::new();
         let regrouped = each(paths, |path| {
-            let item = self.state.require_item(path)?;
-            if item.is_carnet() {
-                self.carnets.set_group(self.runner, path, group)?;
-                self.state.set_group(path, group)?;
-                self.zellij.rename_tab(self.state, path)
-            } else {
-                self.state.set_group(path, group)?;
-                repos.extend(item.repo);
-                Ok(())
+            let item = self.relink(path, |links| links.group = group.cloned())?;
+            if item.links.group.as_ref() == group {
+                return Ok(());
             }
+            if item.is_carnet() {
+                return self.zellij.rename_tab(self.state, path);
+            }
+            repos.extend(item.repo);
+            Ok(())
         });
         let repos: Vec<PathBuf> = repos.into_iter().collect();
         let renamed = each(&repos, |repo| self.zellij.sync_names(self.state, repo));
@@ -1085,6 +1115,61 @@ mod tests {
     }
 
     #[test]
+    fn set_issue_keys_replaces_an_items_keys_wherever_it_keeps_them() {
+        let state = state();
+        let dir = tempfile::tempdir().unwrap();
+        let readme = "+++\ngroup = \"A\"\nissues = [\"A-1\"]\n+++\n";
+        let notes = carnet::tests::repo(dir.path(), "2026-10-01-notes", Some(readme));
+        (state.add_item(
+            &notes,
+            ItemKind::Carnet,
+            None,
+            &links("A", &["A-1"]),
+            "default",
+        ))
+        .unwrap();
+        tab(&state, &notes, "default", 4);
+        worktree(&state, "/r.a", "B", "default");
+        tab(&state, "/r.a", "default", 5);
+        let fake = Fake::default();
+        let items = with_root(&state, &fake, dir.path());
+        items
+            .set_issue_keys(&notes, &keys(&["B-2", "A-1"]))
+            .unwrap();
+        items
+            .set_issue_keys(Path::new("/r.a"), &keys(&["C-3"]))
+            .unwrap();
+        assert_eq!(
+            state.require_item(&notes).unwrap().links,
+            links("A", &["B-2", "A-1"]),
+            "the cached row follows"
+        );
+        assert!(
+            std::fs::read_to_string(notes.join("README.md"))
+                .unwrap()
+                .contains("issues = [\"B-2\", \"A-1\"]")
+        );
+        assert_eq!(
+            state.require_item("/r.a").unwrap().links,
+            links("B", &["C-3"])
+        );
+        let calls = fake.calls();
+        assert!(
+            (calls.iter()).any(|call| call.ends_with("commit -m Link B-2 -- README.md")),
+            "{calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|call| call.contains("rename-tab")),
+            "keys never name a tab: {calls:?}"
+        );
+        assert!(
+            items
+                .set_issue_keys(Path::new("/r.unknown"), &keys(&[]))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn closing_a_carnet_records_it_and_closes_its_tab() {
         let state = state();
         let dir = tempfile::tempdir().unwrap();
@@ -1260,7 +1345,7 @@ mod tests {
             .always("zellij --session side action list-panes", Some("[]"));
         let items = items(&state, &fake);
         items
-            .checkout(Path::new("/r"), "default", &review(12, "ABC-1-x"))
+            .checkout(Path::new("/r"), "default", &review(12, "ABC-1-x"), None)
             .unwrap();
         let calls = fake.calls();
         assert_eq!(
@@ -1272,13 +1357,42 @@ mod tests {
             calls.contains(&"zellij --session side action go-to-tab-by-id 4".into()),
             "an existing worktree's tab is focused: {calls:?}"
         );
-        let error = (items.checkout(Path::new("/r"), "default", &review(13, "gone"))).unwrap_err();
+        let error =
+            (items.checkout(Path::new("/r"), "default", &review(13, "gone"), None)).unwrap_err();
         assert!(error.to_string().contains("no worktree on gone"));
     }
 
     #[test]
-    fn checkout_links_the_keys_in_the_branch_then_the_title_and_joins_their_one_group() {
+    fn checkout_links_the_keys_in_the_branch_then_the_title_in_the_group_given() {
         let state = state();
+        let fake = Fake::default()
+            .always("wt -C /r --config-set", Some(LISTING))
+            .always("zellij --session side action list-tabs", Some("[]"))
+            .always("zellij --session side action new-tab", Some("4"))
+            .always(
+                "zellij --session side action list-panes",
+                Some(r#"[{"id":7,"tab_id":4,"title":"editor","pane_cwd":"/r.ABC-1-x"}]"#),
+            );
+        let items = items(&state, &fake);
+        let review = Review {
+            title: "DEF-4: fix it".into(),
+            ..review(12, "ABC-1-x")
+        };
+        assert_eq!(items.review_keys(&review), keys(&["ABC-1", "DEF-4"]));
+        (items.checkout(Path::new("/r"), "side", &review, group("login").as_ref())).unwrap();
+        assert!(
+            fake.calls()[0].contains("ATELIER_GROUP=LOGIN ATELIER_ISSUE_KEYS=ABC-1,DEF-4 "),
+            "{:?}",
+            fake.calls()
+        );
+        let item = state.require_item("/r.ABC-1-x").unwrap();
+        assert_eq!(item.links, links("LOGIN", &["ABC-1", "DEF-4"]));
+    }
+
+    #[test]
+    fn the_linked_group_is_the_one_group_among_the_items_linking_the_keys() {
+        let state = state();
+        let dir = tempfile::tempdir().unwrap();
         let linked = |path: &str, group: &str, linking: &[&str]| {
             let repo = Some(Path::new("/r"));
             let links = links(group, linking);
@@ -1286,37 +1400,37 @@ mod tests {
         };
         linked("/r.a", "LOGIN", &["DEF-4"]);
         linked("/r.b", "", &["ABC-1"]);
-        let checkout = |title: &str| {
-            let fake = Fake::default().always("wt -C /r --config-set", Some(LISTING));
-            let review = Review {
-                title: title.into(),
-                ..review(12, "ABC-1-x")
-            };
-            let _ = items(&state, &fake).checkout(Path::new("/r"), "default", &review);
-            state.remove_item("/r.ABC-1-x").unwrap();
-            fake.calls()[0].clone()
-        };
-        assert!(
-            checkout("DEF-4: fix it")
-                .contains("ATELIER_GROUP=LOGIN ATELIER_ISSUE_KEYS=ABC-1,DEF-4 ")
+        let fake = Fake::default();
+        let items = with_root(&state, &fake, dir.path());
+        let group_of = |linking: &[&str]| items.linked_group(&keys(linking)).unwrap();
+        assert_eq!(
+            group_of(&["ABC-1", "DEF-4"]),
+            group("LOGIN"),
+            "no group does not count"
         );
+        assert_eq!(group_of(&["ABC-1"]), None);
+        assert_eq!(group_of(&["XYZ-9"]), None);
         linked("/r.c", "OTHER", &["ABC-1"]);
-        assert!(
-            checkout("DEF-4: fix it").contains("ATELIER_GROUP= ATELIER_ISSUE_KEYS=ABC-1,DEF-4 "),
-            "two linked groups: none"
-        );
-        assert!(checkout("plain").contains("ATELIER_GROUP=OTHER ATELIER_ISSUE_KEYS=ABC-1 "));
+        assert_eq!(group_of(&["ABC-1", "DEF-4"]), None, "two groups: none");
+        let notes = carnet::tests::repo(dir.path(), "2026-10-01-notes", Some("+++\n+++\n"));
+        // Its row is stale: the lookup reads the folder.
+        (state.add_item(
+            &notes,
+            ItemKind::Carnet,
+            None,
+            &links("OLD", &["Z-1"]),
+            "side",
+        ))
+        .unwrap();
+        let readme = "+++\ngroup = \"notes\"\nissues = [\"Y-1\"]\n+++\n";
+        std::fs::write(notes.join("README.md"), readme).unwrap();
+        assert_eq!(group_of(&["Z-1"]), None);
+        assert_eq!(group_of(&["Y-1"]), group("NOTES"));
     }
 
     #[test]
-    fn start_links_the_issue_and_joins_the_one_group_of_its_linked_work() {
+    fn start_links_the_issue_then_the_branchs_keys_in_the_group_given() {
         let state = state();
-        let dir = tempfile::tempdir().unwrap();
-        let notes = carnet::tests::repo(dir.path(), "2026-10-01-notes", Some("+++\n+++\n"));
-        // Its row is stale: the group lookup reads the folder.
-        (state.add_item(&notes, ItemKind::Carnet, None, &links("OLD", &[]), "side")).unwrap();
-        let readme = "+++\ngroup = \"login\"\nissues = [\"o/r#5\"]\n+++\n";
-        std::fs::write(notes.join("README.md"), readme).unwrap();
         let listing = r#"{"items":[{"branch":"5-fix-ABC-1","worktree":{"path":"/r.5-fix"}}]}"#;
         let fake = Fake::default()
             .always("wt -C /r --config-set", Some(listing))
@@ -1326,8 +1440,15 @@ mod tests {
                 "zellij --session default action list-panes",
                 Some(r#"[{"id":7,"tab_id":4,"title":"editor","pane_cwd":"/r.5-fix"}]"#),
             );
-        (with_root(&state, &fake, dir.path()))
-            .start(Path::new("/r"), "5-fix-ABC-1", "default", &key("o/r#5"))
+        let login = group("login");
+        (items(&state, &fake))
+            .start(
+                Path::new("/r"),
+                "5-fix-ABC-1",
+                "default",
+                &key("o/r#5"),
+                login.as_ref(),
+            )
             .unwrap();
         assert!(
             fake.calls()[1].contains("ATELIER_GROUP=LOGIN ATELIER_ISSUE_KEYS=o/r#5 "),
@@ -1335,8 +1456,7 @@ mod tests {
             fake.calls()
         );
         let item = state.require_item("/r.5-fix").unwrap();
-        assert_eq!(item.links.group, group("LOGIN"));
-        assert_eq!(item.links.issue_keys, keys(&["o/r#5", "ABC-1"]));
+        assert_eq!(item.links, links("LOGIN", &["o/r#5", "ABC-1"]));
     }
 
     #[test]
@@ -1360,7 +1480,13 @@ mod tests {
             .always("git -C /r branch", Some("  5-fix"))
             .always("wt -C /r --config-set", Some(listing));
         (items(&state, &fake))
-            .start(Path::new("/r"), "5-fix", "default", &key("o/r#5"))
+            .start(
+                Path::new("/r"),
+                "5-fix",
+                "default",
+                &key("o/r#5"),
+                group("x").as_ref(),
+            )
             .unwrap();
         let item = state.require_item("/r.5-fix").unwrap();
         assert_eq!(item.links.group, group("MINE"));
@@ -1510,6 +1636,22 @@ mod tests {
         assert_eq!(state.tab(&open).unwrap().unwrap().session, "side");
         assert_eq!(state.tab(&closed).unwrap(), None);
         assert_eq!(state.require_item(&closed).unwrap().workspace, "side");
+    }
+
+    #[test]
+    fn regroup_leaves_the_items_already_in_the_group_and_their_tabs_alone() {
+        let state = state();
+        let dir = tempfile::tempdir().unwrap();
+        let readme = "+++\ngroup = \"A\"\nissues = []\nsummary = \"\"\nclosed = false\n+++\n";
+        let path = carnet::tests::repo(dir.path(), "2026-10-01-notes", Some(readme));
+        (state.add_item(&path, ItemKind::Carnet, None, &links("A", &[]), "default")).unwrap();
+        tab(&state, &path, "default", 4);
+        worktree(&state, "/r.a", "A", "default");
+        tab(&state, "/r.a", "default", 5);
+        let fake = Fake::default();
+        let paths = [path, "/r.a".into()];
+        (with_root(&state, &fake, dir.path()).regroup(&paths, group("a").as_ref())).unwrap();
+        assert_eq!(fake.calls(), Vec::<String>::new(), "no commit, no rename");
     }
 
     #[test]

@@ -271,8 +271,7 @@ mod tests {
     #[test]
     fn carnet_shows_its_rendered_readme() {
         let mut model = update::tests::with_carnets(loaded(120, 30));
-        let enter = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter);
-        for key in [key('>'), enter, key('j')] {
+        for key in [key('>'), key('k')] {
             update(&mut model, Action::Key(key));
         }
         let text =
@@ -302,6 +301,59 @@ mod tests {
         cells[at].style()
     }
 
+    /// The style of the cell `offset` characters into `text`'s first occurrence on screen,
+    /// before it when negative.
+    fn style_in(
+        buffer: &ratatui::buffer::Buffer,
+        text: &str,
+        offset: isize,
+    ) -> ratatui::style::Style {
+        let width = buffer.area.width as usize;
+        let chars: Vec<char> = text.chars().collect();
+        let cells = &buffer.content;
+        let at = (0..cells.len())
+            .find(|&start| {
+                start % width + chars.len() <= width
+                    && (chars.iter().enumerate())
+                        .all(|(i, c)| cells[start + i].symbol() == c.to_string())
+            })
+            .unwrap_or_else(|| panic!("{text:?} is not on screen"));
+        cells[at.checked_add_signed(offset).unwrap()].style()
+    }
+
+    #[test]
+    fn groups_and_issue_keys_are_coloured_apart() {
+        let palette = Palette::new(catppuccin::PALETTE.mocha, Icons::Unicode);
+        assert_ne!(palette.group, palette.issue_key);
+        let model = loaded(120, 30);
+        let buffer = draw(&model, &palette);
+        assert_eq!(
+            style_in(&buffer, "▾ ABC-1", 2).fg,
+            Some(palette.group),
+            "the header"
+        );
+        let group = "Group       ABC-1";
+        assert_eq!(style_in(&buffer, group, 12).fg, Some(palette.group));
+        let keys = "Issue keys  ABC-1";
+        assert_eq!(style_in(&buffer, keys, 12).fg, Some(palette.issue_key));
+        let mut model = update::tests::with_issues(loaded(120, 30));
+        for c in ['4', ']'] {
+            update(&mut model, Action::Key(key(c)));
+        }
+        let buffer = draw(&model, &palette);
+        let linked = "ABC-1 Issue ABC-1";
+        assert_eq!(
+            style_in(&buffer, linked, -2).fg,
+            Some(palette.issue_key),
+            "the linked-work marker"
+        );
+        assert_eq!(
+            style_in(&buffer, linked, 0).fg,
+            Some(palette.dim),
+            "the issue's own key, subtle as any"
+        );
+    }
+
     fn draw(model: &Model, palette: &Palette) -> ratatui::buffer::Buffer {
         let (width, height) = model.size;
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -315,8 +367,7 @@ mod tests {
     fn the_readme_reads_in_catppuccin_under_its_label() {
         use ratatui::style::{Color, Modifier};
         let mut model = update::tests::with_carnets(loaded(120, 30));
-        let enter = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter);
-        for key in [key('>'), enter, key('j')] {
+        for key in [key('>'), key('k')] {
             update(&mut model, Action::Key(key));
         }
         let text = "# 2026-10-02-ideas\n\nWhat I found **so far**, in `notes.md`.\n";
@@ -422,6 +473,21 @@ mod tests {
         );
         model.schedule.finish_all();
         insta::assert_snapshot!(render(&model, 120, 30));
+    }
+
+    #[test]
+    fn group_prompt_lists_its_completions() {
+        let mut model = loaded(100, 30);
+        model.snapshot.work[3].links.group = crate::links::Group::parse("slow pages");
+        for c in ['>', 'e', 'g', '\t'] {
+            let code = match c {
+                '\t' => crossterm::event::KeyCode::Tab,
+                c => crossterm::event::KeyCode::Char(c),
+            };
+            update(&mut model, Action::Key(code.into()));
+        }
+        model.schedule.finish_all();
+        insta::assert_snapshot!(render(&model, 100, 30));
     }
 
     #[test]

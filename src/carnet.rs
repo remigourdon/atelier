@@ -243,6 +243,39 @@ fn split(readme: &str) -> Option<(&str, &str)> {
     None
 }
 
+/// How a commit names the change from `old` to `new` links (`Set group A, link B-2, unlink
+/// C-3`), or `None` when they are the same.
+fn describe(old: &Links, new: &Links) -> Option<String> {
+    let mut parts = Vec::new();
+    if old.group != new.group {
+        parts.push(match &new.group {
+            Some(group) => format!("set group {group}"),
+            None => "ungroup".into(),
+        });
+    }
+    let added: IssueKeys = (new.issue_keys.iter())
+        .filter(|key| !old.links(key))
+        .cloned()
+        .collect();
+    let removed: IssueKeys = (old.issue_keys.iter())
+        .filter(|key| !new.links(key))
+        .cloned()
+        .collect();
+    if !added.is_empty() {
+        parts.push(format!("link {}", added.join(", ")));
+    }
+    if !removed.is_empty() {
+        parts.push(format!("unlink {}", removed.join(", ")));
+    }
+    if parts.is_empty() && old.issue_keys != new.issue_keys {
+        parts.push(format!("reorder {}", new.issue_keys.join(", ")));
+    }
+    let message = parts.join(", ");
+    let mut chars = message.chars();
+    let first = chars.next()?;
+    Some(first.to_uppercase().chain(chars).collect())
+}
+
 /// A README without its front matter, as it renders.
 pub fn body(readme: &str) -> &str {
     split(readme).map_or(readme, |(_, body)| body)
@@ -304,18 +337,29 @@ impl<'a> Carnets<'a> {
         commit(runner, path, &message)
     }
 
-    /// Puts a carnet in `group`, or in none.
-    pub fn set_group(&self, runner: &dyn Runner, path: &Path, group: Option<&Group>) -> Result<()> {
+    /// Edits a carnet's group and issue keys, as its front matter records them, with `edit`, in
+    /// one commit naming what changed. Returns its links once edited.
+    pub fn relink(
+        &self,
+        runner: &dyn Runner,
+        path: &Path,
+        edit: impl FnOnce(&mut Links),
+    ) -> Result<Links> {
+        let mut edited = None;
         self.edit(runner, path, |front| {
-            if front.group().as_ref() == group {
-                return None;
-            }
-            front.set_group(group);
-            Some(match group {
-                None => "Ungroup".into(),
-                Some(group) => format!("Set group {group}"),
-            })
-        })
+            let old = Links {
+                group: front.group(),
+                issue_keys: front.issues(self.tracker),
+            };
+            let mut new = old.clone();
+            edit(&mut new);
+            let message = describe(&old, &new);
+            front.set_group(new.group.as_ref());
+            front.set_issues(&new.issue_keys);
+            edited = Some(new);
+            message
+        })?;
+        edited.ok_or_else(|| eyre!("{} was not edited", path.display()))
     }
 
     pub fn set_closed(&self, runner: &dyn Runner, path: &Path, closed: bool) -> Result<()> {
@@ -513,6 +557,11 @@ pub mod tests {
         carnets(root).create(state, runner, name, workspace, self::group(group).as_ref())
     }
 
+    fn set_group(carnets: &Carnets, runner: &dyn Runner, path: &Path, group: Option<&Group>) {
+        let set = |links: &mut Links| links.group = group.cloned();
+        carnets.relink(runner, path, set).unwrap();
+    }
+
     /// The front matter written at `path`.
     fn front(path: &Path) -> Front {
         Front::parse(&std::fs::read_to_string(path.join("README.md")).unwrap()).unwrap()
@@ -698,7 +747,7 @@ pub mod tests {
         let fake = Fake::default();
         let carnets = carnets(dir.path());
         let login = group("login rewrite");
-        carnets.set_group(&fake, &path, login.as_ref()).unwrap();
+        set_group(&carnets, &fake, &path, login.as_ref());
         let written = std::fs::read_to_string(path.join("README.md")).unwrap();
         assert_eq!(
             written,
@@ -713,13 +762,45 @@ pub mod tests {
         );
         assert_eq!(fake.calls()[2..], commits(&path, "Close"));
         carnets.set_closed(&fake, &path, true).unwrap();
-        carnets.set_group(&fake, &path, login.as_ref()).unwrap();
+        set_group(&carnets, &fake, &path, login.as_ref());
         assert_eq!(fake.calls().len(), 4, "no change, no commit");
         carnets.set_closed(&fake, &path, false).unwrap();
         assert_eq!(fake.calls()[4..], commits(&path, "Reopen"));
-        carnets.set_group(&fake, &path, None).unwrap();
+        set_group(&carnets, &fake, &path, None);
         assert_eq!(front(&path).group(), None);
         assert_eq!(fake.calls()[6..], commits(&path, "Ungroup"));
+    }
+
+    #[test]
+    fn setting_issue_keys_replaces_them_in_one_commit_naming_the_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let readme = "+++\ngroup = \"A\"\nissues = [\"ABC-1\", \"atelier#2\"]\n+++\n# T\n";
+        let path = repo(dir.path(), "2026-01-02-x", Some(readme));
+        let fake = Fake::default();
+        let carnets = carnets(dir.path());
+        let set = |linked: &[&str]| {
+            let set = |links: &mut Links| links.issue_keys = keys(linked);
+            carnets.relink(&fake, &path, set).unwrap()
+        };
+        set(&["o/atelier#2", "ABC-5"]);
+        assert_eq!(
+            std::fs::read_to_string(path.join("README.md")).unwrap(),
+            "+++\ngroup = \"A\"\nissues = [\"o/atelier#2\", \"ABC-5\"]\nsummary = \"\"\nclosed = false\n+++\n# T\n"
+        );
+        assert_eq!(fake.calls(), commits(&path, "Link ABC-5, unlink ABC-1"));
+        set(&["o/atelier#2", "ABC-5"]);
+        assert_eq!(fake.calls().len(), 2, "no change, no commit");
+        set(&["ABC-5", "o/atelier#2"]);
+        assert_eq!(
+            fake.calls()[2..],
+            commits(&path, "Reorder ABC-5, o/atelier#2")
+        );
+        set(&[]);
+        assert_eq!(
+            fake.calls()[4..],
+            commits(&path, "Unlink ABC-5, o/atelier#2")
+        );
+        assert_eq!(front(&path).issues(carnets.tracker), keys(&[]));
     }
 
     #[test]
@@ -744,9 +825,7 @@ pub mod tests {
         let path = repo(dir.path(), "2026-01-02-ORD-7-crash", Some("# Crash\n"));
         let fake = Fake::default();
         let carnets = carnets(dir.path());
-        carnets
-            .set_group(&fake, &path, group("crash").as_ref())
-            .unwrap();
+        set_group(&carnets, &fake, &path, group("crash").as_ref());
         assert_eq!(
             std::fs::read_to_string(path.join("README.md")).unwrap(),
             "+++\ngroup = \"CRASH\"\nissues = []\nsummary = \"\"\nclosed = false\n+++\n\n# Crash\n",
