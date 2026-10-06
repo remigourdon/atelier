@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{Result, WrapErr, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use toml_edit::{DocumentMut, Item, Table, value};
 
 use crate::hooks::{self, Phase};
@@ -212,7 +212,8 @@ pub struct Ci {
 }
 
 /// What worktrunk's CI column shows, its "no CI" aside.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CiState {
     Passed,
     Running,
@@ -249,7 +250,8 @@ pub struct CiReview {
 }
 
 /// What reviewers decided on a review.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Decision {
     ChangesRequested,
     /// A required approval is not given yet.
@@ -356,7 +358,7 @@ pub fn list(runner: &dyn Runner, repo: &Path, full: bool) -> Result<Listing> {
 /// The worktree holding `path`, with its CI, from `wt list statusline`: the same item as
 /// `wt list --full` reports. Its CI lookup is cached by worktrunk, and costs a second or two
 /// when the cache is stale.
-pub fn statusline(runner: &dyn Runner, path: &Path) -> Result<(Worktree, Option<Forge>)> {
+pub fn statusline(runner: &dyn Runner, path: &Path) -> Result<Statusline> {
     let path = path.to_string_lossy();
     let args = [
         "-C",
@@ -370,7 +372,17 @@ pub fn statusline(runner: &dyn Runner, path: &Path) -> Result<(Worktree, Option<
         Listing::parse(&runner.output("wt", &[&args[..], &["--format", "json"]].concat())?)?;
     let tree = (listing.worktrees.into_iter().next())
         .ok_or_else(|| color_eyre::eyre::eyre!("wt list statusline listed no worktree"))?;
-    Ok((tree, listing.forge))
+    Ok(Statusline {
+        tree,
+        forge: listing.forge,
+    })
+}
+
+/// The worktree `wt list statusline` reports, with its repo's forge for review references.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Statusline {
+    pub tree: Worktree,
+    pub forge: Option<Forge>,
 }
 
 /// Switches `repo` to `target` (`[--create] <branch>`, or `pr:N`), creating the worktree when
@@ -780,7 +792,7 @@ mod tests {
             "wt",
             Some(include_str!("../tests/fixtures/wt-statusline.json")),
         );
-        let (tree, forge) = statusline(&fake, Path::new("/r.b")).unwrap();
+        let Statusline { tree, forge } = statusline(&fake, Path::new("/r.b")).unwrap();
         assert_eq!(forge.unwrap().provider, "github");
         assert_eq!(
             fake.calls(),

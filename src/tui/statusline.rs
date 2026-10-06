@@ -17,7 +17,7 @@ use crate::finish;
 use crate::issues;
 use crate::process::Runner;
 use crate::state::{ItemKind, State};
-use crate::worktrunk::{Forge, Worktree};
+use crate::worktrunk::{Forge, Statusline, Worktree};
 
 /// What the line is about.
 #[derive(Debug, Default)]
@@ -31,7 +31,7 @@ pub struct Subject {
     /// A closed carnet.
     pub closed: bool,
     /// A worktree's state as `wt list statusline` reports it.
-    pub tree: Option<(Worktree, Option<Forge>)>,
+    pub tree: Option<Statusline>,
 }
 
 /// The line for `dir`: empty outside a recorded worktree or carnet. Reads the database, the
@@ -43,26 +43,26 @@ pub fn line(
     dir: &Path,
     width: usize,
 ) -> Result<String> {
-    let Some(here) = context::here(state, config, dir)? else {
+    let Some(located) = context::locate(state, config, dir)? else {
         return Ok(String::new());
     };
-    let subject = match here.item.kind {
+    let subject = match located.item.kind {
         ItemKind::Carnet => Subject {
-            title: (here.carnet.as_ref()).map_or(String::new(), |carnet| carnet.summary.clone()),
-            closed: here.carnet.is_some_and(|carnet| carnet.closed),
-            ticket: here.group,
+            title: (located.carnet.as_ref()).map_or(String::new(), |carnet| carnet.summary.clone()),
+            closed: located.carnet.is_some_and(|carnet| carnet.closed),
+            ticket: located.group,
             ..Subject::default()
         },
         ItemKind::Worktree => {
-            let tree = context::current_tree(runner, &here.item).ok();
-            let title = match here.group.as_str() {
+            let tree = context::current_tree(runner, &located.item).ok();
+            let title = match located.group.as_str() {
                 "" => None,
                 key => issues::cached(state, &config.tracker, key)?.map(|(issue, _)| issue.title),
             };
             Subject {
-                main: tree.as_ref().is_some_and(|(tree, _)| tree.main),
+                main: tree.as_ref().is_some_and(|statusline| statusline.tree.main),
                 title: title.unwrap_or_default(),
-                ticket: here.group,
+                ticket: located.group,
                 tree,
                 ..Subject::default()
             }
@@ -93,7 +93,7 @@ pub fn spans(subject: &Subject, palette: &Palette, width: usize) -> Vec<Span<'st
     if subject.closed {
         tail.push(Span::styled("closed", Style::new().fg(palette.dim)));
     }
-    if let Some((tree, forge)) = &subject.tree {
+    if let Some(Statusline { tree, forge }) = &subject.tree {
         tail.extend(cells(tree, forge.as_ref(), palette));
     }
     let used: usize = (head.iter().chain(&tail))
@@ -210,10 +210,13 @@ mod tests {
 
     /// The recorded `wt list statusline`: dirty, one ahead and two behind, CI running and #31
     /// approved.
-    fn recorded() -> (Worktree, Option<Forge>) {
+    fn recorded() -> Statusline {
         let listing = Listing::parse(include_str!("../../tests/fixtures/wt-statusline.json"));
         let mut listing = listing.unwrap();
-        (listing.worktrees.remove(0), listing.forge)
+        Statusline {
+            tree: listing.worktrees.remove(0),
+            forge: listing.forge,
+        }
     }
 
     #[test]
@@ -259,14 +262,14 @@ mod tests {
 
     #[test]
     fn a_main_worktree_is_named_so_or_by_a_house() {
-        let (mut tree, forge) = recorded();
+        let Statusline { mut tree, forge } = recorded();
         tree.main = true;
         tree.ci = None;
         tree.upstream = None;
         tree.symbols = "^".into();
         let subject = Subject {
             main: true,
-            tree: Some((tree, forge)),
+            tree: Some(Statusline { tree, forge }),
             ..Subject::default()
         };
         assert_eq!(text(&subject, Icons::Unicode, 80), "main worktree ^");
@@ -275,14 +278,14 @@ mod tests {
 
     #[test]
     fn a_finished_worktree_shows_why() {
-        let (mut tree, _) = recorded();
+        let Statusline { mut tree, .. } = recorded();
         tree.ci = None;
         tree.symbols.clear();
         tree.upstream = None;
         tree.gone = true;
         let subject = Subject {
             ticket: "ABC-1".into(),
-            tree: Some((tree, None)),
+            tree: Some(Statusline { tree, forge: None }),
             ..Subject::default()
         };
         assert_eq!(text(&subject, Icons::Unicode, 80), "ABC-1 ⊘");

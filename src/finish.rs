@@ -9,11 +9,13 @@ use crate::items::{Removal, Snapshot, Work};
 use crate::worktrunk::Worktree;
 
 /// Why a worktree is finished.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Signal {
     /// worktrunk finds its branch integrated into the default branch.
     Integrated,
     /// Its upstream branch is gone, and it is not integrated.
+    #[serde(rename = "upstream_gone")]
     Gone,
 }
 
