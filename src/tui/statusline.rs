@@ -24,7 +24,7 @@ use crate::worktrunk::{Forge, Statusline, Worktree};
 pub struct Subject {
     /// The ticket key, empty for none.
     pub ticket: String,
-    /// The cached issue title, or a carnet's summary: elided first when space is short.
+    /// The cached issue title, or a carnet's summary: last, so the first cut when space is short.
     pub title: String,
     /// A repo's main worktree, named so instead of a ticket.
     pub main: bool,
@@ -36,13 +36,7 @@ pub struct Subject {
 
 /// The line for `dir`: empty outside a recorded worktree or carnet. Reads the database, the
 /// issue cache at any age and, for a worktree, `wt list statusline`; never fetches itself.
-pub fn line(
-    state: &State,
-    config: &Config,
-    runner: &dyn Runner,
-    dir: &Path,
-    width: usize,
-) -> Result<String> {
+pub fn line(state: &State, config: &Config, runner: &dyn Runner, dir: &Path) -> Result<String> {
     let Some(located) = context::locate(state, config, dir)? else {
         return Ok(String::new());
     };
@@ -69,12 +63,13 @@ pub fn line(
         }
     };
     let palette = Palette::new(config.flavor(), config.icons);
-    Ok(ansi(&spans(&subject, &palette, width)))
+    Ok(ansi(&spans(&subject, &palette)))
 }
 
-/// The line's spans, the title elided to fit `width` columns and dropped when nothing of it fits.
-pub fn spans(subject: &Subject, palette: &Palette, width: usize) -> Vec<Span<'static>> {
-    let mut head = Vec::new();
+/// The line's spans, most important first: zjstatus never truncates a command's output, and
+/// zellij clips the bar at its right edge, so the title goes last and is the first to be cut.
+pub fn spans(subject: &Subject, palette: &Palette) -> Vec<Span<'static>> {
+    let mut parts = Vec::new();
     if subject.main {
         let glyph = palette.glyphs.main;
         let name = if glyph.is_empty() {
@@ -82,28 +77,27 @@ pub fn spans(subject: &Subject, palette: &Palette, width: usize) -> Vec<Span<'st
         } else {
             glyph
         };
-        head.push(Span::styled(name, Style::new().fg(palette.accent).bold()));
+        parts.push(Span::styled(name, Style::new().fg(palette.accent).bold()));
     } else if !subject.ticket.is_empty() {
-        head.push(Span::styled(
+        parts.push(Span::styled(
             subject.ticket.clone(),
             Style::new().fg(palette.accent).bold(),
         ));
     }
-    let mut tail = Vec::new();
     if subject.closed {
-        tail.push(Span::styled("closed", Style::new().fg(palette.dim)));
+        parts.push(Span::styled("closed", Style::new().fg(palette.dim)));
     }
     if let Some(Statusline { tree, forge }) = &subject.tree {
-        tail.extend(cells(tree, forge.as_ref(), palette));
+        parts.extend(cells(tree, forge.as_ref(), palette));
     }
-    let used: usize = (head.iter().chain(&tail))
-        .map(|span| span.width() + 1)
-        .sum::<usize>();
-    let room = width.saturating_sub(used);
-    let title = (!subject.title.is_empty() && room > 1).then(|| elide(&subject.title, room));
-    let title = title.map(|title| Span::styled(title, Style::new().fg(palette.text)));
+    if !subject.title.is_empty() {
+        parts.push(Span::styled(
+            subject.title.clone(),
+            Style::new().fg(palette.text),
+        ));
+    }
     let mut line = Vec::new();
-    for span in head.into_iter().chain(title).chain(tail) {
+    for span in parts {
         if !line.is_empty() {
             line.push(Span::raw(" "));
         }
@@ -135,21 +129,6 @@ fn cells(tree: &Worktree, forge: Option<&Forge>, palette: &Palette) -> Vec<Span<
         cells.push(finished_mark(signal, palette));
     }
     cells
-}
-
-/// `text` cut to `width` columns, ending in `…` when cut.
-fn elide(text: &str, width: usize) -> String {
-    if Span::raw(text).width() <= width {
-        return text.to_owned();
-    }
-    let mut out = String::new();
-    for c in text.chars() {
-        if Span::raw(format!("{out}{c}…")).width() > width {
-            break;
-        }
-        out.push(c);
-    }
-    out.trim_end().to_owned() + "…"
 }
 
 /// Spans as raw ANSI: truecolour foregrounds, bold and dim, reset after each styled span.
@@ -204,8 +183,8 @@ mod tests {
         out
     }
 
-    fn text(subject: &Subject, icons: Icons, width: usize) -> String {
-        plain(&ansi(&spans(subject, &palette(icons), width)))
+    fn text(subject: &Subject, icons: Icons) -> String {
+        plain(&ansi(&spans(subject, &palette(icons))))
     }
 
     /// The recorded `wt list statusline`: dirty, one ahead and two behind, CI running and #31
@@ -220,7 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn a_worktree_shows_its_ticket_title_and_cells() {
+    fn a_worktree_shows_its_ticket_then_cells_then_title() {
         let subject = Subject {
             ticket: "ABC-1".into(),
             title: "Fix the login".into(),
@@ -228,10 +207,10 @@ mod tests {
             ..Subject::default()
         };
         assert_eq!(
-            text(&subject, Icons::Unicode, 80),
-            "ABC-1 Fix the login !?↕ ↓2 ◆ #31 approved"
+            text(&subject, Icons::Unicode),
+            "ABC-1 !?↕ ↓2 ◆ #31 approved Fix the login"
         );
-        let line = ansi(&spans(&subject, &palette(Icons::Unicode), 80));
+        let line = ansi(&spans(&subject, &palette(Icons::Unicode)));
         let blue = PALETTE.mocha.colors.blue.rgb;
         assert!(
             line.contains(&format!(
@@ -239,24 +218,6 @@ mod tests {
                 blue.r, blue.g, blue.b
             )),
             "running CI in the Work row's colour: {line:?}"
-        );
-    }
-
-    #[test]
-    fn the_title_is_elided_first_then_dropped() {
-        let subject = Subject {
-            ticket: "ABC-1".into(),
-            title: "Fix the login".into(),
-            tree: Some(recorded()),
-            ..Subject::default()
-        };
-        assert_eq!(
-            text(&subject, Icons::Unicode, 35),
-            "ABC-1 Fix th… !?↕ ↓2 ◆ #31 approved"
-        );
-        assert_eq!(
-            text(&subject, Icons::Unicode, 20),
-            "ABC-1 !?↕ ↓2 ◆ #31 approved"
         );
     }
 
@@ -272,8 +233,8 @@ mod tests {
             tree: Some(Statusline { tree, forge }),
             ..Subject::default()
         };
-        assert_eq!(text(&subject, Icons::Unicode, 80), "main worktree ^");
-        assert_eq!(text(&subject, Icons::Nerd, 80), "\u{f015} ^");
+        assert_eq!(text(&subject, Icons::Unicode), "main worktree ^");
+        assert_eq!(text(&subject, Icons::Nerd), "\u{f015} ^");
     }
 
     #[test]
@@ -288,18 +249,18 @@ mod tests {
             tree: Some(Statusline { tree, forge: None }),
             ..Subject::default()
         };
-        assert_eq!(text(&subject, Icons::Unicode, 80), "ABC-1 ⊘");
+        assert_eq!(text(&subject, Icons::Unicode), "ABC-1 ⊘");
     }
 
     #[test]
-    fn a_carnet_shows_its_ticket_summary_and_whether_closed() {
+    fn a_carnet_shows_its_ticket_whether_closed_then_summary() {
         let subject = Subject {
             ticket: "ABC-1".into(),
             title: "Notes".into(),
             closed: true,
             ..Subject::default()
         };
-        assert_eq!(text(&subject, Icons::Unicode, 80), "ABC-1 Notes closed");
+        assert_eq!(text(&subject, Icons::Unicode), "ABC-1 closed Notes");
     }
 
     fn state() -> State {
@@ -314,7 +275,7 @@ mod tests {
         let state = state();
         let fake = Fake::default();
         let config = Config::parse("").unwrap();
-        let line = line(&state, &config, &fake, Path::new("/elsewhere"), 80).unwrap();
+        let line = line(&state, &config, &fake, Path::new("/elsewhere")).unwrap();
         assert_eq!(line, "");
         assert!(fake.calls().is_empty());
     }
@@ -339,8 +300,8 @@ mod tests {
             "wt",
             Some(include_str!("../../tests/fixtures/wt-statusline.json")),
         );
-        let line = line(&state, &config, &fake, &tree, 80).unwrap();
-        assert_eq!(plain(&line), "ABC-1 Issue ABC-1 !?↕ ↓2 ◆ #31 approved");
+        let line = line(&state, &config, &fake, &tree).unwrap();
+        assert_eq!(plain(&line), "ABC-1 !?↕ ↓2 ◆ #31 approved Issue ABC-1");
         let wt = (fake.calls().into_iter())
             .filter(|call| call.starts_with("wt"))
             .count();
