@@ -3,7 +3,9 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, close_tabs, kind, pair, paths, plan, subtle, tab_mark, tab_word, tag_style};
+use super::{
+    ListKind, close_tabs, key_style, kind, pair, paths, plan, subtle, tab_mark, tab_word, tag_style,
+};
 use crate::finish::Scope;
 use crate::issues::{Issue, State};
 use crate::state::Repo;
@@ -92,6 +94,7 @@ fn ask_start(model: &mut Model, issue: Issue) -> Vec<Effect> {
                     workspace: workspace(repo),
                     issue: Box::new(issue.clone()),
                 },
+                completions: Vec::new(),
             },
         })
         .collect();
@@ -160,7 +163,16 @@ impl ListKind for Issues {
                 };
                 let mut spans = vec![marker];
                 spans.extend(icon(glyphs.issue, dim));
-                spans.push(Span::styled(format!("{} ", model.issue_label(issue)), dim));
+                // A key items link stands out as theirs do.
+                let key_style = if work.is_empty() {
+                    dim
+                } else {
+                    key_style(palette)
+                };
+                spans.push(Span::styled(
+                    format!("{} ", model.issue_label(issue)),
+                    key_style,
+                ));
                 if issue.state != State::Todo {
                     let label = format!("{} ", issue.state.label().to_lowercase());
                     spans.push(Span::styled(label, state_style(issue.state, palette)));

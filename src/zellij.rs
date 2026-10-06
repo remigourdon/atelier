@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::config::Config;
 use crate::git;
-use crate::links::group_text;
+use crate::links::Group;
 use crate::process::Runner;
 use crate::state::{State, Tab};
 
@@ -185,11 +185,17 @@ fn repo_branch(repo: &str, branch: &str, limit: usize) -> String {
     )
 }
 
-/// A tab's name: `group·repo` when grouped (with the branch when the group has
+/// A tab's name: `GROUP·repo` when grouped (with the branch when the group has
 /// several tabs of that repo), else `repo` for a main worktree or `repo:branch`.
-pub fn tab_name(group: &str, repo: &str, branch: &str, main: bool, duplicate: bool) -> String {
-    if !group.is_empty() {
-        let group = middle_elide(group, 18);
+pub fn tab_name(
+    group: Option<&Group>,
+    repo: &str,
+    branch: &str,
+    main: bool,
+    duplicate: bool,
+) -> String {
+    if let Some(group) = group {
+        let group = middle_elide(group.as_str(), 18);
         let available = MAX_TAB_NAME - group.chars().count() - 1;
         let suffix = if duplicate {
             repo_branch(repo, branch, available)
@@ -540,13 +546,7 @@ impl<'a> Zellij<'a> {
             Some(repo) if !item.is_carnet() => repo,
             _ => {
                 let name = crate::state::dir_name(path);
-                return Ok(tab_name(
-                    group_text(item.links.group.as_ref()),
-                    &name,
-                    "",
-                    true,
-                    false,
-                ));
+                return Ok(tab_name(item.links.group.as_ref(), &name, "", true, false));
             }
         };
         let repo = state
@@ -555,7 +555,7 @@ impl<'a> Zellij<'a> {
         let siblings = self.open_siblings(state, &item)?;
         let branch = git::branch(self.runner, path).unwrap_or_else(|| crate::state::dir_name(path));
         Ok(tab_name(
-            group_text(item.links.group.as_ref()),
+            item.links.group.as_ref(),
             &repo.name(),
             &branch,
             path == repo_path,
@@ -615,34 +615,60 @@ mod tests {
     use rusqlite::Connection;
 
     use super::*;
-    use crate::links::tests::links;
+    use crate::links::tests::{group, links};
     use crate::process::fake::Fake;
     use crate::state::ItemKind;
 
     #[test]
+    fn a_group_names_the_tab_whatever_it_is() {
+        assert_eq!(
+            tab_name(group("slow pages").as_ref(), "web", "fix", false, false),
+            "SLOW PAGES·web"
+        );
+    }
+
+    #[test]
     fn group_and_duplicate_repo() {
         assert_eq!(
-            tab_name("ORD-123", "configue", "feature", false, false),
+            tab_name(
+                group("ORD-123").as_ref(),
+                "configue",
+                "feature",
+                false,
+                false
+            ),
             "ORD-123·configue"
         );
         assert_eq!(
-            tab_name("ORD-123", "configue", "feature", false, true),
+            tab_name(
+                group("ORD-123").as_ref(),
+                "configue",
+                "feature",
+                false,
+                true
+            ),
             "ORD-123·configue:feature"
         );
     }
 
     #[test]
     fn ungrouped_worktree() {
-        assert_eq!(tab_name("", "configue", "main", true, false), "configue");
+        assert_eq!(tab_name(None, "configue", "main", true, false), "configue");
         assert_eq!(
-            tab_name("", "configue", "feature", false, false),
+            tab_name(None, "configue", "feature", false, false),
             "configue:feature"
         );
     }
 
     #[test]
     fn keeps_group_and_repo_up_to_30_characters() {
-        let name = tab_name("ORD-123", "a-very-long-repository", "feature", false, false);
+        let name = tab_name(
+            group("ORD-123").as_ref(),
+            "a-very-long-repository",
+            "feature",
+            false,
+            false,
+        );
         assert_eq!(name, "ORD-123·a-very-long-repository");
         assert_eq!(name.chars().count(), 30);
     }
@@ -650,7 +676,7 @@ mod tests {
     #[test]
     fn keeps_both_ends_of_long_branch() {
         let name = tab_name(
-            "",
+            None,
             "configue",
             "atelier-verification-20260930",
             false,
@@ -663,14 +689,20 @@ mod tests {
     #[test]
     fn elides_long_repo_and_group() {
         let name = tab_name(
-            "",
+            None,
             "a-really-very-long-repository-name",
             "some-long-branch-name",
             false,
             false,
         );
         assert_eq!(name.chars().count(), 30);
-        let name = tab_name("VERYLONGKEY-123456", "repository", "b", false, true);
+        let name = tab_name(
+            group("VERYLONGKEY-123456").as_ref(),
+            "repository",
+            "b",
+            false,
+            true,
+        );
         assert!(name.chars().count() <= 30, "{name}");
         assert_eq!(middle_elide("abcdef", 1), "…");
     }

@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use super::app::{
-    Cmd, Focus, KEYMAP, List, Model, Panel, Popup, Screen, Source, Work, popup_hints,
+    Cmd, Focus, KEYMAP, List, Model, Panel, Popup, Row, Screen, Source, Work, popup_hints,
 };
 use super::lists;
 use super::markdown::Markdown;
@@ -39,6 +39,9 @@ pub struct Palette {
     pub approval_pending: Color,
     /// A list's filter, as it is typed and once applied.
     pub filter: Color,
+    /// A group's label, set apart from issue keys.
+    pub group: Color,
+    pub issue_key: Color,
     /// How a carnet's README is drawn.
     pub markdown: Markdown,
     pub glyphs: Glyphs,
@@ -146,6 +149,8 @@ impl Palette {
             changes_requested: colors.pink.into(),
             approval_pending: colors.teal.into(),
             filter: colors.yellow.into(),
+            group: colors.lavender.into(),
+            issue_key: colors.peach.into(),
             markdown: Markdown::new(&colors),
         }
     }
@@ -450,6 +455,7 @@ fn render_hints(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect)
             .iter()
             .filter(|binding| binding.hint.contains(&active.kind()))
             .filter(|binding| model.carnets || binding.cmd != Cmd::ToggleCarnet)
+            .filter(|binding| binding.cmd != Cmd::Link || links_selection(model, active))
         {
             if !spans.is_empty() {
                 spans.push(Span::styled(" · ", Style::new().fg(palette.dim)));
@@ -478,6 +484,11 @@ fn render_hints(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect)
             right,
         );
     }
+}
+
+/// Whether `l` has an item to edit the issue keys of: not on a group header.
+fn links_selection(model: &Model, list: List) -> bool {
+    list != List::Work || matches!(model.work_row(), Some(Row::Item(_)))
 }
 
 /// Short help for the hint bar, keeping tab closing distinct from carnet closing.

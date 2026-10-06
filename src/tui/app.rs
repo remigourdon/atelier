@@ -15,7 +15,7 @@ use crate::finish::{Plan, Scope, Step};
 use crate::git::Commit;
 use crate::issues::{self, Issue, TrackerConfig};
 pub use crate::items::{Removal, Snapshot, Work, WorkKind};
-use crate::links::Group;
+use crate::links::{Group, IssueKeys};
 use crate::process::Logged;
 use crate::reviews::{Provider, Review};
 
@@ -139,6 +139,11 @@ pub enum Job {
         paths: Vec<PathBuf>,
         group: Option<Group>,
     },
+    /// Replaces the issue keys an item links.
+    SetIssueKeys {
+        path: PathBuf,
+        issue_keys: IssueKeys,
+    },
     SetAlias {
         repo: PathBuf,
         alias: String,
@@ -169,20 +174,69 @@ pub enum Job {
     /// Runs a finish plan's checked steps.
     Finish(Vec<Step>),
     /// Checks out a review's branch with `wt switch pr:N` or `mr:N` in its registered repo and
-    /// workspace, and focuses its tab.
+    /// workspace, and focuses its tab. A new worktree is in `group`.
     Checkout {
         repo: PathBuf,
         workspace: String,
         review: Box<Review>,
+        group: Option<Group>,
     },
-    /// Creates a worktree on `branch` for an issue, linking its key, in the one group of its
-    /// linked work.
+    /// Creates a worktree on `branch` for an issue, linking its key, in `group`.
+    Start {
+        repo: PathBuf,
+        branch: String,
+        workspace: String,
+        issue: Box<Issue>,
+        group: Option<Group>,
+    },
+    /// Looks up the one group among the items linking a pending worktree's issue keys.
+    LinkedGroup(Pending),
+}
+
+/// A worktree for an issue or a review, waiting for its group.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pending {
     Start {
         repo: PathBuf,
         branch: String,
         workspace: String,
         issue: Box<Issue>,
     },
+    Checkout {
+        repo: PathBuf,
+        workspace: String,
+        review: Box<Review>,
+    },
+}
+
+impl Pending {
+    /// The job that makes it, in `group`.
+    pub fn job(self, group: Option<Group>) -> Job {
+        match self {
+            Pending::Start {
+                repo,
+                branch,
+                workspace,
+                issue,
+            } => Job::Start {
+                repo,
+                branch,
+                workspace,
+                issue,
+                group,
+            },
+            Pending::Checkout {
+                repo,
+                workspace,
+                review,
+            } => Job::Checkout {
+                repo,
+                workspace,
+                review,
+                group,
+            },
+        }
+    }
 }
 
 /// A remote listing: a provider's reviews or a tracker's issues.
@@ -259,7 +313,7 @@ impl Job {
     pub fn changes_items(&self) -> bool {
         !matches!(
             self,
-            Job::Browse(_) | Job::SwitchWorkspace(_) | Job::ExportLog(_)
+            Job::Browse(_) | Job::SwitchWorkspace(_) | Job::ExportLog(_) | Job::LinkedGroup(_)
         )
     }
 }
@@ -300,6 +354,10 @@ pub enum Submit {
         group: Option<Group>,
     },
     Group(Vec<PathBuf>),
+    /// An item's issue keys, comma-separated.
+    IssueKeys(PathBuf),
+    /// The group of a pending worktree, empty for none.
+    Join(Pending),
     Alias(PathBuf),
     Workspace,
     /// The text to search the carnets for.
@@ -319,6 +377,7 @@ pub enum Modal {
         title: String,
         input: Input,
         then: Submit,
+        completion: Completion,
     },
     Confirm {
         title: String,
@@ -334,6 +393,49 @@ pub enum Modal {
     Finish { plan: Plan, selected: usize },
 }
 
+/// What `Tab` completes a prompt's text to.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Completion {
+    pub options: Vec<String>,
+    /// While `Tab` cycles: the text typed before it, and the match shown.
+    pub cycle: Option<(String, usize)>,
+}
+
+impl Completion {
+    pub fn new(options: Vec<String>) -> Self {
+        Self {
+            options,
+            cycle: None,
+        }
+    }
+
+    /// The options starting with `typed`, ignoring case.
+    pub fn matches(&self, typed: &str) -> Vec<&str> {
+        let typed = typed.trim().to_uppercase();
+        (self.options.iter())
+            .filter(|option| option.to_uppercase().starts_with(&typed))
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// The next match for `text`, cycling through the matches of what was typed before the
+    /// first `Tab`; `None` when nothing matches.
+    pub fn next(&mut self, text: &str) -> Option<String> {
+        let (typed, at) = match self.cycle.take() {
+            Some((typed, at)) => (typed, at + 1),
+            None => (text.to_owned(), 0),
+        };
+        let matches = self.matches(&typed);
+        if matches.is_empty() {
+            return None;
+        }
+        let at = at % matches.len();
+        let chosen = matches[at].to_owned();
+        self.cycle = Some((typed, at));
+        Some(chosen)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Key(KeyEvent),
@@ -347,6 +449,8 @@ pub enum Action {
         title: String,
         initial: String,
         then: Submit,
+        /// What `Tab` completes the text to.
+        completions: Vec<String>,
     },
     Copy(String),
     /// Commands that ran outside any job, for the command log.
@@ -368,6 +472,12 @@ pub enum Action {
     /// A finish plan, built once its repos were fetched.
     Planned {
         plan: Result<Plan, String>,
+        log: Vec<Logged>,
+    },
+    /// The one group linked to a pending worktree's issue keys, if there is one.
+    Linked {
+        pending: Pending,
+        group: Result<Option<Group>, String>,
         log: Vec<Logged>,
     },
     /// A feed's rows, replacing the ones it listed before.
@@ -410,6 +520,7 @@ pub enum Cmd {
     ExpandAll,
     New,
     Edit,
+    Link,
     Move,
     Remove,
     Close,
@@ -503,7 +614,7 @@ pub const KEYMAP: &[Binding] = &[
     Binding { keys: &[ch('<'), code(KeyCode::Home)], label: "</Home", cmd: Cmd::Top, help: "top", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('>'), code(KeyCode::End)], label: ">/End", cmd: Cmd::Bottom, help: "bottom", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('h'), code(KeyCode::Left), code(KeyCode::BackTab)], label: "h/←/S-Tab", cmd: Cmd::PrevPanel, help: "previous panel", hint: NONE, on: On::Nav },
-    Binding { keys: &[ch('l'), code(KeyCode::Right), code(KeyCode::Tab)], label: "l/→/Tab", cmd: Cmd::NextPanel, help: "next panel", hint: NONE, on: On::Nav },
+    Binding { keys: &[code(KeyCode::Right), code(KeyCode::Tab)], label: "→/Tab", cmd: Cmd::NextPanel, help: "next panel", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('1')], label: "1", cmd: Cmd::Jump(1), help: "Workspaces │ Repos", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('2')], label: "2", cmd: Cmd::Jump(2), help: "Work │ Carnets", hint: NONE, on: On::Nav },
     Binding { keys: &[ch('3')], label: "3", cmd: Cmd::Jump(3), help: "To review │ Mine", hint: NONE, on: On::Nav },
@@ -523,6 +634,7 @@ pub const KEYMAP: &[Binding] = &[
     Binding { keys: &[ch('=')], label: "=", cmd: Cmd::ExpandAll, help: "expand all groups", hint: NONE, on: On::Lists(WORK) },
     Binding { keys: &[ch('n')], label: "n", cmd: Cmd::New, help: "new worktree or carnet · new workspace", hint: &[Kind::Workspaces, Kind::Work, Kind::Issues], on: On::Lists(&[Kind::Workspaces, Kind::Work, Kind::Issues]) },
     Binding { keys: &[ch('e')], label: "e", cmd: Cmd::Edit, help: "edit group · edit repo alias", hint: &[Kind::Repos, Kind::Work], on: On::Lists(&[Kind::Repos, Kind::Work]) },
+    Binding { keys: &[ch('l')], label: "l", cmd: Cmd::Link, help: "link issue keys", hint: CARNETS, on: On::Lists(CARNETS) },
     Binding { keys: &[ch('m')], label: "m", cmd: Cmd::Move, help: "move to workspace · set repo workspace", hint: &[Kind::Repos, Kind::Work], on: On::Lists(&[Kind::Repos, Kind::Work]) },
     Binding { keys: &[ch('d')], label: "d", cmd: Cmd::Remove, help: "remove", hint: LOCAL, on: On::Lists(LOCAL) },
     Binding { keys: &[ch('x')], label: "x", cmd: Cmd::Close, help: "close tab", hint: TABS, on: On::Lists(TABS) },
@@ -576,6 +688,8 @@ pub enum PopupCmd {
     Cancel,
     /// Check or uncheck a line.
     Toggle,
+    /// Complete the prompt's text.
+    Complete,
 }
 
 pub struct PopupBinding {
@@ -591,6 +705,7 @@ pub struct PopupBinding {
 pub const POPUP_KEYMAP: &[PopupBinding] = &[
     PopupBinding { popup: Popup::Prompt, keys: &[code(KeyCode::Enter)], label: "Enter", cmd: PopupCmd::Accept, help: "submit" },
     PopupBinding { popup: Popup::Prompt, keys: &[code(KeyCode::Esc)], label: "Esc", cmd: PopupCmd::Cancel, help: "cancel" },
+    PopupBinding { popup: Popup::Prompt, keys: &[code(KeyCode::Tab)], label: "Tab", cmd: PopupCmd::Complete, help: "complete" },
     PopupBinding { popup: Popup::Confirm, keys: &[code(KeyCode::Enter), ch('y')], label: "Enter/y", cmd: PopupCmd::Accept, help: "confirm" },
     PopupBinding { popup: Popup::Confirm, keys: &[code(KeyCode::Esc), ch('n'), ch('q')], label: "Esc/n", cmd: PopupCmd::Cancel, help: "cancel" },
     PopupBinding { popup: Popup::Menu, keys: &[ch('j'), code(KeyCode::Down)], label: "j/↓", cmd: PopupCmd::Down, help: "next" },
@@ -677,7 +792,7 @@ pub struct Model {
     pub filters: HashMap<List, Input>,
     /// The list whose filter is being typed.
     pub filtering: Option<List>,
-    /// Group keys toggled from their default: folded, except the `Carnets` group, unfolded.
+    /// The keys of the folded groups.
     pub folded: HashSet<String>,
     /// The main view's vertical and horizontal scroll.
     pub scroll: (u16, u16),

@@ -14,11 +14,12 @@ use std::path::PathBuf;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::app::{Cmd, Effect, Job, Kind, List, Model, Work};
-use super::update::run;
+use super::app::{Action, Cmd, Effect, Job, Kind, List, Model, Submit, Work};
+use super::update::{run, update};
 use super::view::Palette;
 use crate::finish::Scope;
 use crate::issues::TrackerConfig;
+use crate::links::{Group, group_text};
 
 /// A kind of list. Methods take the `List`, so the issue sections share one implementation;
 /// operations a list doesn't support do nothing.
@@ -55,6 +56,10 @@ pub trait ListKind: Sync {
         Vec::new()
     }
     fn edit(&self, _model: &mut Model, _list: List) -> Vec<Effect> {
+        Vec::new()
+    }
+    /// `l`: edits the selected item's issue keys.
+    fn link(&self, _model: &mut Model, _list: List) -> Vec<Effect> {
         Vec::new()
     }
     fn move_to(&self, _model: &mut Model, _list: List) -> Vec<Effect> {
@@ -104,6 +109,17 @@ fn plan(model: &mut Model, scope: Scope) -> Vec<Effect> {
     vec![run(model, Job::Plan { scope, repos })]
 }
 
+/// Asks for an item's issue keys, comma-separated, prefilled as stored.
+fn ask_issue_keys(model: &mut Model, work: &Work) -> Vec<Effect> {
+    let action = Action::Ask {
+        title: format!("Issue keys of {}", work.title()),
+        initial: work.links.issue_keys.join(", "),
+        then: Submit::IssueKeys(work.path.clone()),
+        completions: Vec::new(),
+    };
+    update(model, action)
+}
+
 fn paths(works: &[&Work]) -> Vec<PathBuf> {
     works.iter().map(|work| work.path().clone()).collect()
 }
@@ -135,9 +151,24 @@ pub(super) fn subtle(text: impl Into<Cow<'static, str>>, palette: &Palette) -> S
     Span::styled(text, Style::new().fg(palette.dim))
 }
 
-/// A group, an item's issue keys and an issue's labels.
+/// An issue's labels.
 fn tag_style(palette: &Palette) -> Style {
     Style::new().fg(palette.info)
+}
+
+/// A group, never coloured as an issue key, which can look the same in uppercase.
+fn group_style(palette: &Palette) -> Style {
+    Style::new().fg(palette.group)
+}
+
+/// An issue key.
+fn key_style(palette: &Palette) -> Style {
+    Style::new().fg(palette.issue_key)
+}
+
+/// An optional group, as the detail shows it.
+fn group_span(group: Option<&Group>, palette: &Palette) -> Span<'static> {
+    Span::styled(group_text(group).to_owned(), group_style(palette))
 }
 
 /// An item's issue keys as shown, joined by `separator`.
@@ -148,7 +179,7 @@ fn issue_keys(
     palette: &Palette,
 ) -> Span<'static> {
     let keys = work.links.issue_keys.display(tracker, separator);
-    Span::styled(keys, tag_style(palette))
+    Span::styled(keys, key_style(palette))
 }
 
 /// The mark of an item whose tab is open or closed, and its style.

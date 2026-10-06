@@ -1,11 +1,15 @@
 //! Panel 2's Work list: the selected workspace's worktrees and open carnets, in groups.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, carnets, issue_keys, kind, pair, paths, plan, subtle, tab_detail, tab_mark};
+use super::{
+    ListKind, ask_issue_keys, carnets, group_span, group_style, issue_keys, kind, pair, paths,
+    plan, subtle, tab_detail, tab_mark,
+};
 use crate::finish::{self, Scope, Signal};
 use crate::links::{Group, group_text};
 use crate::tui::app::{
@@ -17,17 +21,13 @@ use crate::worktrunk::{Ci, CiReview, CiState, Decision, Forge, Worktree};
 
 pub struct WorkList;
 
-/// The end of the key of a workspace's `Carnets` group, which no group name can produce.
-const CARNETS_KEY: &str = "\0\0carnets";
-
 /// A row of the Work panel.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Row {
-    /// A group header; `members` index `Snapshot::work`. The `Carnets` group, of ungrouped
-    /// carnets, has no `group`.
+    /// A group header; `members` index `Snapshot::work`.
     Group {
         key: String,
-        group: Option<Group>,
+        group: Group,
         members: Vec<usize>,
         folded: bool,
     },
@@ -35,21 +35,41 @@ pub enum Row {
 }
 
 impl Model {
-    /// Whether a group row is folded; the `Carnets` group starts folded.
     pub fn is_folded(&self, key: &str) -> bool {
-        self.folded.contains(key) != key.ends_with(CARNETS_KEY)
+        self.folded.contains(key)
     }
 
     pub fn set_folded(&mut self, key: &str, folded: bool) {
-        if folded == key.ends_with(CARNETS_KEY) {
-            self.folded.remove(key);
-        } else {
+        if folded {
             self.folded.insert(key.to_owned());
+        } else {
+            self.folded.remove(key);
         }
     }
 
-    /// Panel 2's rows: named groups, foldable, then ungrouped worktrees, then the ungrouped
-    /// carnets in a `Carnets` group. Worktrees come before carnets, which are newest first.
+    /// Every group of every item in every workspace, carnets included, once each, sorted: what
+    /// a group prompt completes to.
+    pub fn group_names(&self) -> Vec<String> {
+        let groups: BTreeSet<&Group> = (self.snapshot.work.iter())
+            .chain(&self.snapshot.carnets)
+            .filter_map(Work::group)
+            .collect();
+        groups.into_iter().map(Group::to_string).collect()
+    }
+
+    /// Every item in `group`, in every workspace, closed carnets included, once each.
+    fn group_members(&self, group: &Group) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for work in self.snapshot.work.iter().chain(&self.snapshot.carnets) {
+            if work.group() == Some(group) && !paths.contains(&work.path) {
+                paths.push(work.path.clone());
+            }
+        }
+        paths
+    }
+
+    /// Panel 2's rows: named groups, foldable, then the items in no group. Worktrees come
+    /// before carnets, which are newest first.
     pub fn work_rows(&self) -> Vec<Row> {
         let Some(workspace) = self.workspace() else {
             return Vec::new();
@@ -70,14 +90,8 @@ impl Model {
                     )
             })
             .collect();
-        // Named groups, then ungrouped worktrees, then ungrouped carnets.
-        let section = |work: &Work| {
-            (
-                work.group().is_none(),
-                work.in_carnets_group(),
-                work.group().cloned(),
-            )
-        };
+        // Named groups, then the items in no group.
+        let section = |work: &Work| (work.group().is_none(), work.group().cloned());
         members.sort_by(|&a, &b| {
             let (a, b) = (&work[a], &work[b]);
             section(a)
@@ -110,29 +124,25 @@ impl Model {
         let mut index = 0;
         while index < members.len() {
             let first = &work[members[index]];
-            let carnets = first.in_carnets_group();
             let end = members[index..]
                 .iter()
                 .position(|&other| section(&work[other]) != section(first))
                 .map_or(members.len(), |offset| index + offset);
             let slice = &members[index..end];
-            if first.group().is_none() && !carnets {
-                lines.extend(slice.iter().map(|&member| Row::Item(member)));
-            } else {
-                let key = if carnets {
-                    format!("{workspace}{CARNETS_KEY}")
-                } else {
-                    format!("{workspace}\0{}", group_text(first.group()))
-                };
-                let folded = !filtering && self.is_folded(&key);
-                lines.push(Row::Group {
-                    key,
-                    group: first.group().cloned(),
-                    members: slice.to_vec(),
-                    folded,
-                });
-                if !folded {
-                    lines.extend(slice.iter().map(|&member| Row::Item(member)));
+            match first.group() {
+                None => lines.extend(slice.iter().map(|&member| Row::Item(member))),
+                Some(group) => {
+                    let key = format!("{workspace}\0{group}");
+                    let folded = !filtering && self.is_folded(&key);
+                    lines.push(Row::Group {
+                        key,
+                        group: group.clone(),
+                        members: slice.to_vec(),
+                        folded,
+                    });
+                    if !folded {
+                        lines.extend(slice.iter().map(|&member| Row::Item(member)));
+                    }
                 }
             }
             index = end;
@@ -155,11 +165,6 @@ impl Model {
             None => Vec::new(),
         }
     }
-}
-
-/// How a group row is named; the `Carnets` group has no group.
-pub fn group_name(group: Option<&Group>) -> &str {
-    group.map_or("Carnets", Group::as_str)
 }
 
 impl ListKind for WorkList {
@@ -201,30 +206,20 @@ impl ListKind for WorkList {
                         .iter()
                         .filter(|&&index| model.snapshot.work[index].tab)
                         .count();
+                    let glyph = if folded {
+                        palette.glyphs.folded
+                    } else {
+                        palette.glyphs.unfolded
+                    };
                     Line::from(vec![
-                        Span::styled(
-                            format!(
-                                "{} {}",
-                                if folded {
-                                    palette.glyphs.folded
-                                } else {
-                                    palette.glyphs.unfolded
-                                },
-                                group_name(group.as_ref())
-                            ),
-                            Style::new().fg(palette.info).bold(),
-                        ),
+                        Span::styled(format!("{glyph} {group}"), group_style(palette).bold()),
                         Span::styled(format!(" {} · {open} open", members.len()), dim),
                     ])
                 }
                 Row::Item(index) => {
                     let work = &model.snapshot.work[index];
                     let glyphs = &palette.glyphs;
-                    let indent = if work.group().is_none() && !work.in_carnets_group() {
-                        ""
-                    } else {
-                        "  "
-                    };
+                    let indent = if work.group().is_none() { "" } else { "  " };
                     let marker = if model.schedule.is_pulling(work.path()) {
                         let frame = glyphs.spinner[model.frame % glyphs.spinner.len()];
                         Span::styled(format!("{frame} "), Style::new().fg(palette.info))
@@ -272,7 +267,7 @@ impl ListKind for WorkList {
     ) -> Vec<(String, Line<'static>)> {
         match model.work_row() {
             Some(Row::Group { group, members, .. }) => {
-                let mut pairs = vec![pair("Group", group_name(group.as_ref()).to_owned())];
+                let mut pairs = vec![pair("Group", group_span(Some(&group), palette))];
                 pairs.extend(members.iter().map(|&index| {
                     let work = &model.snapshot.work[index];
                     pair(kind(work), work.title())
@@ -320,7 +315,7 @@ impl ListKind for WorkList {
                     pair("Branch", work.branch()),
                     pair("Path", tree.path.display().to_string()),
                     pair("Workspace", work.workspace.clone()),
-                    pair("Group", group_text(work.group()).to_owned()),
+                    pair("Group", group_span(work.group(), palette)),
                     pair(
                         "Issue keys",
                         issue_keys(work, &model.tracker_config, ", ", palette),
@@ -385,7 +380,7 @@ impl ListKind for WorkList {
             return Vec::new();
         };
         let group = match model.work_row() {
-            Some(Row::Group { group, .. }) => group,
+            Some(Row::Group { group, .. }) => Some(group),
             Some(Row::Item(index)) => model.snapshot.work[index].group().cloned(),
             None => None,
         };
@@ -397,6 +392,7 @@ impl ListKind for WorkList {
                 workspace: workspace.clone(),
                 group: group.clone(),
             },
+            completions: Vec::new(),
         };
         // The selected worktree's repo, else every repo.
         let selected = (model.targets().first()).and_then(|work| match &work.kind {
@@ -432,6 +428,7 @@ impl ListKind for WorkList {
                     title: "New carnet: name".into(),
                     initial: String::new(),
                     then: Submit::Carnet { workspace, group },
+                    completions: Vec::new(),
                 },
             });
         }
@@ -454,17 +451,43 @@ impl ListKind for WorkList {
         Vec::new()
     }
 
+    /// Moves the selected item to a group, or out of any, or renames the selected group in
+    /// every workspace.
     fn edit(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        let targets = model.targets();
-        let Some(first) = targets.first() else {
-            return Vec::new();
+        let (title, initial, paths) = match model.work_row() {
+            Some(Row::Item(index)) => {
+                let work = &model.snapshot.work[index];
+                let initial = group_text(work.group()).to_owned();
+                (
+                    format!("Group of {}", work.title()),
+                    initial,
+                    vec![work.path.clone()],
+                )
+            }
+            Some(Row::Group { group, .. }) => (
+                format!("Rename group {group}"),
+                group.to_string(),
+                model.group_members(&group),
+            ),
+            None => return Vec::new(),
         };
         let action = Action::Ask {
-            title: format!("Group of {} item(s)", targets.len()),
-            initial: group_text(first.group()).to_owned(),
-            then: Submit::Group(paths(&targets)),
+            title,
+            initial,
+            then: Submit::Group(paths),
+            completions: model.group_names(),
         };
         update(model, action)
+    }
+
+    fn link(&self, model: &mut Model, _list: List) -> Vec<Effect> {
+        match model.work_row() {
+            Some(Row::Item(index)) => {
+                let work = model.snapshot.work[index].clone();
+                ask_issue_keys(model, &work)
+            }
+            _ => Vec::new(),
+        }
     }
 
     fn move_to(&self, model: &mut Model, _list: List) -> Vec<Effect> {
@@ -547,7 +570,7 @@ impl ListKind for WorkList {
     fn copy_path(&self, model: &Model, _list: List) -> Option<String> {
         match model.work_row()? {
             Row::Item(index) => Some(model.snapshot.work[index].path().display().to_string()),
-            Row::Group { group, .. } => group.map(|group| group.to_string()),
+            Row::Group { group, .. } => Some(group.to_string()),
         }
     }
 
@@ -707,7 +730,7 @@ mod tests {
     fn titles(model: &Model) -> Vec<String> {
         (model.work_rows().into_iter())
             .map(|row| match row {
-                Row::Group { group, .. } => format!("[{}]", group_name(group.as_ref())),
+                Row::Group { group, .. } => format!("[{group}]"),
                 Row::Item(index) => model.snapshot.work[index].title(),
             })
             .collect()
@@ -725,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn named_groups_come_first_then_ungrouped_worktrees_then_carnets() {
+    fn named_groups_come_first_then_ungrouped_worktrees_then_carnets_newest_first() {
         assert_eq!(
             titles(&grouped()),
             [
@@ -737,7 +760,8 @@ mod tests {
                 "web:XYZ-2-menu",
                 "api:main",
                 "api:fix",
-                "[Carnets]",
+                "2026-10-02-ideas",
+                "2026-09-20-old",
             ]
         );
     }
@@ -753,31 +777,18 @@ mod tests {
     }
 
     #[test]
-    fn the_carnets_group_is_folded_by_default() {
-        let model = grouped();
-        let rows = model.work_rows();
-        let Some(Row::Group {
-            group,
-            folded,
-            members,
-            ..
-        }) = rows.last()
-        else {
-            panic!("no Carnets group");
-        };
-        assert_eq!((group, *folded, members.len()), (&None, true, 2));
-    }
-
-    #[test]
-    fn carnets_are_newest_first() {
+    fn groups_start_unfolded_and_fold_on_their_own() {
         let mut model = grouped();
-        let Some(Row::Group { key, .. }) = model.work_rows().pop() else {
-            panic!("no Carnets group");
+        let Some(Row::Group { key, folded, .. }) = model.work_rows().into_iter().next() else {
+            panic!("no group");
         };
-        model.set_folded(&key, false);
+        assert!(!folded);
+        model.set_folded(&key, true);
         assert_eq!(
-            titles(&model)[8..],
-            ["[Carnets]", "2026-10-02-ideas", "2026-09-20-old"]
+            titles(&model)[..3],
+            ["[ABC-1]", "[XYZ-2]", "web:XYZ-2-menu"]
         );
+        model.set_folded(&key, false);
+        assert_eq!(titles(&model).len(), 10);
     }
 }

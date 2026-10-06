@@ -140,6 +140,7 @@ impl ListKind for Workspaces {
                 title: "New workspace".into(),
                 initial: String::new(),
                 then: Submit::Workspace,
+                completions: Vec::new(),
             },
         )
     }

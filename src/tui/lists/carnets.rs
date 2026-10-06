@@ -6,7 +6,10 @@ use std::path::PathBuf;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, close_tabs, issue_keys, pair, tab_detail, tab_mark, tag_style};
+use super::{
+    ListKind, ask_issue_keys, close_tabs, group_span, group_style, issue_keys, pair, tab_detail,
+    tab_mark,
+};
 use crate::issues::TrackerConfig;
 use crate::links::group_text;
 use crate::tui::app::{Action, Cmd, Effect, Job, Kind, List, Model, Submit, Work, WorkKind};
@@ -76,7 +79,7 @@ pub fn detail(
         pair("Carnet", work.title()),
         pair("Path", work.path.display().to_string()),
         pair("Workspace", work.workspace.clone()),
-        pair("Group", group_text(work.group()).to_owned()),
+        pair("Group", group_span(work.group(), palette)),
         pair("Issue keys", issue_keys(work, tracker, ", ", palette)),
         pair("Summary", summary),
         pair("Tab", tab_detail(work.tab, palette)),
@@ -115,7 +118,7 @@ impl ListKind for Carnets {
                 spans.extend(icon(glyphs.carnet, dim));
                 spans.push(Span::raw(work.title()));
                 if let Some(group) = work.group() {
-                    spans.push(Span::styled(format!(" {group}"), tag_style(palette)));
+                    spans.push(Span::styled(format!(" {group}"), group_style(palette)));
                 }
                 if !work.links.issue_keys.is_empty() {
                     let keys = issue_keys(work, &model.tracker_config, ",", palette);
@@ -157,6 +160,13 @@ impl ListKind for Carnets {
 
     fn item<'a>(&self, model: &'a Model, _list: List) -> Option<&'a Work> {
         model.carnet()
+    }
+
+    fn link(&self, model: &mut Model, _list: List) -> Vec<Effect> {
+        match model.carnet().cloned() {
+            Some(work) => ask_issue_keys(model, &work),
+            None => Vec::new(),
+        }
     }
 
     /// Opens the carnet's tab; a closed carnet stays closed.
@@ -202,6 +212,7 @@ impl ListKind for Carnets {
                     title: "Search inside carnets".into(),
                     initial,
                     then: Submit::Search,
+                    completions: Vec::new(),
                 };
                 update(model, action)
             }

@@ -6,7 +6,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 
-use super::app::{Modal, Popup, finish_hints, popup_hints};
+use super::app::{Completion, Modal, Popup, finish_hints, popup_hints};
 use super::view::{Palette, offset};
 use crate::finish::{Line as PlanLine, Plan, Step};
 
@@ -36,18 +36,59 @@ fn popup(frame: &mut Frame, hints: String, title: &str, rect: Rect, palette: &Pa
     inner
 }
 
+/// What `Tab` completes a prompt to: the matches of the text typed, the one shown picked out.
+fn completions(text: &str, completion: &Completion, palette: &Palette) -> Line<'static> {
+    let dim = Style::new().fg(palette.dim);
+    let (typed, at) = match &completion.cycle {
+        Some((typed, at)) => (typed.as_str(), Some(*at)),
+        None => (text, None),
+    };
+    let mut spans = vec![Span::styled("Tab", Style::new().fg(palette.accent))];
+    let matches = completion.matches(typed);
+    if matches.is_empty() {
+        spans.push(Span::styled(" no match", dim));
+    }
+    for (index, option) in matches.into_iter().enumerate() {
+        spans.push(Span::styled(if index == 0 { " " } else { " · " }, dim));
+        let style = if Some(index) == at {
+            Style::new().fg(palette.group)
+        } else {
+            dim
+        };
+        spans.push(Span::styled(option.to_owned(), style));
+    }
+    Line::from(spans)
+}
+
 pub fn modal(frame: &mut Frame, modal: &Modal, palette: &Palette) {
     let area = frame.area();
     let width = area.width.saturating_sub(4).min(72);
     match modal {
-        Modal::Prompt { title, input, .. } => {
-            let rect = centered(area, width, 3);
+        Modal::Prompt {
+            title,
+            input,
+            completion,
+            ..
+        } => {
+            let completing = !completion.options.is_empty();
+            let rect = centered(area, width, if completing { 4 } else { 3 });
             let inner = popup(frame, popup_hints(Popup::Prompt), title, rect, palette);
             let scroll = input.visual_scroll(inner.width.saturating_sub(1) as usize);
             frame.render_widget(
                 Paragraph::new(input.value()).scroll((0, scroll as u16)),
                 inner,
             );
+            if completing {
+                let line = Rect {
+                    y: inner.y + 1,
+                    height: 1,
+                    ..inner
+                };
+                frame.render_widget(
+                    Paragraph::new(completions(input.value(), completion, palette)),
+                    line,
+                );
+            }
             frame.set_cursor_position(Position::new(
                 inner.x + (input.visual_cursor().saturating_sub(scroll)) as u16,
                 inner.y,

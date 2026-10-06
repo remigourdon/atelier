@@ -103,6 +103,7 @@ impl ListKind for Repos {
             title: format!("Alias of {} (empty clears it)", repo.path.display()),
             initial: repo.alias.clone().unwrap_or_default(),
             then: Submit::Alias(repo.path.clone()),
+            completions: Vec::new(),
         };
         update(model, action)
     }

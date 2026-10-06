@@ -11,13 +11,13 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use super::app::{
-    Action, Binding, Cmd, Effect, Feed, Focus, Job, KEYMAP, List, MenuEntry, Modal, Model, On,
-    Panel, Popup, PopupCmd, Row, Rows, Screen, Search, Snapshot, Source, Submit, Work, WorkKind,
-    lookup, popup_lookup,
+    Action, Binding, Cmd, Completion, Effect, Feed, Focus, Job, KEYMAP, List, MenuEntry, Modal,
+    Model, On, Panel, Pending, Popup, PopupCmd, Row, Rows, Screen, Search, Snapshot, Source,
+    Submit, Work, WorkKind, lookup, popup_lookup,
 };
 use super::lists;
 use super::view::{areas, main_len, offset};
-use crate::links::Group;
+use crate::links::{Group, IssueKeys};
 use crate::process::Logged;
 use crate::reviews::Provider;
 use crate::worktrunk;
@@ -47,11 +47,13 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
             title,
             initial,
             then,
+            completions,
         } => {
             model.modal = Some(Modal::Prompt {
                 title,
                 input: Input::new(initial),
                 then,
+                completion: Completion::new(completions),
             });
             Vec::new()
         }
@@ -133,6 +135,23 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
             // Its fresh listing may show the marks anew.
             let jobs = model.schedule.changed();
             effects.extend(start(model, jobs));
+            effects
+        }
+        Action::Linked {
+            pending,
+            group,
+            log,
+        } => {
+            let mut effects = done(model, Source::Run);
+            model.push_log(log);
+            match group {
+                Ok(Some(group)) => effects.push(run(model, pending.job(Some(group)))),
+                Ok(None) => effects.extend(ask_group(model, pending)),
+                Err(error) => model.push_log([Logged {
+                    command: "linked group".into(),
+                    error: Some(error),
+                }]),
+            }
             effects
         }
         Action::Fetched { feed, rows, log } => {
@@ -401,15 +420,29 @@ fn modal_key(model: &mut Model, modal: Modal, key: KeyEvent) -> Vec<Effect> {
             title,
             mut input,
             then,
-        } => match popup_lookup(Popup::Prompt, &key) {
-            Some(PopupCmd::Accept) => submit(model, then, input.value().trim()),
-            Some(PopupCmd::Cancel) => Vec::new(),
-            _ => {
-                input.handle_event(&Event::Key(key));
-                model.modal = Some(Modal::Prompt { title, input, then });
-                Vec::new()
+            mut completion,
+        } => {
+            match popup_lookup(Popup::Prompt, &key) {
+                Some(PopupCmd::Accept) => return submit(model, then, input.value().trim()),
+                Some(PopupCmd::Cancel) => return Vec::new(),
+                Some(PopupCmd::Complete) => {
+                    if let Some(text) = completion.next(input.value()) {
+                        input = Input::new(text);
+                    }
+                }
+                _ => {
+                    completion.cycle = None;
+                    input.handle_event(&Event::Key(key));
+                }
             }
-        },
+            model.modal = Some(Modal::Prompt {
+                title,
+                input,
+                then,
+                completion,
+            });
+            Vec::new()
+        }
         Modal::Confirm { title, lines, job } => match popup_lookup(Popup::Confirm, &key) {
             Some(PopupCmd::Accept) => vec![run(model, job)],
             Some(PopupCmd::Cancel) => Vec::new(),
@@ -434,7 +467,7 @@ fn modal_key(model: &mut Model, modal: Modal, key: KeyEvent) -> Vec<Effect> {
                 Some(PopupCmd::Up) => selected = selected.saturating_sub(1),
                 Some(PopupCmd::Top) => selected = 0,
                 Some(PopupCmd::Bottom) => selected = last,
-                Some(PopupCmd::Toggle) | None => {
+                Some(PopupCmd::Toggle | PopupCmd::Complete) | None => {
                     let shortcut = entries
                         .iter()
                         .find(|entry| match key.code {
@@ -507,12 +540,15 @@ fn submit(model: &mut Model, then: Submit, value: &str) -> Vec<Effect> {
             repo,
             workspace,
             issue,
-        } => Job::Start {
-            repo,
-            branch: value.into(),
-            workspace,
-            issue,
-        },
+        } => {
+            let pending = Pending::Start {
+                repo,
+                branch: value.into(),
+                workspace,
+                issue,
+            };
+            return join_linked_group(model, pending);
+        }
         Submit::Carnet { workspace, group } => Job::NewCarnet {
             name: value.into(),
             workspace,
@@ -522,6 +558,11 @@ fn submit(model: &mut Model, then: Submit, value: &str) -> Vec<Effect> {
             paths,
             group: Group::parse(value),
         },
+        Submit::IssueKeys(path) => Job::SetIssueKeys {
+            path,
+            issue_keys: IssueKeys::resolve(value.split(','), &model.tracker_config),
+        },
+        Submit::Join(pending) => pending.job(Group::parse(value)),
         Submit::Alias(repo) => Job::SetAlias {
             repo,
             alias: value.into(),
@@ -534,6 +575,43 @@ fn submit(model: &mut Model, then: Submit, value: &str) -> Vec<Effect> {
         Submit::Search => Job::SearchCarnets(value.into()),
     };
     vec![run(model, job)]
+}
+
+/// Makes a pending worktree in the one group linked to its issue keys, looked up first, else in
+/// the group asked for. A worktree already there keeps its group, so nothing is asked.
+pub(super) fn join_linked_group(model: &mut Model, pending: Pending) -> Vec<Effect> {
+    let exists = match &pending {
+        Pending::Start { repo, branch, .. } => (model.snapshot.work.iter()).any(|work| {
+            work.repo() == Some(repo)
+                && (work.tree()).and_then(|tree| tree.branch.as_deref()) == Some(branch.as_str())
+        }),
+        Pending::Checkout { review, .. } => model.review_work(review).is_some(),
+    };
+    let job = if exists {
+        pending.job(None)
+    } else {
+        Job::LinkedGroup(pending)
+    };
+    vec![run(model, job)]
+}
+
+/// Asks for the group of a pending worktree whose linked work is not in exactly one group.
+fn ask_group(model: &mut Model, pending: Pending) -> Vec<Effect> {
+    let label = match &pending {
+        Pending::Start { issue, .. } => model.issue_label(issue),
+        Pending::Checkout { review, .. } => format!(
+            "{}{}",
+            model.review_project(review),
+            review.provider.reference(review.number)
+        ),
+    };
+    let action = Action::Ask {
+        title: format!("Group of the worktree for {label} (empty: none)"),
+        initial: String::new(),
+        then: Submit::Join(pending),
+        completions: model.group_names(),
+    };
+    update(model, action)
 }
 
 pub(super) fn note(model: &mut Model, message: &str) -> Vec<Effect> {
@@ -644,6 +722,7 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
         }
         Cmd::New => return lists::of(list).create(model, list),
         Cmd::Edit => return lists::of(list).edit(model, list),
+        Cmd::Link => return lists::of(list).link(model, list),
         Cmd::Move => return lists::of(list).move_to(model, list),
         Cmd::Remove => return lists::of(list).remove(model, list),
         Cmd::Close | Cmd::ToggleCarnet | Cmd::Pull | Cmd::Search => {
@@ -849,7 +928,7 @@ pub mod tests {
     use crate::finish::{self, Scope, Step};
     use crate::git::Commit;
     use crate::links::tests::{key, keys};
-    use crate::links::{Group, IssueKey, Links, group_text};
+    use crate::links::{Group, IssueKey, Links};
     use crate::reviews::{Review, Role};
     use crate::state::Repo;
     use crate::worktrunk::{Forge, Worktree};
@@ -977,6 +1056,7 @@ pub mod tests {
             let code = match c {
                 '\n' => KeyCode::Enter,
                 '\x1b' => KeyCode::Esc,
+                '\t' => KeyCode::Tab,
                 c => KeyCode::Char(c),
             };
             effects.extend(update(
@@ -1003,7 +1083,7 @@ pub mod tests {
             .work_rows()
             .into_iter()
             .map(|line| match line {
-                Row::Group { group, .. } => format!("[{}]", group_text(group.as_ref())),
+                Row::Group { group, .. } => format!("[{group}]"),
                 Row::Item(index) => model.snapshot.work[index].title(),
             })
             .collect()
@@ -1086,7 +1166,7 @@ pub mod tests {
         assert_eq!(model.focus, Focus::Panel(Panel::Workspaces));
         press(&mut model, "]");
         assert_eq!(model.active(), List::Repos);
-        press(&mut model, "l");
+        press(&mut model, "\t");
         assert_eq!(model.focus, Focus::Panel(Panel::Work));
         press(&mut model, "0");
         assert_eq!(model.focus, Focus::Main);
@@ -2024,7 +2104,7 @@ pub mod tests {
         assert_eq!(model.active(), List::ToReview);
         assert_eq!(
             jobs(press(&mut model, " ")),
-            [Job::Checkout {
+            [Job::LinkedGroup(Pending::Checkout {
                 repo: "/src/api".into(),
                 workspace: "default".into(),
                 review: Box::new(review(
@@ -2033,7 +2113,8 @@ pub mod tests {
                     2,
                     "https://forge/api"
                 )),
-            }]
+            })],
+            "its group is looked up first"
         );
         press(&mut model, "j");
         assert!(jobs(press(&mut model, " ")).is_empty());
@@ -2223,12 +2304,12 @@ pub mod tests {
         assert_eq!(input.value(), "1-issue-api-1");
         assert!(title.contains("api for api#1"), "{title}");
         let [
-            Job::Start {
+            Job::LinkedGroup(Pending::Start {
                 repo,
                 branch,
                 workspace,
                 issue,
-            },
+            }),
         ] = &jobs(press(&mut model, "\n"))[..]
         else {
             panic!();
@@ -2371,20 +2452,18 @@ pub mod tests {
                 "web:ABC-1-form",
                 "2026-10-01-ABC-1-logs",
                 "api:main",
-                "[]"
+                "2026-10-02-ideas",
+                "2026-09-20-old",
             ],
-            "ungrouped carnets start folded"
-        );
-        press(&mut model, ">\n");
-        assert_eq!(
-            titles(&model)[5..],
-            ["[]", "2026-10-02-ideas", "2026-09-20-old"],
-            "newest first"
+            "ungrouped carnets list with ungrouped worktrees, after them, newest first"
         );
         press(&mut model, "-");
-        assert_eq!(titles(&model), ["[ABC-1]", "api:main", "[]"]);
+        assert_eq!(
+            titles(&model),
+            ["[ABC-1]", "api:main", "2026-10-02-ideas", "2026-09-20-old"]
+        );
         press(&mut model, "=");
-        assert_eq!(titles(&model).len(), 8);
+        assert_eq!(titles(&model).len(), 7);
         press(&mut model, ">n");
         press(&mut model, "c");
         assert_eq!(
@@ -2394,14 +2473,14 @@ pub mod tests {
                 workspace: "default".into(),
                 group: None,
             }],
-            "the Carnets group is no group"
+            "an ungrouped carnet's group is none"
         );
     }
 
     #[test]
     fn a_carnets_readme_is_read_when_selected_and_again_once_written() {
         let mut model = with_carnets(model());
-        press(&mut model, ">\n");
+        press(&mut model, ">kk");
         let path = PathBuf::from("/data/2026-10-02-ideas");
         let any_reads = |effects: &[Effect]| {
             (effects.iter())
@@ -2474,7 +2553,7 @@ pub mod tests {
     #[test]
     fn fast_refreshes_relist_the_selected_carnets_commits_and_show_them_meanwhile() {
         let mut model = with_carnets(model());
-        press(&mut model, ">\n");
+        press(&mut model, ">kk");
         let effects = press(&mut model, "j");
         let path = PathBuf::from("/data/2026-10-02-ideas");
         assert!(
@@ -2534,14 +2613,16 @@ pub mod tests {
     #[test]
     fn c_closes_the_selected_carnets() {
         let mut model = with_carnets(model());
+        assert_eq!(
+            jobs(press(&mut model, "c")),
+            [Job::CloseCarnet(vec!["/data/2026-10-01-ABC-1-logs".into()])],
+            "every carnet of the group"
+        );
         press(&mut model, ">");
         assert_eq!(
             jobs(press(&mut model, "c")),
-            [Job::CloseCarnet(vec![
-                "/data/2026-10-02-ideas".into(),
-                "/data/2026-09-20-old".into()
-            ])],
-            "every carnet of the group"
+            [Job::CloseCarnet(vec!["/data/2026-09-20-old".into()])],
+            "the selected carnet"
         );
         press(&mut model, "<");
         assert_eq!(
@@ -2593,7 +2674,8 @@ pub mod tests {
                 "/src/web.ABC-1-form".into()
             ])]
         );
-        assert!(jobs(press(&mut model, ">p")).is_empty());
+        press(&mut model, ">");
+        assert!(jobs(press(&mut model, "p")).is_empty());
     }
 
     #[test]
@@ -2697,5 +2779,252 @@ pub mod tests {
         press(&mut model, "\x1b");
         assert_eq!(carnet_titles(&model).len(), 4);
         assert!(model.search.is_none());
+    }
+
+    /// The open prompt's title and text.
+    fn prompt(model: &Model) -> (String, String) {
+        let Some(Modal::Prompt { title, input, .. }) = &model.modal else {
+            panic!("no prompt: {:?}", model.modal);
+        };
+        (title.clone(), input.value().to_owned())
+    }
+
+    /// The ABC-1 group spread over both workspaces, with a closed carnet in it.
+    fn spread() -> Model {
+        let mut model = with_carnets(model());
+        model
+            .snapshot
+            .work
+            .push(work("web", "ABC-1-side", "ABC-1", "side"));
+        let mut closed = carnet("2026-07-01-gone", "ABC-1", "side");
+        if let WorkKind::Carnet { closed, .. } = &mut closed.kind {
+            *closed = true;
+        }
+        model.snapshot.carnets.push(closed);
+        model
+    }
+
+    #[test]
+    fn e_on_a_row_moves_that_item_to_a_group_or_out_of_any() {
+        let mut model = spread();
+        press(&mut model, "j");
+        press(&mut model, "e");
+        assert_eq!(
+            prompt(&model),
+            ("Group of api:ABC-1-login".into(), "ABC-1".into())
+        );
+        press(&mut model, "\x1b");
+        press(&mut model, "e");
+        for _ in 0.."ABC-1".len() {
+            update(
+                &mut model,
+                Action::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+            );
+        }
+        assert_eq!(
+            jobs(press(&mut model, " slow pages\n")),
+            [Job::Regroup {
+                paths: vec!["/src/api.ABC-1-login".into()],
+                group: Group::parse("SLOW PAGES"),
+            }]
+        );
+        press(&mut model, "jje");
+        assert_eq!(
+            prompt(&model).0,
+            "Group of 2026-10-01-ABC-1-logs",
+            "a carnet too"
+        );
+        press(&mut model, "\x1b");
+        press(&mut model, ">e");
+        let (_, text) = prompt(&model);
+        assert_eq!(text, "", "an ungrouped item");
+    }
+
+    #[test]
+    fn e_on_a_header_renames_the_group_in_every_workspace() {
+        let mut model = spread();
+        press(&mut model, "e");
+        assert_eq!(
+            prompt(&model),
+            ("Rename group ABC-1".into(), "ABC-1".into())
+        );
+        let [Job::Regroup { paths, group }] = &jobs(press(&mut model, "x\n"))[..] else {
+            panic!();
+        };
+        assert_eq!(group, &Group::parse("ABC-1X"));
+        let mut paths = paths.clone();
+        paths.sort();
+        let expected: Vec<PathBuf> = [
+            "/data/2026-07-01-gone",
+            "/data/2026-10-01-ABC-1-logs",
+            "/src/api.ABC-1-login",
+            "/src/web.ABC-1-form",
+            "/src/web.ABC-1-side",
+        ]
+        .map(PathBuf::from)
+        .into();
+        assert_eq!(
+            paths, expected,
+            "closed carnets and other workspaces included, once each"
+        );
+    }
+
+    #[test]
+    fn group_prompts_complete_from_every_existing_group_once() {
+        let mut model = spread();
+        model
+            .snapshot
+            .work
+            .push(work("api", "x", "slow pages", "side"));
+        assert_eq!(model.group_names(), ["ABC-1", "SLOW PAGES"]);
+        press(&mut model, ">e");
+        press(&mut model, "s\t");
+        assert_eq!(prompt(&model).1, "SLOW PAGES");
+        press(&mut model, "\x1b>e\t");
+        assert_eq!(
+            prompt(&model).1,
+            "ABC-1",
+            "an empty prompt cycles through all"
+        );
+        press(&mut model, "\t");
+        assert_eq!(prompt(&model).1, "SLOW PAGES");
+        press(&mut model, "\t");
+        assert_eq!(prompt(&model).1, "ABC-1");
+        press(&mut model, "\x1b>e");
+        press(&mut model, "zz\t");
+        assert_eq!(prompt(&model).1, "zz", "nothing to complete");
+    }
+
+    #[test]
+    fn l_replaces_an_items_issue_keys() {
+        let mut model = spread();
+        model.tracker_config =
+            (crate::config::Config::parse("[tracker.github]\nrepos = [\"o/api\"]"))
+                .unwrap()
+                .tracker;
+        press(&mut model, "j");
+        press(&mut model, "l");
+        assert_eq!(
+            prompt(&model),
+            ("Issue keys of api:ABC-1-login".into(), "ABC-1".into())
+        );
+        assert_eq!(
+            jobs(press(&mut model, ", api#7, ABC-1, DEF-2\n")),
+            [Job::SetIssueKeys {
+                path: "/src/api.ABC-1-login".into(),
+                issue_keys: keys(&["ABC-1", "o/api#7", "DEF-2"]),
+            }],
+            "short GitHub keys resolve; order kept, duplicates dropped"
+        );
+        press(&mut model, "]l");
+        assert_eq!(
+            prompt(&model).0,
+            "Issue keys of 2026-10-02-ideas",
+            "a carnet"
+        );
+        let effects = press(&mut model, "\n");
+        assert_eq!(
+            jobs(effects),
+            [Job::SetIssueKeys {
+                path: "/data/2026-10-02-ideas".into(),
+                issue_keys: keys(&[]),
+            }],
+            "an empty list unlinks every key"
+        );
+    }
+
+    #[test]
+    fn l_on_a_group_header_does_nothing() {
+        let mut model = spread();
+        assert!(press(&mut model, "l").is_empty());
+        assert!(model.modal.is_none());
+        assert_eq!(model.panel, Panel::Work, "nor moves to the next panel");
+    }
+
+    /// Answers the pending group lookup that `effects` started with `group`.
+    fn linked(model: &mut Model, effects: Vec<Effect>, group: Option<&str>) -> Vec<Effect> {
+        let [Job::LinkedGroup(pending)] = &jobs(effects)[..] else {
+            panic!("no group lookup");
+        };
+        update(
+            model,
+            Action::Linked {
+                pending: pending.clone(),
+                group: Ok(group.and_then(Group::parse)),
+                log: Vec::new(),
+            },
+        )
+    }
+
+    fn started_group(effects: Vec<Effect>) -> Option<Group> {
+        let [Job::Start { group, .. }] = &jobs(effects)[..] else {
+            panic!("no start");
+        };
+        group.clone()
+    }
+
+    #[test]
+    fn starting_an_issue_joins_its_one_linked_group_else_asks_for_one() {
+        let mut model = with_issues(model());
+        press(&mut model, "4] \n");
+        let branch = press(&mut model, "\n");
+        assert_eq!(
+            started_group(linked(&mut model, branch.clone(), Some("login"))),
+            Group::parse("LOGIN"),
+            "one linked group: joined without asking"
+        );
+        assert!(linked(&mut model, branch.clone(), None).is_empty());
+        let (title, text) = prompt(&model);
+        assert_eq!(
+            (title.as_str(), text.as_str()),
+            ("Group of the worktree for api#1 (empty: none)", ""),
+            "no prefill"
+        );
+        assert_eq!(started_group(press(&mut model, "\n")), None);
+        linked(&mut model, branch, None);
+        assert_eq!(
+            started_group(press(&mut model, "web\n")),
+            Group::parse("WEB")
+        );
+    }
+
+    #[test]
+    fn starting_on_a_branch_already_checked_out_asks_nothing() {
+        let mut model = with_issues(model());
+        press(&mut model, "4]n1");
+        for _ in 0.."1-issue-api-1".len() {
+            update(
+                &mut model,
+                Action::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+            );
+        }
+        let effects = press(&mut model, "ABC-1-login\n");
+        assert_eq!(started_group(effects), None, "the worktree keeps its group");
+    }
+
+    #[test]
+    fn checking_out_a_review_joins_its_one_linked_group_else_asks_for_one() {
+        let mut model = with_reviews(model());
+        press(&mut model, "3");
+        let checkout = press(&mut model, " ");
+        let [Job::Checkout { group, .. }] =
+            &jobs(linked(&mut model, checkout.clone(), Some("a")))[..]
+        else {
+            panic!();
+        };
+        assert_eq!(group, &Group::parse("A"));
+        linked(&mut model, checkout, None);
+        assert_eq!(
+            prompt(&model).0,
+            "Group of the worktree for api#2 (empty: none)"
+        );
+        let [Job::Checkout { group, .. }] = &jobs(press(&mut model, "b\n"))[..] else {
+            panic!();
+        };
+        assert_eq!(group, &Group::parse("B"));
+        model.snapshot.work[0].tree_mut().branch = Some("change-2".into());
+        let [Job::Checkout { group: None, .. }] = &jobs(press(&mut model, " "))[..] else {
+            panic!("checked out already: no lookup");
+        };
     }
 }

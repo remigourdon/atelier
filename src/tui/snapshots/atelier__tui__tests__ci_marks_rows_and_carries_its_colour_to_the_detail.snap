@@ -31,4 +31,4 @@ expression: terminal.backend().to_string()
 "│                                      ││                                                                              │"
 "│                                      ││                                                                              │"
 "╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯"
-"Space open · n new · e edit · m move · d remove · x close tab · g open · p pull · f finish · ? actions · q quit         "
+"Space open · n new · e edit · l link · m move · d remove · x close tab · g open · p pull · f finish · ? actions · q quit"
