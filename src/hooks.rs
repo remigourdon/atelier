@@ -59,7 +59,7 @@ pub const WORKSPACE_VAR: &str = "ATELIER_WORKSPACE";
 pub struct Hints {
     /// `ATELIER_GROUP`: the worktree's group, normalised.
     pub group: Option<String>,
-    /// `ATELIER_ISSUE_KEYS`: the issue keys it links, comma-separated.
+    /// `ATELIER_ISSUE_KEYS`: the issue keys it links before those in its branch, comma-separated.
     pub issue_keys: Option<Vec<String>>,
     /// `ATELIER_WORKSPACE`: the workspace a new worktree goes to, over the caller's session.
     pub workspace: Option<String>,
@@ -307,8 +307,8 @@ mod tests {
         );
         assert_eq!(
             item.issue_keys,
-            ["XYZ-9", "o/r#2"],
-            "over the branch's keys"
+            ["XYZ-9", "o/r#2", "ABC-1"],
+            "then the branch's keys"
         );
     }
 

@@ -4,7 +4,7 @@ One string, `items.group_key`, did three jobs: it grouped items, it was the fore
 
 Groups help a person see what they are working on; issue links must be precise. These are two jobs, so they get two fields. A **group** is a free-form label, trimmed and uppercased wherever it comes in, optional, and independent of workspaces. Every item, worktree or carnet, **links** issues through its own ordered list of **issue keys**. A worktree keeps both in sqlite; a carnet keeps them in its README's front matter (`group`, `issues`), per [ADR 0001](0001-carnet-folder-is-the-record.md). An issue's linked work is every item linking its key, in any group. GitHub keys are always `owner/repo#12`, shortened to `repo#12` for display only.
 
-Groups never carry keys. Finishing an issue covers the whole groups of its linked work, and its linked items in no group alone. Nothing converts the old state.
+Groups never carry keys. A new worktree for an issue or a review joins the one group among the items linking the same keys; items in no group are unsorted rather than a choice against a group, so they do not count. Finishing an issue covers the whole groups of its linked work, and its linked items in no group alone. Nothing converts the old state.
 
 ## Considered Options
 

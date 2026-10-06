@@ -223,11 +223,30 @@ impl<'a> Items<'a> {
             .resolve_keys(found.iter().map(String::as_str))
     }
 
-    /// The one group among the recorded items linking any of `keys`, else `""`.
+    /// The keys a worktree on `branch` is recorded with: `extra`, then those in the branch.
+    fn seeded(&self, extra: &[String], branch: &str) -> Vec<String> {
+        let branch = self.keys(&[branch]);
+        let keys = extra.iter().chain(&branch).map(String::as_str);
+        self.config.tracker.resolve_keys(keys)
+    }
+
+    /// The one group among the items linking any of `keys`, else `""`; items in no group do
+    /// not count. Carnets are read from their folders, so a README edited since the last
+    /// refresh counts as it is now.
     fn linked_group(&self, keys: &[String]) -> Result<String> {
-        let groups: BTreeSet<String> = (self.state.items()?.into_iter())
-            .filter(|item| item.issue_keys.iter().any(|key| keys.contains(key)))
-            .map(|item| item.group)
+        let links = |linked: &[String]| linked.iter().any(|key| keys.contains(key));
+        let worktrees = (self.state.items()?.into_iter())
+            .filter(|item| !item.is_carnet() && links(&item.issue_keys))
+            .map(|item| item.group);
+        let carnets = match self.config.carnet_root() {
+            Some(root) => carnet::scan(&root, &self.names, &self.config.tracker)?,
+            None => Vec::new(),
+        };
+        let carnets = (carnets.into_iter())
+            .filter(|carnet| links(&carnet.issue_keys))
+            .map(|carnet| carnet.group);
+        let groups: BTreeSet<String> = worktrees
+            .chain(carnets)
             .filter(|group| !group.is_empty())
             .collect();
         Ok(match groups.len() {
@@ -276,8 +295,7 @@ impl<'a> Items<'a> {
         workspace: &str,
         group: &str,
     ) -> Result<PathBuf> {
-        let keys = self.keys(&[branch]);
-        let path = self.switch_branch(repo, branch, workspace, group, &keys)?;
+        let path = self.switch_branch(repo, branch, workspace, group, &[])?;
         if self.state.tab(&path)?.is_none() {
             self.zellij.open_tab(self.state, &path)?;
         }
@@ -300,14 +318,9 @@ impl<'a> Items<'a> {
     /// gains the key and keeps its group.
     pub fn start(&self, repo: &Path, branch: &str, workspace: &str, issue_key: &str) -> Result<()> {
         let issue_key = self.config.tracker.resolve_key(issue_key);
-        let mut keys = vec![issue_key.clone()];
-        keys.extend(
-            self.keys(&[branch])
-                .into_iter()
-                .filter(|key| *key != issue_key),
-        );
-        let group = self.linked_group(std::slice::from_ref(&issue_key))?;
-        let path = self.switch_branch(repo, branch, workspace, &group, &keys)?;
+        let keys = std::slice::from_ref(&issue_key);
+        let group = self.linked_group(keys)?;
+        let path = self.switch_branch(repo, branch, workspace, &group, keys)?;
         let mut linked = self.state.require_item(&path)?.issue_keys;
         if !linked.contains(&issue_key) {
             linked.push(issue_key);
@@ -336,9 +349,9 @@ impl<'a> Items<'a> {
         self.switch(repo, target, branch, workspace, group, keys)
     }
 
-    /// Runs `wt switch` with the workspace, group and issue keys for atelier's hooks, then
-    /// records the worktree on `branch` in case the hooks are not installed. A worktree already
-    /// recorded keeps its group and keys. Returns its path.
+    /// Runs `wt switch` with the workspace, group and the issue keys beyond the branch's for
+    /// atelier's hooks, then records the worktree on `branch` as the hook does, in case the hooks
+    /// are not installed. A worktree already recorded keeps its group and keys. Returns its path.
     fn switch(
         &self,
         repo: &Path,
@@ -360,12 +373,13 @@ impl<'a> Items<'a> {
                 )
             })?;
         let path = canonical(&tree.path);
+        let keys = self.seeded(keys, branch);
         (self.state).add_item(
             &path,
             ItemKind::Worktree,
             Some(repo),
             &group,
-            keys,
+            &keys,
             workspace,
         )?;
         Ok(path)
@@ -671,7 +685,7 @@ impl<'a> Items<'a> {
 
     /// Records a worktree a hook reports, registering its repo when it is new, and opens its
     /// tab. Its workspace is the hinted one when it is one; its group the hinted one, else none;
-    /// its issue keys the hinted ones, else those in its branch. A worktree of a carnet is not
+    /// its issue keys the hinted ones, then those in its branch. A worktree of a carnet is not
     /// tracked: returns `None`.
     pub fn record(
         &self,
@@ -696,10 +710,7 @@ impl<'a> Items<'a> {
             }
         };
         let group = hints.group.as_deref().unwrap_or_default();
-        let keys = match &hints.issue_keys {
-            Some(keys) => (self.config.tracker).resolve_keys(keys.iter().map(String::as_str)),
-            None => self.keys(&[branch]),
-        };
+        let keys = self.seeded(hints.issue_keys.as_deref().unwrap_or_default(), branch);
         let workspace = self.workspace(workspace, &default_workspace);
         state.add_item(
             path,
@@ -1038,7 +1049,8 @@ mod tests {
             .unwrap();
         let readme = std::fs::read_to_string(path.join("README.md")).unwrap();
         assert_eq!(
-            readme, "+++\ngroup = \"LOGIN REWRITE\"\nissues = [\"A-1\", \"B-2\"]\n+++\n",
+            readme,
+            "+++\ngroup = \"LOGIN REWRITE\"\nissues = [\"A-1\", \"B-2\"]\nsummary = \"\"\nclosed = false\n+++\n",
             "its keys stay"
         );
         assert_eq!(state.require_item(&path).unwrap().group, "LOGIN REWRITE");
@@ -1155,11 +1167,11 @@ mod tests {
         );
         assert!(
             fake.calls().contains(
-                &"env ATELIER_WORKSPACE=side ATELIER_GROUP=LOGIN ATELIER_ISSUE_KEYS=ABC-1 \
+                &"env ATELIER_WORKSPACE=side ATELIER_GROUP=LOGIN ATELIER_ISSUE_KEYS= \
                   wt -C /r switch --create ABC-1-x --no-cd --yes"
                     .into()
             ),
-            "the selected group, and the branch's keys: {:?}",
+            "the selected group, and no keys beyond the branch's: {:?}",
             fake.calls()
         );
         let item = state.require_item("/r.ABC-1-x").unwrap();
@@ -1289,9 +1301,12 @@ mod tests {
     #[test]
     fn start_links_the_issue_and_joins_the_one_group_of_its_linked_work() {
         let state = state();
-        let keys = ["o/r#5".to_owned()];
-        let carnet = "/data/2026-10-01-notes";
-        (state.add_item(carnet, ItemKind::Carnet, None, "LOGIN", &keys, "side")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let notes = carnet::tests::repo(dir.path(), "2026-10-01-notes", Some("+++\n+++\n"));
+        // Its row is stale: the group lookup reads the folder.
+        (state.add_item(&notes, ItemKind::Carnet, None, "OLD", &[], "side")).unwrap();
+        let readme = "+++\ngroup = \"login\"\nissues = [\"o/r#5\"]\n+++\n";
+        std::fs::write(notes.join("README.md"), readme).unwrap();
         let listing = r#"{"items":[{"branch":"5-fix-ABC-1","worktree":{"path":"/r.5-fix"}}]}"#;
         let fake = Fake::default()
             .always("wt -C /r --config-set", Some(listing))
@@ -1301,12 +1316,12 @@ mod tests {
                 "zellij --session default action list-panes",
                 Some(r#"[{"id":7,"tab_id":4,"title":"editor","pane_cwd":"/r.5-fix"}]"#),
             );
-        (items(&state, &fake))
+        (with_root(&state, &fake, dir.path()))
             .start(Path::new("/r"), "5-fix-ABC-1", "default", "o/r#5")
             .unwrap();
         assert!(
-            fake.calls()[1].contains("ATELIER_GROUP=LOGIN ATELIER_ISSUE_KEYS=o/r#5,ABC-1 "),
-            "{:?}",
+            fake.calls()[1].contains("ATELIER_GROUP=LOGIN ATELIER_ISSUE_KEYS=o/r#5 "),
+            "only the issue's key: the hook adds the branch's; {:?}",
             fake.calls()
         );
         let item = state.require_item("/r.5-fix").unwrap();

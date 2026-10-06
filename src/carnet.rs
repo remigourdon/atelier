@@ -188,26 +188,15 @@ impl Front {
         self.doc["issues"] = value(keys.iter().collect::<Array>());
     }
 
-    /// Writes the group and the issue keys in their normal form, where they are not already.
+    /// Writes every key in its normal form, in order: `group`, `issues`, `summary` and
+    /// `closed`, each as read, the absent ones empty.
     fn normalise(&mut self, tracker: &TrackerConfig) {
-        let group = self.group();
-        if self
-            .doc
-            .get("group")
-            .is_some_and(|raw| raw.as_str() != Some(&group))
-        {
-            self.set_group(&group);
-        }
-        let keys = self.issues(tracker);
-        let raw = self.doc.get("issues").and_then(|issues| issues.as_array());
-        if let Some(raw) = raw
-            && !raw
-                .iter()
-                .map(|key| key.as_str())
-                .eq(keys.iter().map(|key| Some(key.as_str())))
-        {
-            self.set_issues(&keys);
-        }
+        let (group, keys) = (self.group(), self.issues(tracker));
+        let (summary, closed) = (self.summary(), self.closed());
+        self.set_group(&group);
+        self.set_issues(&keys);
+        self.doc["summary"] = value(summary);
+        self.doc["closed"] = value(closed);
     }
 
     fn closed(&self) -> bool {
@@ -259,9 +248,8 @@ pub fn body(readme: &str) -> &str {
     split(readme).map_or(readme, |(_, body)| body)
 }
 
-/// Edits a carnet's front matter with `edit`, which says how to describe the change, or that
-/// there is none. Writes the README, its group and issue keys in their normal form, and commits
-/// only it.
+/// Edits a carnet's front matter, in its normal form, with `edit`, which says how to describe
+/// the change, or that there is none. Writes the README and commits only it.
 fn edit(
     runner: &dyn Runner,
     tracker: &TrackerConfig,
@@ -271,10 +259,10 @@ fn edit(
     let readme_path = path.join("README.md");
     let readme = std::fs::read_to_string(&readme_path).unwrap_or_default();
     let mut front = Front::parse(&readme)?;
+    front.normalise(tracker);
     let Some(message) = edit(&mut front) else {
         return Ok(());
     };
-    front.normalise(tracker);
     std::fs::write(&readme_path, front.render())?;
     commit(runner, path, &message)
 }
@@ -366,9 +354,9 @@ pub fn create(
             body: format!("# {name}\n"),
             ..Front::default()
         };
+        front.normalise(tracker);
         front.set_group(&group);
         front.set_issues(&keys);
-        front.doc["summary"] = value("");
         std::fs::write(path.join("README.md"), front.render())?;
         git::init(runner, &path)?;
         commit(runner, &path, "Create carnet")?;
@@ -536,7 +524,7 @@ pub mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(path.join("README.md")).unwrap(),
-            "+++\ngroup = \"LOGIN\"\nissues = [\"ABC-12\"]\nsummary = \"\"\n+++\n\n# ABC-12 Slow login_page\n"
+            "+++\ngroup = \"LOGIN\"\nissues = [\"ABC-12\"]\nsummary = \"\"\nclosed = false\n+++\n\n# ABC-12 Slow login_page\n"
         );
         let mut calls = vec![format!("git -C {} init --quiet", path.display())];
         calls.extend(commits(&path, "Create carnet"));
@@ -711,7 +699,7 @@ pub mod tests {
         let written = std::fs::read_to_string(path.join("README.md")).unwrap();
         assert_eq!(
             written,
-            "+++\n# why\nowner = \"me\" # mine\ngroup = \"LOGIN REWRITE\"\n+++\n# Title\n\n+++ not a fence\n"
+            "+++\n# why\nowner = \"me\" # mine\ngroup = \"LOGIN REWRITE\"\nissues = []\nsummary = \"\"\nclosed = false\n+++\n# Title\n\n+++ not a fence\n"
         );
         assert_eq!(fake.calls(), commits(&path, "Set group LOGIN REWRITE"));
         set_closed(&fake, &tracker, &path, true).unwrap();
@@ -731,14 +719,14 @@ pub mod tests {
     }
 
     #[test]
-    fn an_edit_writes_the_group_and_keys_in_their_normal_form() {
+    fn an_edit_writes_every_key_in_its_normal_form() {
         let dir = tempfile::tempdir().unwrap();
         let readme = "+++\ngroup = \"login\"\nissues = [\"atelier#14\", \"ABC-1\"]\n+++\n";
         let path = repo(dir.path(), "2026-01-02-x", Some(readme));
         set_closed(&Fake::default(), &tracker(), &path, true).unwrap();
         assert_eq!(
             std::fs::read_to_string(path.join("README.md")).unwrap(),
-            "+++\ngroup = \"LOGIN\"\nissues = [\"o/atelier#14\", \"ABC-1\"]\nclosed = true\n+++\n"
+            "+++\ngroup = \"LOGIN\"\nissues = [\"o/atelier#14\", \"ABC-1\"]\nsummary = \"\"\nclosed = true\n+++\n"
         );
     }
 
@@ -751,14 +739,14 @@ pub mod tests {
         assert_eq!(set_group(&fake, &tracker, &path, "crash").unwrap(), "CRASH");
         assert_eq!(
             std::fs::read_to_string(path.join("README.md")).unwrap(),
-            "+++\ngroup = \"CRASH\"\n+++\n\n# Crash\n",
+            "+++\ngroup = \"CRASH\"\nissues = []\nsummary = \"\"\nclosed = false\n+++\n\n# Crash\n",
             "the folder's key is no issue key"
         );
         let bare = repo(dir.path(), "2026-01-03-bare", None);
         set_closed(&fake, &tracker, &bare, true).unwrap();
         assert_eq!(
             std::fs::read_to_string(bare.join("README.md")).unwrap(),
-            "+++\nclosed = true\n+++\n"
+            "+++\ngroup = \"\"\nissues = []\nsummary = \"\"\nclosed = true\n+++\n"
         );
         let broken = repo(
             dir.path(),
