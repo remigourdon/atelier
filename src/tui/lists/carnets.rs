@@ -13,7 +13,7 @@ use super::{
 use crate::issues::TrackerConfig;
 use crate::links::group_text;
 use crate::tui::app::{Action, Cmd, Effect, Job, Kind, List, Model, Submit, Work, WorkKind};
-use crate::tui::update::{run, update};
+use crate::tui::update::{run, update, workspace_menu};
 use crate::tui::view::{Palette, icon};
 
 pub struct Carnets;
@@ -218,6 +218,19 @@ impl ListKind for Carnets {
             Some(work) => edit_links(model, &work),
             None => Vec::new(),
         }
+    }
+
+    /// Moves the carnet, closed or not, to another workspace.
+    fn move_to(&self, model: &mut Model, _list: List) -> Vec<Effect> {
+        let Some(work) = model.carnet() else {
+            return Vec::new();
+        };
+        let (current, paths) = (work.workspace.clone(), vec![work.path.clone()]);
+        let title = format!("Move {} to", work.title());
+        workspace_menu(model, title, &current, |workspace| Job::Move {
+            paths: paths.clone(),
+            workspace,
+        })
     }
 
     /// Opens the carnet's tab; a closed carnet stays closed.

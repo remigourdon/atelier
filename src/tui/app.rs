@@ -17,7 +17,7 @@ use crate::finish::{Plan, Scope, Step};
 use crate::git::Commit;
 use crate::issues::{self, Issue, TrackerConfig};
 pub use crate::items::{Removal, Snapshot, Work, WorkKind};
-use crate::links::{Group, IssueKeys};
+use crate::links::{Group, IssueKeys, Links};
 use crate::process::Logged;
 use crate::reviews::{Provider, Review};
 
@@ -131,7 +131,13 @@ pub enum Job {
     NewCarnet {
         name: String,
         workspace: String,
-        group: Option<Group>,
+        links: Links,
+        summary: String,
+    },
+    /// Sets a carnet's summary.
+    SetSummary {
+        path: PathBuf,
+        summary: String,
     },
     Move {
         paths: Vec<PathBuf>,
@@ -333,6 +339,25 @@ pub enum Effect {
     Quit,
 }
 
+/// A new carnet, made one prompt at a time.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Draft {
+    pub workspace: String,
+    pub summary: String,
+    pub name: String,
+    pub group: Option<Group>,
+}
+
+/// What a new carnet's prompt asks: its summary, then its folder name, its group and its issue
+/// keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DraftStep {
+    Summary,
+    Name,
+    Group,
+    IssueKeys,
+}
+
 /// What a submitted prompt does.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Submit {
@@ -347,11 +372,13 @@ pub enum Submit {
         workspace: String,
         issue: Box<Issue>,
     },
-    /// A new carnet's name.
+    /// A step of a new carnet.
     Carnet {
-        workspace: String,
-        group: Option<Group>,
+        draft: Draft,
+        step: DraftStep,
     },
+    /// A carnet's summary.
+    Summary(PathBuf),
     Group(Vec<PathBuf>),
     /// An item's issue keys, comma-separated.
     IssueKeys(PathBuf),
@@ -674,7 +701,7 @@ pub const KEYMAP: &[Binding] = &[
     Binding { keys: &[ch('=')], label: "=", cmd: Cmd::ExpandAll, help: "expand all groups", hint: NONE, on: On::Lists(WORK) },
     Binding { keys: &[ch('n')], label: "n", cmd: Cmd::New, help: "new worktree or carnet · new workspace", hint: &[Kind::Workspaces, Kind::Work, Kind::Issues], on: On::Lists(&[Kind::Workspaces, Kind::Work, Kind::Issues]) },
     Binding { keys: &[ch('e')], label: "e", cmd: Cmd::Edit, help: "edit group or issue keys · edit repo alias", hint: &[Kind::Repos, Kind::Work, Kind::Carnets], on: On::Lists(&[Kind::Repos, Kind::Work, Kind::Carnets]) },
-    Binding { keys: &[ch('m')], label: "m", cmd: Cmd::Move, help: "move to workspace · set repo workspace", hint: &[Kind::Repos, Kind::Work], on: On::Lists(&[Kind::Repos, Kind::Work]) },
+    Binding { keys: &[ch('m')], label: "m", cmd: Cmd::Move, help: "move to workspace · set repo workspace", hint: &[Kind::Repos, Kind::Work, Kind::Carnets], on: On::Lists(&[Kind::Repos, Kind::Work, Kind::Carnets]) },
     Binding { keys: &[ch('d')], label: "d", cmd: Cmd::Remove, help: "remove", hint: LOCAL, on: On::Lists(LOCAL) },
     Binding { keys: &[ch('x')], label: "x", cmd: Cmd::Close, help: "close tab", hint: TABS, on: On::Lists(TABS) },
     Binding { keys: &[ch('c')], label: "c", cmd: Cmd::ToggleCarnet, help: "close or reopen carnet", hint: CARNETS, on: On::Lists(CARNETS) },

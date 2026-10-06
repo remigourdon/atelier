@@ -16,7 +16,9 @@ use std::path::PathBuf;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::app::{Action, Cmd, Effect, Job, Kind, List, MenuEntry, Modal, Model, Submit, Work};
+use super::app::{
+    Action, Cmd, Effect, Job, Kind, List, MenuEntry, Modal, Model, Submit, Work, WorkKind,
+};
 use super::update::run;
 use super::view::Palette;
 use crate::finish::Scope;
@@ -107,8 +109,8 @@ fn plan(model: &mut Model, scope: Scope) -> Vec<Effect> {
     vec![run(model, Job::Plan { scope, repos })]
 }
 
-/// `e` on an item: a menu to move it to a group, or out of any, or to edit its issue keys,
-/// comma-separated, prefilled as stored.
+/// `e` on an item: a menu to move it to a group, or out of any, to edit its issue keys,
+/// comma-separated, prefilled as stored, or a carnet's summary.
 fn edit_links(model: &mut Model, work: &Work) -> Vec<Effect> {
     let group = Action::Ask {
         title: format!("Group of {}", work.title()),
@@ -126,13 +128,19 @@ fn edit_links(model: &mut Model, work: &Work) -> Vec<Effect> {
         label: label.into(),
         action,
     };
-    model.modal = Some(Modal::menu(
-        format!("Edit {}", work.title()),
-        vec![
-            entry("g", "group", group),
-            entry("i", "issue keys", issue_keys),
-        ],
-    ));
+    let mut entries = vec![
+        entry("g", "group", group),
+        entry("i", "issue keys", issue_keys),
+    ];
+    if let WorkKind::Carnet { summary, .. } = &work.kind {
+        let summary = Action::ask(
+            format!("Summary of {}", work.title()),
+            summary.clone(),
+            Submit::Summary(work.path.clone()),
+        );
+        entries.push(entry("s", "summary", summary));
+    }
+    model.modal = Some(Modal::menu(format!("Edit {}", work.title()), entries));
     Vec::new()
 }
 

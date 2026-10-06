@@ -14,7 +14,8 @@ use super::{
 use crate::finish::{self, Scope, Signal};
 use crate::links::{Group, group_text};
 use crate::tui::app::{
-    Action, Cmd, Effect, Job, Kind, List, MenuEntry, Modal, Model, Removal, Submit, Work, WorkKind,
+    Action, Cmd, Draft, DraftStep, Effect, Job, Kind, List, MenuEntry, Modal, Model, Removal,
+    Submit, Work, WorkKind,
 };
 use crate::tui::update::{confirm, note, run, update, workspace_menu};
 use crate::tui::view::{Palette, icon};
@@ -425,7 +426,18 @@ impl ListKind for WorkList {
             entries.push(MenuEntry {
                 key: "c".into(),
                 label: "carnet".into(),
-                action: Action::ask("New carnet: name", "", Submit::Carnet { workspace, group }),
+                action: Action::ask(
+                    "New carnet: summary",
+                    "",
+                    Submit::Carnet {
+                        draft: Draft {
+                            workspace,
+                            group,
+                            ..Draft::default()
+                        },
+                        step: DraftStep::Summary,
+                    },
+                ),
             });
         }
         if entries.is_empty() {
