@@ -1,4 +1,5 @@
-//! Panel 2's Work list: the selected workspace's worktrees and open carnets, in groups.
+//! Panel 2's Work list: the selected workspace's worktrees and open carnets, and closed
+//! carnets with their tab open, in groups.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -227,12 +228,11 @@ impl ListKind for WorkList {
                         tab_mark(work.tab, palette)
                     };
                     let mut spans = vec![Span::raw(indent), marker];
-                    let glyph = if work.is_carnet() {
-                        glyphs.carnet
-                    } else {
-                        glyphs.worktree
-                    };
-                    spans.extend(icon(glyph, dim));
+                    if work.is_carnet() {
+                        let tracker = &model.tracker_config;
+                        return carnets::row(work, spans, false, true, tracker, palette);
+                    }
+                    spans.extend(icon(glyphs.worktree, dim));
                     spans.push(Span::raw(work.title()));
                     let tree = work.tree();
                     if let Some(ci) = tree.and_then(|tree| tree.ci.as_ref()) {

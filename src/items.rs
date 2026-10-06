@@ -28,7 +28,7 @@ pub struct Snapshot {
     /// The current session first.
     pub workspaces: Vec<String>,
     pub repos: Vec<Repo>,
-    /// Worktrees and open carnets.
+    /// Worktrees, open carnets, and closed carnets with their tab open.
     pub work: Vec<Work>,
     /// Every carnet, closed ones included, newest first; none while carnets are disabled.
     pub carnets: Vec<Work>,
@@ -593,7 +593,11 @@ impl<'a> Items<'a> {
             });
         }
         let carnets = self.scan_carnets(&tabs)?;
-        work.extend(carnets.iter().filter(|carnet| !carnet.closed()).cloned());
+        work.extend(
+            (carnets.iter())
+                .filter(|carnet| !carnet.closed() || carnet.tab)
+                .cloned(),
+        );
         let here = self.zellij.here().map(str::to_owned);
         let mut workspaces = self.state.workspaces()?;
         if let Some(here) = &here
@@ -1212,6 +1216,12 @@ mod tests {
         assert_eq!(state.tab(&path).unwrap(), None);
         let (snapshot, _) = items.snapshot(false).unwrap();
         assert!(snapshot.work.is_empty() && snapshot.carnets[0].closed());
+        tab(&state, &path, "default", 4);
+        let (snapshot, _) = items.snapshot(false).unwrap();
+        assert_eq!(
+            snapshot.work, snapshot.carnets,
+            "in Work while its tab is open"
+        );
         items
             .set_carnets_closed(std::slice::from_ref(&path), false)
             .unwrap();
