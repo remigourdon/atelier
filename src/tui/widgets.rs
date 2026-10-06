@@ -20,6 +20,16 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     rect
 }
 
+/// A menu's lines: its entries, then the legend under its heading.
+pub fn menu_lines(entries: usize, legend: usize) -> usize {
+    entries + if legend == 0 { 0 } else { legend + 1 }
+}
+
+/// How many of a menu's lines its popup shows in `area`.
+pub fn menu_rows(lines: usize, area: Rect) -> u16 {
+    (lines as u16).min(area.height.saturating_sub(4))
+}
+
 /// A bordered popup with its accept and cancel keys, `hints`, on the bottom border.
 fn popup(frame: &mut Frame, hints: String, title: &str, rect: Rect, palette: &Palette) -> Rect {
     let block = Block::bordered()
@@ -106,35 +116,48 @@ pub fn modal(frame: &mut Frame, modal: &Modal, palette: &Palette) {
             title,
             entries,
             selected,
+            legend,
+            peek,
         } => {
-            let height = (entries.len() as u16 + 2).min(area.height.saturating_sub(2));
-            let rect = centered(area, width, height);
+            let lines = menu_lines(entries.len(), legend.len());
+            let rows = menu_rows(lines, area);
+            let rect = centered(area, width, rows + 2);
             let inner = popup(frame, popup_hints(Popup::Menu), title, rect, palette);
-            let key_width = entries
+            let marks: Vec<&str> = legend
                 .iter()
-                .map(|e| e.key.chars().count())
+                .map(|legend| (legend.mark)(&palette.glyphs))
+                .collect();
+            let key_width = (entries.iter().map(|e| e.key.as_str()))
+                .chain(marks.iter().copied())
+                .map(|key| key.chars().count())
                 .max()
                 .unwrap_or(0);
-            let start = offset(*selected, inner.height);
-            let lines: Vec<Line> = entries
-                .iter()
-                .enumerate()
+            let entry_lines = entries.iter().enumerate().map(|(index, entry)| {
+                let line = Line::from(vec![
+                    Span::styled(
+                        format!("{:key_width$}  ", entry.key),
+                        Style::new().fg(palette.accent),
+                    ),
+                    Span::raw(entry.label.as_str()),
+                ]);
+                if index == *selected {
+                    line.style(Style::new().bg(palette.selection).bold())
+                } else {
+                    line
+                }
+            });
+            let heading = (!legend.is_empty())
+                .then(|| Line::styled("Legend", Style::new().fg(palette.label).bold()));
+            let legend_lines = legend.iter().zip(&marks).map(|(legend, mark)| {
+                Line::from(vec![
+                    Span::styled(format!("{mark:key_width$}"), (legend.style)(palette)),
+                    Span::raw(format!("  {}", legend.help)),
+                ])
+            });
+            let start = (offset(*selected, rows) + peek).min(lines.saturating_sub(rows as usize));
+            let lines: Vec<Line> = (entry_lines.chain(heading).chain(legend_lines))
                 .skip(start)
-                .take(inner.height as usize)
-                .map(|(index, entry)| {
-                    let line = Line::from(vec![
-                        Span::styled(
-                            format!("{:key_width$}  ", entry.key),
-                            Style::new().fg(palette.accent),
-                        ),
-                        Span::raw(entry.label.as_str()),
-                    ]);
-                    if index == *selected {
-                        line.style(Style::new().bg(palette.selection).bold())
-                    } else {
-                        line
-                    }
-                })
+                .take(rows as usize)
                 .collect();
             frame.render_widget(Paragraph::new(lines), inner);
         }

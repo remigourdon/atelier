@@ -132,7 +132,7 @@ Layout: below ~100 columns the main view is hidden (`+` shows it). On short term
 
 ### Keys
 
-Lazygit defaults. The keymap is one table in code that also feeds `?` and the hint bar; it is not user-configurable.
+Lazygit defaults. The keymap is one table in code that also feeds `?` and the hint bar, and the legend another beside the glyphs; it is not user-configurable.
 
 | Keys | Action |
 |---|---|
@@ -155,7 +155,7 @@ Lazygit defaults. The keymap is one table in code that also feeds `?` and the hi
 | `E` | export the retained command log to a new file |
 | `Esc` · `q` `C-c` | back · quit |
 
-`Space`, `x`, `d` and `p` on a group header act on every item in the group. `e` on an item's row, in Work or Carnets, offers `g` group or `i` issue keys. Its group moves it to a group, or out of any when the text is cleared; its issue keys are comma-separated, prefilled as stored, and what is submitted replaces them, short GitHub keys resolved, in order, once each. `e` on a group header renames the group at once, regrouping every member in every workspace, closed carnets included; cleared there, it ungroups them all. Every prompt for a group completes with `Tab` from the existing groups, cycling through those starting with what was typed. `?` lists the focused panel's actions, then the global ones.
+`Space`, `x`, `d` and `p` on a group header act on every item in the group. `e` on an item's row, in Work or Carnets, offers `g` group or `i` issue keys. Its group moves it to a group, or out of any when the text is cleared; its issue keys are comma-separated, prefilled as stored, and what is submitted replaces them, short GitHub keys resolved, in order, once each. `e` on a group header renames the group at once, regrouping every member in every workspace, closed carnets included; cleared there, it ungroups them all. Every prompt for a group completes with `Tab` from the existing groups, cycling through those starting with what was typed. `?` lists the focused panel's actions, then the global ones, then a legend of the marks that panel, the command log and the hint bar draw, in their colours and with the configured icons; the cursor stays on the actions, and `j` past the last one scrolls on through the legend.
 
 Each session runs its own TUI. One starts with Work focused and the Workspaces cursor on its own session, listed first, and `Space` on a workspace inside zellij leaves the TUI in that same state (clearing the Workspaces filter) as it switches away, so switching back into any session lands on its Work. Attaching from outside zellij leaves the TUI as it is.
 

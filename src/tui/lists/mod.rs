@@ -8,6 +8,8 @@ mod reviews;
 pub mod work;
 mod workspaces;
 
+pub(crate) use issues::review_style;
+
 use std::borrow::Cow;
 use std::path::PathBuf;
 
@@ -124,14 +126,13 @@ fn edit_links(model: &mut Model, work: &Work) -> Vec<Effect> {
         label: label.into(),
         action,
     };
-    model.modal = Some(Modal::Menu {
-        title: format!("Edit {}", work.title()),
-        entries: vec![
+    model.modal = Some(Modal::menu(
+        format!("Edit {}", work.title()),
+        vec![
             entry("g", "group", group),
             entry("i", "issue keys", issue_keys),
         ],
-        selected: 0,
-    });
+    ));
     Vec::new()
 }
 
@@ -198,7 +199,7 @@ fn issue_keys(
 }
 
 /// The mark of an item whose tab is open or closed, and its style.
-fn tab(open: bool, palette: &Palette) -> (&'static str, Style) {
+pub(crate) fn tab(open: bool, palette: &Palette) -> (&'static str, Style) {
     if open {
         (palette.glyphs.open, Style::new().fg(palette.ok))
     } else {

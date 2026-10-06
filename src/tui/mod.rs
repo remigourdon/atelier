@@ -50,6 +50,7 @@ async fn drive(
     model.tracker_config = context.config.tracker.clone();
     model.review_config = context.config.reviews.clone();
     model.carnets = context.config.carnets_enabled();
+    model.icons = context.config.icons;
     let (sender, mut results) = mpsc::unbounded_channel::<Action>();
     let mut events = EventStream::new();
     let mut ticks = tokio::time::interval(Duration::from_secs(1));
@@ -506,6 +507,49 @@ mod tests {
         let mut model = loaded(100, 30);
         update(&mut model, Action::Key(key('?')));
         insta::assert_snapshot!(render(&model, 100, 30));
+    }
+
+    #[test]
+    fn actions_menu_scrolled_to_its_legend() {
+        let mut model = loaded(100, 30);
+        model.icons = Icons::Nerd;
+        update(&mut model, Action::Key(key('?')));
+        update(&mut model, Action::Key(key('>')));
+        insta::assert_snapshot!(render_with(&model, 100, 30, Icons::Nerd));
+    }
+
+    #[test]
+    fn the_legend_explains_every_glyph() {
+        let glyphs = view::Glyphs::new(Icons::Nerd);
+        let marks: Vec<&str> = (view::LEGEND.iter())
+            .map(|legend| (legend.mark)(&glyphs))
+            .collect();
+        // Destructured so a new glyph fails to compile here until it is placed.
+        let view::Glyphs {
+            workspace,
+            repo,
+            worktree,
+            main: _statusline_only,
+            carnet,
+            review,
+            reviewed,
+            issue,
+            open,
+            closed,
+            folded,
+            unfolded,
+            integrated,
+            gone,
+            ci,
+            ci_error,
+            spinner,
+        } = glyphs;
+        for glyph in [
+            workspace, repo, worktree, carnet, review, reviewed, issue, open, closed, folded,
+            unfolded, integrated, gone, ci, ci_error, spinner[0],
+        ] {
+            assert!(marks.contains(&glyph), "{glyph} is not in the legend");
+        }
     }
 
     #[test]

@@ -102,11 +102,7 @@ fn ask_start(model: &mut Model, issue: Issue) -> Vec<Effect> {
             "no repos yet: register one with `atelier add <path>`",
         );
     }
-    model.modal = Some(Modal::Menu {
-        title: format!("New worktree for {label} in"),
-        entries,
-        selected: 0,
-    });
+    model.modal = Some(Modal::menu(format!("New worktree for {label} in"), entries));
     Vec::new()
 }
 
@@ -161,7 +157,7 @@ fn state_style(state: State, palette: &Palette) -> Style {
 }
 
 /// The mark of an issue an open review links, apart from its linked work's.
-fn review_style(palette: &Palette) -> Style {
+pub(crate) fn review_style(palette: &Palette) -> Style {
     Style::new().fg(palette.info)
 }
 

@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use super::app::{
-    Cmd, Focus, KEYMAP, List, Model, Panel, Popup, Screen, Source, Work, popup_hints,
+    Cmd, Focus, KEYMAP, Kind, List, Model, On, Panel, Popup, Screen, Source, Work, popup_hints,
 };
 use super::lists;
 use super::markdown::Markdown;
@@ -15,6 +15,7 @@ use super::widgets;
 use crate::config::Icons;
 use crate::finish::Signal;
 use crate::git::Commit;
+use crate::worktrunk::CiState;
 
 /// Below this width the main view is hidden until `+`.
 pub const NARROW: u16 = 100;
@@ -129,6 +130,86 @@ impl Glyphs {
             Signal::Integrated => self.integrated,
             Signal::Gone => self.gone,
         }
+    }
+}
+
+/// What a mark on screen means, as the `?` menu's legend lists it.
+#[derive(Debug)]
+pub struct Legend {
+    /// A glyph, or a sample of text in its colour; left out when empty.
+    pub mark: fn(&Glyphs) -> &'static str,
+    pub style: fn(&Palette) -> Style,
+    pub help: &'static str,
+    /// The lists that show it, or `Global` for anywhere.
+    pub on: On,
+}
+
+const WORK: &[Kind] = &[Kind::Work];
+const ITEMS: &[Kind] = &[Kind::Work, Kind::Carnets];
+const GROUPED: &[Kind] = &[Kind::Work, Kind::Carnets, Kind::Reviews];
+const KEYED: &[Kind] = &[Kind::Work, Kind::Carnets, Kind::Reviews, Kind::Issues];
+
+fn dim(palette: &Palette) -> Style {
+    Style::new().fg(palette.dim)
+}
+
+fn warn(palette: &Palette) -> Style {
+    Style::new().fg(palette.warn)
+}
+
+fn ci(state: CiState, palette: &Palette) -> Style {
+    Style::new().fg(lists::work::ci_color(state, palette))
+}
+
+/// The legend: every mark the lists, the main view and the command log draw, in the order `?`
+/// lists them.
+#[rustfmt::skip]
+pub const LEGEND: &[Legend] = &[
+    Legend { mark: |g| g.workspace, style: dim, help: "workspace", on: On::Lists(&[Kind::Workspaces]) },
+    Legend { mark: |g| g.repo, style: dim, help: "repo", on: On::Lists(&[Kind::Repos]) },
+    Legend { mark: |g| g.worktree, style: dim, help: "worktree", on: On::Lists(WORK) },
+    Legend { mark: |g| g.carnet, style: dim, help: "carnet", on: On::Lists(ITEMS) },
+    Legend { mark: |g| g.review, style: dim, help: "review", on: On::Lists(&[Kind::Reviews]) },
+    Legend { mark: |g| g.issue, style: dim, help: "issue", on: On::Lists(&[Kind::Issues]) },
+    Legend { mark: |g| g.open, style: |p| lists::tab(true, p).1, help: "tab open", on: On::Lists(ITEMS) },
+    Legend { mark: |g| g.closed, style: |p| lists::tab(false, p).1, help: "tab closed", on: On::Lists(ITEMS) },
+    Legend { mark: |g| g.open, style: |p| lists::tab(true, p).1, help: "checked out, its tab open", on: On::Lists(&[Kind::Reviews]) },
+    Legend { mark: |g| g.closed, style: |p| lists::tab(false, p).1, help: "checked out, its tab closed", on: On::Lists(&[Kind::Reviews]) },
+    Legend { mark: |g| g.open, style: lists::key_style, help: "linked work, a tab open", on: On::Lists(&[Kind::Issues]) },
+    Legend { mark: |g| g.closed, style: lists::key_style, help: "linked work, no tab open", on: On::Lists(&[Kind::Issues]) },
+    Legend { mark: |g| g.reviewed, style: lists::review_style, help: "an open review links it", on: On::Lists(&[Kind::Issues]) },
+    Legend { mark: |g| g.spinner[0], style: |p| Style::new().fg(p.info), help: "pulling", on: On::Lists(WORK) },
+    Legend { mark: |g| g.folded, style: |p| lists::group_style(p).bold(), help: "folded group", on: On::Lists(WORK) },
+    Legend { mark: |g| g.unfolded, style: |p| lists::group_style(p).bold(), help: "unfolded group", on: On::Lists(WORK) },
+    Legend { mark: |_| "group", style: lists::group_style, help: "a group", on: On::Lists(GROUPED) },
+    Legend { mark: |_| "KEY-1", style: lists::key_style, help: "an issue key", on: On::Lists(KEYED) },
+    Legend { mark: |g| g.ci, style: |p| ci(CiState::Passed, p), help: "CI passed", on: On::Lists(WORK) },
+    Legend { mark: |g| g.ci, style: |p| ci(CiState::Running, p), help: "CI running", on: On::Lists(WORK) },
+    Legend { mark: |g| g.ci, style: |p| ci(CiState::Failed, p), help: "CI failed", on: On::Lists(WORK) },
+    Legend { mark: |g| g.ci, style: |p| ci(CiState::Conflicts, p), help: "merge conflicts", on: On::Lists(WORK) },
+    Legend { mark: |g| g.ci, style: |p| ci(CiState::ChangesRequested, p), help: "changes requested", on: On::Lists(WORK) },
+    Legend { mark: |g| g.ci, style: |p| ci(CiState::ApprovalPending, p), help: "approval pending", on: On::Lists(WORK) },
+    Legend { mark: |g| g.ci, style: |p| ci(CiState::Passed, p).add_modifier(Modifier::DIM), help: "CI dimmed: stale, or a draft review", on: On::Lists(WORK) },
+    Legend { mark: |g| g.ci_error, style: |p| ci(CiState::Error, p), help: "CI status could not be fetched", on: On::Lists(WORK) },
+    Legend { mark: |_| "!", style: warn, help: "worktrunk status, as wt list shows it; yellow when dirty", on: On::Lists(WORK) },
+    Legend { mark: |_| "↓", style: warn, help: "behind its upstream", on: On::Lists(WORK) },
+    Legend { mark: |g| g.integrated, style: dim, help: "finished, the row dimmed: integrated into the default branch", on: On::Lists(WORK) },
+    Legend { mark: |g| g.gone, style: dim, help: "finished, the row dimmed: its upstream branch is gone", on: On::Lists(WORK) },
+    Legend { mark: |_| "✓", style: |p| Style::new().fg(p.ok), help: "command log: the command succeeded", on: On::Global },
+    Legend { mark: |_| "✗", style: |p| Style::new().fg(p.error), help: "command log: the command failed", on: On::Global },
+    Legend { mark: |_| "⟳", style: |p| Style::new().fg(p.info), help: "hint bar: loading", on: On::Global },
+];
+
+impl Legend {
+    /// The legend of a kind of list, its marks empty with these glyphs left out.
+    pub fn of(kind: Kind, glyphs: &Glyphs) -> Vec<&'static Legend> {
+        let here =
+            |legend: &&Legend| matches!(legend.on, On::Lists(kinds) if kinds.contains(&kind));
+        let global = |legend: &&Legend| legend.on == On::Global;
+        (LEGEND.iter().filter(here))
+            .chain(LEGEND.iter().filter(global))
+            .filter(|legend| !(legend.mark)(glyphs).is_empty())
+            .collect()
     }
 }
 

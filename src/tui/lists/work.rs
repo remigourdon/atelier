@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::{
@@ -439,11 +439,7 @@ impl ListKind for WorkList {
         } else {
             "New worktree in"
         };
-        model.modal = Some(Modal::Menu {
-            title: title.into(),
-            entries,
-            selected: 0,
-        });
+        model.modal = Some(Modal::menu(title, entries));
         Vec::new()
     }
 
@@ -603,19 +599,23 @@ pub(crate) fn behind(tree: &Worktree, palette: &Palette) -> Option<Span<'static>
 
 /// A CI status's colour, as worktrunk's: dimmed when stale or for a draft.
 pub(crate) fn ci_style(ci: &Ci, palette: &Palette) -> Style {
-    let color = match ci.state {
+    let style = Style::new().fg(ci_color(ci.state, palette));
+    if ci.stale || ci.draft() {
+        style.add_modifier(Modifier::DIM)
+    } else {
+        style
+    }
+}
+
+/// A CI status's colour.
+pub(crate) fn ci_color(state: CiState, palette: &Palette) -> Color {
+    match state {
         CiState::Passed => palette.ok,
         CiState::Running => palette.info,
         CiState::Failed => palette.error,
         CiState::Conflicts | CiState::Error => palette.warn,
         CiState::ChangesRequested => palette.changes_requested,
         CiState::ApprovalPending => palette.approval_pending,
-    };
-    let style = Style::new().fg(color);
-    if ci.stale || ci.draft() {
-        style.add_modifier(Modifier::DIM)
-    } else {
-        style
     }
 }
 
