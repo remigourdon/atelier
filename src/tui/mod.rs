@@ -19,6 +19,7 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
+use crate::zellij;
 use app::{Action, Effect, Job, Model};
 use jobs::Context;
 use view::Palette;
@@ -64,12 +65,20 @@ async fn drive(
                     });
                 }
                 Effect::Attach(session) => {
-                    crossterm::execute!(std::io::stdout(), DisableMouseCapture)?;
-                    ratatui::restore();
-                    let log = jobs::attach(&context, &session);
-                    *terminal = ratatui::init();
-                    crossterm::execute!(std::io::stdout(), EnableMouseCapture)?;
-                    terminal.clear()?;
+                    let log = handed_over(terminal, || jobs::attach(&context, &session))?;
+                    model.push_log(log);
+                    dirty = true;
+                }
+                Effect::Tool { path, branch } if zellij::current_session().is_some() => {
+                    let context = context.clone();
+                    let sender = sender.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let log = jobs::tool(&context, &path, branch);
+                        let _ = sender.send(Action::Logged(log));
+                    });
+                }
+                Effect::Tool { path, branch } => {
+                    let log = handed_over(terminal, || jobs::tool(&context, &path, branch))?;
                     model.push_log(log);
                     dirty = true;
                 }
@@ -101,6 +110,17 @@ async fn drive(
         effects = update::update(&mut model, action);
         dirty = !tick || !effects.is_empty() || model.animating();
     }
+}
+
+/// Runs `run` with the terminal handed over, then takes it back.
+fn handed_over<T>(terminal: &mut ratatui::DefaultTerminal, run: impl FnOnce() -> T) -> Result<T> {
+    crossterm::execute!(std::io::stdout(), DisableMouseCapture)?;
+    ratatui::restore();
+    let result = run();
+    *terminal = ratatui::init();
+    crossterm::execute!(std::io::stdout(), EnableMouseCapture)?;
+    terminal.clear()?;
+    Ok(result)
 }
 
 /// Standard base64, for OSC 52.
@@ -250,7 +270,7 @@ mod tests {
     fn carnet_shows_its_rendered_readme() {
         let mut model = update::tests::with_carnets(loaded(120, 30));
         let enter = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter);
-        for key in [key('G'), enter, key('j')] {
+        for key in [key('>'), enter, key('j')] {
             update(&mut model, Action::Key(key));
         }
         let text =
@@ -294,7 +314,7 @@ mod tests {
         use ratatui::style::{Color, Modifier};
         let mut model = update::tests::with_carnets(loaded(120, 30));
         let enter = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter);
-        for key in [key('G'), enter, key('j')] {
+        for key in [key('>'), enter, key('j')] {
             update(&mut model, Action::Key(key));
         }
         let text = "# 2026-10-02-ideas\n\nWhat I found **so far**, in `notes.md`.\n";

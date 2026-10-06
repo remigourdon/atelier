@@ -61,6 +61,10 @@ pub fn update(model: &mut Model, action: Action) -> Vec<Effect> {
             }]);
             vec![Effect::Copy(text)]
         }
+        Action::Logged(log) => {
+            model.push_log(log);
+            Vec::new()
+        }
         Action::Loaded {
             snapshot,
             full,
@@ -355,17 +359,6 @@ fn key_press(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
     if let Some(list) = model.filtering {
         return filter_key(model, list, key);
     }
-    // `gg` is a two-key sequence, so it is matched here; KEYMAP's top binding lists it.
-    let plain_g = key.code == KeyCode::Char('g') && !key.modifiers.contains(KeyModifiers::CONTROL);
-    if plain_g {
-        model.pending_g = !model.pending_g;
-        return if model.pending_g {
-            Vec::new()
-        } else {
-            command(model, Cmd::Top)
-        };
-    }
-    model.pending_g = false;
     match lookup(&key) {
         Some(cmd) => command(model, cmd),
         None => Vec::new(),
@@ -646,6 +639,14 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
             return lists::of(list).command(model, list, cmd);
         }
         Cmd::Finish => return lists::of(list).finish(model, list),
+        Cmd::Tool if matches!(list, List::Work | List::Carnets) => {
+            if let Some(work) = lists::of(list).item(model, list) {
+                let branch = work.tree().map(|_| work.branch());
+                let path = work.path.clone();
+                return vec![Effect::Tool { path, branch }];
+            }
+        }
+        Cmd::Tool => {}
         Cmd::Browse => {
             return match lists::of(list).url(model, list) {
                 Some(url) => vec![run(model, Job::Browse(url))],
@@ -1023,12 +1024,39 @@ pub mod tests {
         let mut model = model();
         press(&mut model, "jjjjjjj");
         assert_eq!(model.index(List::Work), 3);
-        press(&mut model, "gg");
-        assert_eq!(model.index(List::Work), 0);
         press(&mut model, "G");
-        assert_eq!(model.index(List::Work), 3);
+        assert_eq!(model.index(List::Work), 3, "G does nothing");
         press(&mut model, "<");
         assert_eq!(model.index(List::Work), 0);
+        press(&mut model, ">");
+        assert_eq!(model.index(List::Work), 3);
+        press(&mut model, "gg");
+        assert_eq!(model.index(List::Work), 3, "gg no longer jumps to the top");
+    }
+
+    #[test]
+    fn g_opens_the_tool_on_a_worktree_or_carnet_only() {
+        let mut model = with_reviews(with_carnets(model()));
+        assert!(press(&mut model, "g").is_empty(), "a group header");
+        press(&mut model, "j");
+        assert_eq!(
+            press(&mut model, "g"),
+            [Effect::Tool {
+                path: "/src/api.ABC-1-login".into(),
+                branch: Some("ABC-1-login".into()),
+            }]
+        );
+        press(&mut model, "]");
+        let effects = press(&mut model, "g");
+        let [Effect::Tool { path, branch: None }] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        assert!(
+            path.starts_with("/data/"),
+            "a carnet, its branch read when run"
+        );
+        press(&mut model, "3");
+        assert!(press(&mut model, "g").is_empty(), "Reviews have no path");
     }
 
     #[test]
@@ -1085,7 +1113,7 @@ pub mod tests {
         };
         assert_eq!(removals.len(), 2);
         assert!(removals[0].force && !removals[1].force);
-        press(&mut model, "G");
+        press(&mut model, ">");
         press(&mut model, "d");
         assert!(model.modal.is_none());
         assert!(model.log.last().unwrap().command.contains("main"));
@@ -1113,7 +1141,7 @@ pub mod tests {
             items: vec!["/src/api".into()],
         };
         assert_eq!(
-            plan_scope(press(&mut model, "Gf")),
+            plan_scope(press(&mut model, ">f")),
             (alone, vec!["/src/api".into()]),
             "an item in no group, alone"
         );
@@ -1252,14 +1280,14 @@ pub mod tests {
         );
         assert_eq!(popup_hints(Popup::Filter), "Enter keep · Esc clear");
         let mut model = model();
-        press(&mut model, "?G");
+        press(&mut model, "?>");
         let Some(Modal::Menu {
             selected, entries, ..
         }) = &model.modal
         else {
             panic!();
         };
-        assert_eq!(*selected, entries.len() - 1, "G goes to the last entry");
+        assert_eq!(*selected, entries.len() - 1, "> goes to the last entry");
     }
 
     #[test]
@@ -1304,7 +1332,7 @@ pub mod tests {
     #[test]
     fn move_offers_the_other_workspaces() {
         let mut model = model();
-        press(&mut model, "G");
+        press(&mut model, ">");
         press(&mut model, "m");
         let effects = press(&mut model, "\n");
         assert_eq!(
@@ -1340,7 +1368,7 @@ pub mod tests {
     #[test]
     fn x_closes_carnet_tabs_without_changing_their_lifecycle() {
         let mut model = with_carnets(model());
-        press(&mut model, "]G");
+        press(&mut model, "]>");
         assert!(jobs(press(&mut model, "x")).is_empty());
         model.snapshot.carnets.last_mut().unwrap().tab = true;
         assert_eq!(
@@ -1349,7 +1377,7 @@ pub mod tests {
         );
         assert!(model.carnet().unwrap().closed());
         assert!(model.modal.is_none());
-        press(&mut model, "gg");
+        press(&mut model, "<");
         model.snapshot.carnets[0].tab = true;
         assert_eq!(
             jobs(press(&mut model, "x")),
@@ -1421,7 +1449,7 @@ pub mod tests {
             jobs(press(&mut model, "x")),
             [Job::Close(vec!["/src/web.ABC-1-form".into()])]
         );
-        press(&mut model, "G");
+        press(&mut model, ">");
         assert_eq!(
             jobs(press(&mut model, "p")),
             [Job::Pull(vec!["/src/api".into()])]
@@ -1435,7 +1463,7 @@ pub mod tests {
     #[test]
     fn browse_opens_a_worktrees_review_over_its_branch() {
         let mut model = model();
-        press(&mut model, "G");
+        press(&mut model, ">");
         let tree = model.snapshot.work[0].tree_mut();
         assert_eq!(tree.branch.as_deref(), Some("main"));
         tree.ci = Some(worktrunk::Ci {
@@ -1483,7 +1511,7 @@ pub mod tests {
         let mut model = model();
         press(&mut model, "\n");
         assert_eq!(titles(&model), ["[ABC-1]", "api:main"]);
-        press(&mut model, "/form\ngg\n\x1b");
+        press(&mut model, "/form\n<\n\x1b");
         assert_eq!(titles(&model).len(), 4, "unfolded while filtered");
     }
 
@@ -1724,7 +1752,7 @@ pub mod tests {
     #[test]
     fn list_keys_scroll_the_focused_main_view() {
         let mut model = tall_main();
-        press(&mut model, "0G");
+        press(&mut model, "0>");
         let bottom = model.scroll.0;
         press(&mut model, ".J");
         assert_eq!(model.scroll.0, bottom, "stops at the end");
@@ -2317,7 +2345,7 @@ pub mod tests {
             ],
             "ungrouped carnets start folded"
         );
-        press(&mut model, "G\n");
+        press(&mut model, ">\n");
         assert_eq!(
             titles(&model)[5..],
             ["[]", "2026-10-02-ideas", "2026-09-20-old"],
@@ -2327,7 +2355,7 @@ pub mod tests {
         assert_eq!(titles(&model), ["[ABC-1]", "api:main", "[]"]);
         press(&mut model, "=");
         assert_eq!(titles(&model).len(), 8);
-        press(&mut model, "Gn");
+        press(&mut model, ">n");
         press(&mut model, "c");
         assert_eq!(
             jobs(press(&mut model, "x\n")),
@@ -2343,7 +2371,7 @@ pub mod tests {
     #[test]
     fn a_carnets_readme_is_read_when_selected_and_again_once_written() {
         let mut model = with_carnets(model());
-        press(&mut model, "G\n");
+        press(&mut model, ">\n");
         let path = PathBuf::from("/data/2026-10-02-ideas");
         let any_reads = |effects: &[Effect]| {
             (effects.iter())
@@ -2405,7 +2433,7 @@ pub mod tests {
             Some("# late"),
             "a read for a carnet since left is dropped"
         );
-        press(&mut model, "gg");
+        press(&mut model, "<");
         assert_eq!(
             any_reads(&press(&mut model, "j")),
             0,
@@ -2416,7 +2444,7 @@ pub mod tests {
     #[test]
     fn fast_refreshes_relist_the_selected_carnets_commits_and_show_them_meanwhile() {
         let mut model = with_carnets(model());
-        press(&mut model, "G\n");
+        press(&mut model, ">\n");
         let effects = press(&mut model, "j");
         let path = PathBuf::from("/data/2026-10-02-ideas");
         assert!(
@@ -2479,7 +2507,7 @@ pub mod tests {
     #[test]
     fn c_closes_the_selected_carnets() {
         let mut model = with_carnets(model());
-        press(&mut model, "G");
+        press(&mut model, ">");
         assert_eq!(
             jobs(press(&mut model, "c")),
             [Job::CloseCarnet(vec![
@@ -2488,7 +2516,7 @@ pub mod tests {
             ])],
             "every carnet of the group"
         );
-        press(&mut model, "gg");
+        press(&mut model, "<");
         assert_eq!(
             jobs(press(&mut model, "c")),
             [Job::CloseCarnet(vec!["/data/2026-10-01-ABC-1-logs".into()])],
@@ -2520,7 +2548,7 @@ pub mod tests {
             panic!("no branch prompt");
         };
         assert!(title.contains("of api"), "{title}");
-        press(&mut model, "\x1bGn");
+        press(&mut model, "\x1b>n");
         assert_eq!(
             menu_labels(&model),
             ["worktree of api", "worktree of web", "carnet"],
@@ -2538,13 +2566,13 @@ pub mod tests {
                 "/src/web.ABC-1-form".into()
             ])]
         );
-        assert!(jobs(press(&mut model, "Gp")).is_empty());
+        assert!(jobs(press(&mut model, ">p")).is_empty());
     }
 
     #[test]
     fn carnets_are_never_removed() {
         let mut model = with_carnets(model());
-        press(&mut model, "Gd");
+        press(&mut model, ">d");
         assert!(model.modal.is_none());
         assert!(
             model
@@ -2588,7 +2616,7 @@ pub mod tests {
     #[test]
     fn space_on_a_closed_carnet_opens_it_and_leaves_it_closed() {
         let mut model = with_carnets(model());
-        press(&mut model, "]G");
+        press(&mut model, "]>");
         assert_eq!(
             jobs(press(&mut model, " ")),
             [Job::Open(vec!["/data/2026-08-01-done".into()])]
@@ -2603,7 +2631,7 @@ pub mod tests {
             jobs(press(&mut model, "c")),
             [Job::CloseCarnet(vec!["/data/2026-10-02-ideas".into()])]
         );
-        press(&mut model, "G");
+        press(&mut model, ">");
         assert_eq!(
             jobs(press(&mut model, "c")),
             [Job::ReopenCarnet(vec!["/data/2026-08-01-done".into()])]

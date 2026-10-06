@@ -193,6 +193,27 @@ pub fn attach(context: &Context, session: &str) -> Vec<Logged> {
     recorder.take()
 }
 
+/// Runs the configured tool in `path`; without a branch, as for a carnet, reads its current one.
+/// Outside zellij the caller hands over the terminal.
+pub fn tool(context: &Context, path: &Path, branch: Option<String>) -> Vec<Logged> {
+    let recorder = Recorder::new(&System);
+    let branch = branch
+        .or_else(|| git::branch(&recorder, path))
+        .unwrap_or_default();
+    let command = crate::tool::command(context.config.tool(), path, &branch);
+    let program = crate::tool::program(&command).to_owned();
+    if !carnet::on_path(&program) {
+        let mut log = recorder.take();
+        log.push(Logged {
+            command,
+            error: Some(format!("command '{program}' not found on PATH")),
+        });
+        return log;
+    }
+    let _ = context.zellij(&recorder).run_tool(path, &command);
+    recorder.take()
+}
+
 /// What a fetch adds to the command log: each command that failed, and the fetch's own error
 /// only when no command failed, as when parsing.
 fn fetch_failures(recorder: &Recorder, error: Option<Report>, what: String) -> Vec<Logged> {

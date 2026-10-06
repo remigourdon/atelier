@@ -11,6 +11,7 @@ mod process;
 mod reviews;
 mod shell;
 mod state;
+mod tool;
 mod tui;
 mod worktrunk;
 mod zellij;
