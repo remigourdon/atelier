@@ -484,20 +484,20 @@ impl<'a> Items<'a> {
             .map(drop)
     }
 
-    /// Puts each item in `group`, or in none, and renames the tabs it changes. A carnet's group
-    /// is written to its front matter.
+    /// Puts each item in `group`, or in none, and renames the tabs of those it moves. A carnet's
+    /// group is written to its front matter.
     pub fn regroup(&self, paths: &[PathBuf], group: Option<&Group>) -> Result<()> {
         let mut repos = BTreeSet::new();
         let regrouped = each(paths, |path| {
             let item = self.relink(path, |links| links.group = group.cloned())?;
-            let carnet = item.is_carnet();
-            match item.repo.filter(|_| !carnet) {
-                Some(repo) => {
-                    repos.insert(repo);
-                    Ok(())
-                }
-                None => self.zellij.rename_tab(self.state, path),
+            if item.links.group.as_ref() == group {
+                return Ok(());
             }
+            if item.is_carnet() {
+                return self.zellij.rename_tab(self.state, path);
+            }
+            repos.extend(item.repo);
+            Ok(())
         });
         let repos: Vec<PathBuf> = repos.into_iter().collect();
         let renamed = each(&repos, |repo| self.zellij.sync_names(self.state, repo));
@@ -1412,15 +1412,7 @@ mod tests {
         assert_eq!(group_of(&["XYZ-9"]), None);
         linked("/r.c", "OTHER", &["ABC-1"]);
         assert_eq!(group_of(&["ABC-1", "DEF-4"]), None, "two groups: none");
-        let notes = carnet::tests::repo(
-            dir.path(),
-            "2026-10-01-notes",
-            Some(
-                "+++
-+++
-",
-            ),
-        );
+        let notes = carnet::tests::repo(dir.path(), "2026-10-01-notes", Some("+++\n+++\n"));
         // Its row is stale: the lookup reads the folder.
         (state.add_item(
             &notes,
@@ -1644,6 +1636,22 @@ mod tests {
         assert_eq!(state.tab(&open).unwrap().unwrap().session, "side");
         assert_eq!(state.tab(&closed).unwrap(), None);
         assert_eq!(state.require_item(&closed).unwrap().workspace, "side");
+    }
+
+    #[test]
+    fn regroup_leaves_the_items_already_in_the_group_and_their_tabs_alone() {
+        let state = state();
+        let dir = tempfile::tempdir().unwrap();
+        let readme = "+++\ngroup = \"A\"\nissues = []\nsummary = \"\"\nclosed = false\n+++\n";
+        let path = carnet::tests::repo(dir.path(), "2026-10-01-notes", Some(readme));
+        (state.add_item(&path, ItemKind::Carnet, None, &links("A", &[]), "default")).unwrap();
+        tab(&state, &path, "default", 4);
+        worktree(&state, "/r.a", "A", "default");
+        tab(&state, "/r.a", "default", 5);
+        let fake = Fake::default();
+        let paths = [path, "/r.a".into()];
+        (with_root(&state, &fake, dir.path()).regroup(&paths, group("a").as_ref())).unwrap();
+        assert_eq!(fake.calls(), Vec::<String>::new(), "no commit, no rename");
     }
 
     #[test]
