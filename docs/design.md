@@ -150,6 +150,8 @@ Lazygit defaults. The keymap is one table in code that also feeds `?` and the hi
 
 `Space`, `x`, `d` and `p` on a group header act on every item in the group. `?` lists the focused panel's actions, then the global ones.
 
+Each session runs its own TUI. One starts with Work focused and the Workspaces cursor on its own session, listed first, and `Space` on a workspace inside zellij leaves the TUI in that same state (clearing the Workspaces filter) as it switches away, so switching back into any session lands on its Work. Attaching from outside zellij leaves the TUI as it is.
+
 ## Nix
 
 Flake outputs:

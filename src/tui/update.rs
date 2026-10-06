@@ -557,7 +557,7 @@ fn main_height(model: &Model) -> u16 {
         .map_or(1, |rect| rect.height.saturating_sub(2).max(1))
 }
 
-fn focus_panel(model: &mut Model, panel: Panel) -> Vec<Effect> {
+pub(crate) fn focus_panel(model: &mut Model, panel: Panel) -> Vec<Effect> {
     model.panel = panel;
     model.focus = Focus::Panel(panel);
     model.scroll = (0, 0);
@@ -1455,6 +1455,14 @@ pub mod tests {
     }
 
     #[test]
+    fn startup_focuses_work_with_the_current_session_selected() {
+        let model = model();
+        assert_eq!(model.focus, Focus::Panel(Panel::Work));
+        assert_eq!(model.index(List::Workspaces), 0);
+        assert_eq!(model.workspace(), model.snapshot.here.as_deref());
+    }
+
+    #[test]
     fn space_on_a_workspace_switches_or_attaches() {
         let mut model = model();
         press(&mut model, "1j");
@@ -1462,6 +1470,9 @@ pub mod tests {
             jobs(press(&mut model, " ")),
             [Job::SwitchWorkspace("side".into())]
         );
+        assert_eq!(model.focus, Focus::Panel(Panel::Work));
+        assert_eq!(model.index(List::Workspaces), 0);
+        press(&mut model, "1j");
         model.snapshot.here = None;
         assert_eq!(press(&mut model, " "), [Effect::Attach("side".into())]);
     }

@@ -5,8 +5,8 @@ use ratatui::text::{Line, Span};
 
 use super::{ListKind, pair, plan, subtle};
 use crate::finish::Scope;
-use crate::tui::app::{Action, Effect, Job, Kind, List, Model, Submit};
-use crate::tui::update::{confirm, run, update};
+use crate::tui::app::{Action, Effect, Job, Kind, List, Model, Panel, Submit};
+use crate::tui::update::{confirm, focus_panel, run, update};
 use crate::tui::view::{Palette, icon};
 
 pub struct Workspaces;
@@ -127,7 +127,13 @@ impl ListKind for Workspaces {
             return Vec::new();
         };
         if model.snapshot.here.is_some() {
-            vec![run(model, Job::SwitchWorkspace(name))]
+            // Leave this TUI as it should be found on switching back: on its own
+            // session, listed first, with its work focused.
+            let mut effects = vec![run(model, Job::SwitchWorkspace(name))];
+            model.filters.remove(&List::Workspaces);
+            model.selected.insert(List::Workspaces, 0);
+            effects.extend(focus_panel(model, Panel::Work));
+            effects
         } else {
             vec![Effect::Attach(name)]
         }
