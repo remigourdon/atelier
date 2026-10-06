@@ -7,6 +7,8 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, Transaction, param
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::links::{Group, IssueKeys, Links, group_text};
+
 /// How long a remote listing is served from the cache. A minute shy of the five-minute full
 /// refresh, whose own fetch is stamped only once it returns.
 pub const CACHE_SECS: u64 = 240;
@@ -73,10 +75,8 @@ pub struct Item {
     pub kind: ItemKind,
     /// A worktree's repo; a carnet has none.
     pub repo: Option<PathBuf>,
-    /// Its label, normalised by [`group`]; `""` for none.
-    pub group: String,
-    /// The issues it links, in order. A carnet's are cached from its front matter.
-    pub issue_keys: Vec<String>,
+    /// Its group and the issues it links. A carnet's are cached from its front matter.
+    pub links: Links,
     pub workspace: String,
 }
 
@@ -138,12 +138,6 @@ pub fn dir_name(path: &Path) -> String {
         .unwrap_or(path.as_os_str())
         .to_string_lossy()
         .into_owned()
-}
-
-/// A group as atelier keeps it, wherever it comes in: trimmed and uppercased, so groups compare
-/// exactly.
-pub fn group(text: &str) -> String {
-    text.trim().to_uppercase()
 }
 
 /// Paths are stored as text.
@@ -397,15 +391,13 @@ impl State {
         Ok(())
     }
 
-    /// Records an item unless it already exists, its group normalised. Returns whether it was
-    /// new.
+    /// Records an item unless it already exists. Returns whether it was new.
     pub fn add_item(
         &self,
         path: impl AsRef<Path>,
         kind: ItemKind,
         repo: Option<&Path>,
-        group: &str,
-        issue_keys: &[String],
+        links: &Links,
         workspace: &str,
     ) -> Result<bool> {
         self.require_workspace(workspace)?;
@@ -416,8 +408,8 @@ impl State {
                 text(path.as_ref()),
                 kind.as_str(),
                 repo.map(text),
-                self::group(group),
-                serde_json::to_string(issue_keys)?,
+                group_text(links.group.as_ref()),
+                serde_json::to_string(&links.issue_keys)?,
                 workspace
             ],
         )?;
@@ -461,19 +453,19 @@ impl State {
             .query_row("SELECT date('now', 'localtime')", [], |row| row.get(0))?)
     }
 
-    /// Sets an item's group, normalised.
-    pub fn set_group(&self, path: impl AsRef<Path>, group: &str) -> Result<()> {
+    /// Puts an item in `group`, or in none.
+    pub fn set_group(&self, path: impl AsRef<Path>, group: Option<&Group>) -> Result<()> {
         let path = path.as_ref();
         self.require_item(path)?;
         self.db.execute(
             "UPDATE items SET \"group\" = ? WHERE path = ?",
-            params![self::group(group), text(path)],
+            params![group_text(group), text(path)],
         )?;
         Ok(())
     }
 
     /// Replaces the issue keys an item links.
-    pub fn set_issue_keys(&self, path: impl AsRef<Path>, keys: &[String]) -> Result<()> {
+    pub fn set_issue_keys(&self, path: impl AsRef<Path>, keys: &IssueKeys) -> Result<()> {
         let path = path.as_ref();
         self.require_item(path)?;
         self.db.execute(
@@ -612,10 +604,13 @@ fn item_row(row: &Row) -> rusqlite::Result<Item> {
         path: path_column(row, 0)?,
         kind: ItemKind::parse(&row.get::<_, String>(1)?)?,
         repo: row.get::<_, Option<String>>(2)?.map(PathBuf::from),
-        group: row.get(3)?,
-        issue_keys: serde_json::from_str(&keys).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, err.into())
-        })?,
+        links: Links {
+            group: Group::parse(&row.get::<_, String>(3)?),
+            issue_keys: serde_json::from_str(&keys).map_err(|err| {
+                let text = rusqlite::types::Type::Text;
+                rusqlite::Error::FromSqlConversionFailure(4, text, err.into())
+            })?,
+        },
         workspace: row.get(5)?,
     })
 }
@@ -668,6 +663,8 @@ fn apply(tx: &Transaction, from: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::links::group_text;
+    use crate::links::tests::{group, keys, links};
 
     /// The schema the prototype wrote, with no `user_version`.
     const BASELINE_FIXTURE: &str = include_str!("../tests/fixtures/baseline.sql");
@@ -706,28 +703,31 @@ mod tests {
                     path,
                     ItemKind::Worktree,
                     Some(Path::new("/r")),
-                    "",
-                    &[],
+                    &links("", &[]),
                     "default",
                 )
                 .unwrap();
         }
-        state.set_group("/r/a", "  login rewrite ").unwrap();
         state
-            .set_issue_keys("/r/a", &["ABC-1".into(), "o/r#2".into()])
+            .set_group("/r/a", group("login rewrite").as_ref())
             .unwrap();
+        let linked = keys(&["ABC-1", "o/r#2"]);
+        state.set_issue_keys("/r/a", &linked).unwrap();
         state.set_workspace("/r/a", "w").unwrap();
         let item = state.require_item("/r/a").unwrap();
         assert_eq!(
-            (item.group.as_str(), item.workspace.as_str()),
+            (
+                group_text(item.links.group.as_ref()),
+                item.workspace.as_str()
+            ),
             ("LOGIN REWRITE", "w"),
             "a group is trimmed and uppercased"
         );
-        assert_eq!(item.issue_keys, ["ABC-1", "o/r#2"]);
+        assert_eq!(item.links.issue_keys, keys(&["ABC-1", "o/r#2"]));
         assert_eq!(state.items().unwrap().len(), 2);
         assert!(state.set_workspace("/r/a", "nope").is_err());
-        assert!(state.set_group("/missing", "x").is_err());
-        assert!(state.set_issue_keys("/missing", &[]).is_err());
+        assert!(state.set_group("/missing", group("x").as_ref()).is_err());
+        assert!(state.set_issue_keys("/missing", &keys(&[])).is_err());
     }
 
     #[test]
@@ -770,11 +770,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             (
-                item.group.as_str(),
-                item.issue_keys.len(),
+                group_text(item.links.group.as_ref()),
+                item.links.issue_keys.is_empty(),
                 item.workspace.as_str()
             ),
-            ("", 0, "vrac")
+            ("", true, "vrac")
         );
     }
 
@@ -826,8 +826,7 @@ mod tests {
                 "/r/x",
                 ItemKind::Worktree,
                 Some(Path::new("/r")),
-                "",
-                &[],
+                &links("", &[]),
                 "w",
             )
             .unwrap();
@@ -845,7 +844,7 @@ mod tests {
         let state = fresh();
         state.add_workspace("w").unwrap();
         state
-            .add_item("/c1", ItemKind::Carnet, None, "", &[], "w")
+            .add_item("/c1", ItemKind::Carnet, None, &links("", &[]), "w")
             .unwrap();
         state.remove_workspace("w").unwrap();
         assert!(!state.has_workspace("w").unwrap());
@@ -880,8 +879,7 @@ mod tests {
                 "/r",
                 ItemKind::Worktree,
                 Some(Path::new("/r")),
-                "",
-                &[],
+                &links("", &[]),
                 "default",
             )
             .unwrap();
@@ -948,18 +946,18 @@ mod tests {
         state.add_workspace("w").unwrap();
         assert!(
             state
-                .add_item("/x", ItemKind::Carnet, None, "", &[], "w")
+                .add_item("/x", ItemKind::Carnet, None, &links("", &[]), "w")
                 .unwrap()
         );
         assert!(
             !state
-                .add_item("/x", ItemKind::Carnet, None, "", &[], "default")
+                .add_item("/x", ItemKind::Carnet, None, &links("", &[]), "default")
                 .unwrap()
         );
         assert_eq!(state.require_item("/x").unwrap().workspace, "w");
         assert!(
             state
-                .add_item("/y", ItemKind::Carnet, None, "", &[], "nope")
+                .add_item("/y", ItemKind::Carnet, None, &links("", &[]), "nope")
                 .is_err()
         );
     }
@@ -968,7 +966,7 @@ mod tests {
     fn a_carnet_is_never_registered_as_a_repo() {
         let state = fresh();
         state
-            .add_item("/x", ItemKind::Carnet, None, "", &[], "default")
+            .add_item("/x", ItemKind::Carnet, None, &links("", &[]), "default")
             .unwrap();
         assert!(
             (state

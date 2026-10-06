@@ -15,6 +15,7 @@ use crate::finish::{Plan, Scope, Step};
 use crate::git::Commit;
 use crate::issues::{self, Issue, TrackerConfig};
 pub use crate::items::{Removal, Snapshot, Work, WorkKind};
+use crate::links::Group;
 use crate::process::Logged;
 use crate::reviews::{Provider, Review};
 
@@ -115,7 +116,7 @@ pub enum Job {
         repo: PathBuf,
         branch: String,
         workspace: String,
-        group: String,
+        group: Option<Group>,
     },
     Remove(Vec<Removal>),
     /// Closes carnets and their tabs.
@@ -128,7 +129,7 @@ pub enum Job {
     NewCarnet {
         name: String,
         workspace: String,
-        group: String,
+        group: Option<Group>,
     },
     Move {
         paths: Vec<PathBuf>,
@@ -136,7 +137,7 @@ pub enum Job {
     },
     Regroup {
         paths: Vec<PathBuf>,
-        group: String,
+        group: Option<Group>,
     },
     SetAlias {
         repo: PathBuf,
@@ -285,7 +286,7 @@ pub enum Submit {
     Branch {
         repo: PathBuf,
         workspace: String,
-        group: String,
+        group: Option<Group>,
     },
     /// A branch for an issue's worktree.
     Start {
@@ -296,7 +297,7 @@ pub enum Submit {
     /// A new carnet's name.
     Carnet {
         workspace: String,
-        group: String,
+        group: Option<Group>,
     },
     Group(Vec<PathBuf>),
     Alias(PathBuf),

@@ -7,11 +7,13 @@ use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::engine::{ArgValueCandidates, CompletionCandidate};
 use color_eyre::eyre::{Result, WrapErr, bail};
 
+use crate::carnet::Carnets;
 use crate::config::Config;
 use crate::context::{self, Target};
 use crate::git;
 use crate::hooks::{self, Phase};
 use crate::items::Items;
+use crate::links::group_text;
 use crate::process::System;
 use crate::state::{self, State};
 use crate::worktrunk::{self, HooksConfig};
@@ -274,8 +276,9 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
             Zellij::new(&System, config, Layouts::resolve(config)?).open_session(&workspace)
         }
         Command::Carnet(command) => {
-            let root = config.require_carnet_root()?;
-            let names = crate::carnet::Names::new(config.issue_key_pattern())?;
+            let carnets = Carnets::new(config)?;
+            // Disabled carnets are an error here, not an empty list.
+            carnets.root()?;
             match command {
                 Carnet::New { name, workspace } => {
                     let items = items(state, config)?;
@@ -286,26 +289,23 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
                     }
                     let workspace =
                         items.workspace(workspace.as_deref(), state.default_workspace());
-                    let path = items.create_carnet(&name, &workspace, "")?;
+                    let path = items.create_carnet(&name, &workspace, None)?;
                     println!("created {} in {workspace}", path.display());
                 }
                 Carnet::Ls { closed } => {
-                    for carnet in crate::carnet::scan(&root, &names, &config.tracker)? {
+                    for carnet in carnets.scan()? {
                         if closed || !carnet.closed {
-                            let keys: Vec<String> = (carnet.issue_keys.iter())
-                                .map(|key| config.tracker.display_key(key))
-                                .collect();
                             println!(
                                 "{}\t{}\t{}\t{}",
                                 state::dir_name(&carnet.path),
-                                carnet.group,
-                                keys.join(","),
+                                group_text(carnet.links.group.as_ref()),
+                                carnet.links.issue_keys.display(&config.tracker, ","),
                                 carnet.summary
                             );
                         }
                     }
                 }
-                Carnet::Search { text } => crate::carnet::search(&System, &root, &text)?,
+                Carnet::Search { text } => carnets.search(&System, &text)?,
             }
             Ok(())
         }

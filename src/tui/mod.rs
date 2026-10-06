@@ -154,6 +154,7 @@ mod tests {
     use super::*;
     use crate::config::Icons;
     use crate::git::Commit;
+    use crate::links::tests::key as issue_key;
 
     #[test]
     fn base64_pads() {
@@ -375,7 +376,10 @@ mod tests {
             work.path.ends_with("2026-10-01-ABC-1-logs") || work.path.ends_with("2026-08-01-done")
         });
         model.snapshot.carnets[0].tab = true;
-        model.snapshot.carnets[0].issue_keys.push("o/api#4".into());
+        model.snapshot.carnets[0]
+            .links
+            .issue_keys
+            .push(issue_key("o/api#4"));
         if let WorkKind::Carnet { summary, .. } = &mut model.snapshot.carnets[0].kind {
             *summary = "Login fails after the token refresh".into();
         }

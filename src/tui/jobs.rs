@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use color_eyre::eyre::{Report, Result, eyre};
 
 use super::app::{Action, Feed, Job, Readme, Rows};
-use crate::carnet::{self, Stamp};
+use crate::carnet::{self, Carnets, Stamp};
 use crate::config::Config;
 use crate::finish::{self, Scope};
 use crate::git;
@@ -101,10 +101,8 @@ pub fn run(context: &Context, job: Job) -> Action {
             }
         }
         Job::SearchCarnets(text) => {
-            let hits = match context.config.carnet_root() {
-                Some(root) => carnet::hits(&recorder, &root, &text),
-                None => Err(eyre!("carnets are disabled")),
-            };
+            let hits =
+                Carnets::new(&context.config).and_then(|carnets| carnets.hits(&recorder, &text));
             let mut log = recorder.take();
             match &hits {
                 // `rg` finding nothing is no failure.
@@ -290,7 +288,9 @@ fn execute(context: &Context, state: &State, runner: &dyn Runner, job: Job) -> R
             branch,
             workspace,
             group,
-        } => items.create(&repo, &branch, &workspace, &group).map(drop),
+        } => items
+            .create(&repo, &branch, &workspace, group.as_ref())
+            .map(drop),
         Job::Start {
             repo,
             branch,
@@ -307,7 +307,7 @@ fn execute(context: &Context, state: &State, runner: &dyn Runner, job: Job) -> R
             workspace,
             group,
         } => {
-            let path = items.create_carnet(&name, &workspace, &group)?;
+            let path = items.create_carnet(&name, &workspace, group.as_ref())?;
             items.open(&[path])
         }
         Job::Remove(removals) => items.remove(&removals),
@@ -315,7 +315,7 @@ fn execute(context: &Context, state: &State, runner: &dyn Runner, job: Job) -> R
         Job::CloseCarnet(paths) => items.set_carnets_closed(&paths, true),
         Job::ReopenCarnet(paths) => items.set_carnets_closed(&paths, false),
         Job::Move { paths, workspace } => items.move_to(&paths, &workspace),
-        Job::Regroup { paths, group } => items.regroup(&paths, &group),
+        Job::Regroup { paths, group } => items.regroup(&paths, group.as_ref()),
         Job::SetAlias { repo, alias } => items.set_alias(&repo, &alias),
         Job::SetRepoWorkspace { repo, workspace } => items.set_repo_workspace(&repo, &workspace),
         Job::Forget(repo) => items.forget_repo(&repo),

@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span};
 
 use super::{ListKind, carnets, issue_keys, kind, pair, paths, plan, subtle, tab_detail, tab_mark};
 use crate::finish::{self, Scope, Signal};
+use crate::links::{Group, group_text};
 use crate::tui::app::{
     Action, Cmd, Effect, Job, Kind, List, MenuEntry, Modal, Model, Removal, Submit, Work, WorkKind,
 };
@@ -23,10 +24,10 @@ const CARNETS_KEY: &str = "\0\0carnets";
 #[derive(Debug, Clone, PartialEq)]
 pub enum Row {
     /// A group header; `members` index `Snapshot::work`. The `Carnets` group, of ungrouped
-    /// carnets, has an empty `name`.
+    /// carnets, has no `group`.
     Group {
         key: String,
-        name: String,
+        group: Option<Group>,
         members: Vec<usize>,
         folded: bool,
     },
@@ -61,16 +62,20 @@ impl Model {
                 work.workspace == workspace
                     && self.matches(
                         List::Work,
-                        &[&work.title(), &work.group, &work.path.to_string_lossy()],
+                        &[
+                            &work.title(),
+                            group_text(work.group()),
+                            &work.path.to_string_lossy(),
+                        ],
                     )
             })
             .collect();
         // Named groups, then ungrouped worktrees, then ungrouped carnets.
         let section = |work: &Work| {
             (
-                work.group.is_empty(),
+                work.group().is_none(),
                 work.in_carnets_group(),
-                work.group.clone(),
+                work.group().cloned(),
             )
         };
         members.sort_by(|&a, &b| {
@@ -111,18 +116,18 @@ impl Model {
                 .position(|&other| section(&work[other]) != section(first))
                 .map_or(members.len(), |offset| index + offset);
             let slice = &members[index..end];
-            if first.group.is_empty() && !carnets {
+            if first.group().is_none() && !carnets {
                 lines.extend(slice.iter().map(|&member| Row::Item(member)));
             } else {
                 let key = if carnets {
                     format!("{workspace}{CARNETS_KEY}")
                 } else {
-                    format!("{workspace}\0{}", first.group)
+                    format!("{workspace}\0{}", group_text(first.group()))
                 };
                 let folded = !filtering && self.is_folded(&key);
                 lines.push(Row::Group {
                     key,
-                    name: first.group.clone(),
+                    group: first.group().cloned(),
                     members: slice.to_vec(),
                     folded,
                 });
@@ -152,9 +157,9 @@ impl Model {
     }
 }
 
-/// How a group row is named; the `Carnets` group has no group name.
-pub fn group_name(name: &str) -> &str {
-    if name.is_empty() { "Carnets" } else { name }
+/// How a group row is named; the `Carnets` group has no group.
+pub fn group_name(group: Option<&Group>) -> &str {
+    group.map_or("Carnets", Group::as_str)
 }
 
 impl ListKind for WorkList {
@@ -187,7 +192,7 @@ impl ListKind for WorkList {
             .into_iter()
             .map(|line| match line {
                 Row::Group {
-                    name,
+                    group,
                     members,
                     folded,
                     ..
@@ -205,7 +210,7 @@ impl ListKind for WorkList {
                                 } else {
                                     palette.glyphs.unfolded
                                 },
-                                group_name(&name)
+                                group_name(group.as_ref())
                             ),
                             Style::new().fg(palette.info).bold(),
                         ),
@@ -215,7 +220,7 @@ impl ListKind for WorkList {
                 Row::Item(index) => {
                     let work = &model.snapshot.work[index];
                     let glyphs = &palette.glyphs;
-                    let indent = if work.group.is_empty() && !work.in_carnets_group() {
+                    let indent = if work.group().is_none() && !work.in_carnets_group() {
                         ""
                     } else {
                         "  "
@@ -266,8 +271,8 @@ impl ListKind for WorkList {
         _list: List,
     ) -> Vec<(String, Line<'static>)> {
         match model.work_row() {
-            Some(Row::Group { name, members, .. }) => {
-                let mut pairs = vec![pair("Group", group_name(&name).to_owned())];
+            Some(Row::Group { group, members, .. }) => {
+                let mut pairs = vec![pair("Group", group_name(group.as_ref()).to_owned())];
                 pairs.extend(members.iter().map(|&index| {
                     let work = &model.snapshot.work[index];
                     pair(kind(work), work.title())
@@ -315,7 +320,7 @@ impl ListKind for WorkList {
                     pair("Branch", work.branch()),
                     pair("Path", tree.path.display().to_string()),
                     pair("Workspace", work.workspace.clone()),
-                    pair("Group", work.group.clone()),
+                    pair("Group", group_text(work.group()).to_owned()),
                     pair(
                         "Issue keys",
                         issue_keys(work, &model.tracker_config, ", ", palette),
@@ -380,9 +385,9 @@ impl ListKind for WorkList {
             return Vec::new();
         };
         let group = match model.work_row() {
-            Some(Row::Group { name, .. }) => name,
-            Some(Row::Item(index)) => model.snapshot.work[index].group.clone(),
-            None => String::new(),
+            Some(Row::Group { group, .. }) => group,
+            Some(Row::Item(index)) => model.snapshot.work[index].group().cloned(),
+            None => None,
         };
         let ask = |repo: PathBuf, name: String| Action::Ask {
             title: format!("New worktree of {name}: branch"),
@@ -456,7 +461,7 @@ impl ListKind for WorkList {
         };
         let action = Action::Ask {
             title: format!("Group of {} item(s)", targets.len()),
-            initial: first.group.clone(),
+            initial: group_text(first.group()).to_owned(),
             then: Submit::Group(paths(&targets)),
         };
         update(model, action)
@@ -507,13 +512,13 @@ impl ListKind for WorkList {
         if targets.is_empty() {
             return Vec::new();
         }
-        let mut groups: Vec<String> = Vec::new();
+        let mut groups: Vec<Group> = Vec::new();
         let mut items = Vec::new();
         for work in targets {
-            if work.group.is_empty() {
-                items.push(work.path.clone());
-            } else if !groups.contains(&work.group) {
-                groups.push(work.group.clone());
+            match work.group() {
+                None => items.push(work.path.clone()),
+                Some(group) if !groups.contains(group) => groups.push(group.clone()),
+                Some(_) => {}
             }
         }
         plan(model, Scope::Work { groups, items })
@@ -542,7 +547,7 @@ impl ListKind for WorkList {
     fn copy_path(&self, model: &Model, _list: List) -> Option<String> {
         match model.work_row()? {
             Row::Item(index) => Some(model.snapshot.work[index].path().display().to_string()),
-            Row::Group { name, .. } => Some(name).filter(|name| !name.is_empty()),
+            Row::Group { group, .. } => group.map(|group| group.to_string()),
         }
     }
 
@@ -702,7 +707,7 @@ mod tests {
     fn titles(model: &Model) -> Vec<String> {
         (model.work_rows().into_iter())
             .map(|row| match row {
-                Row::Group { name, .. } => format!("[{}]", group_name(&name)),
+                Row::Group { group, .. } => format!("[{}]", group_name(group.as_ref())),
                 Row::Item(index) => model.snapshot.work[index].title(),
             })
             .collect()
@@ -752,7 +757,7 @@ mod tests {
         let model = grouped();
         let rows = model.work_rows();
         let Some(Row::Group {
-            name,
+            group,
             folded,
             members,
             ..
@@ -760,7 +765,7 @@ mod tests {
         else {
             panic!("no Carnets group");
         };
-        assert_eq!((name.as_str(), *folded, members.len()), ("", true, 2));
+        assert_eq!((group, *folded, members.len()), (&None, true, 2));
     }
 
     #[test]

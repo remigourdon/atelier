@@ -28,7 +28,7 @@ impl Model {
                     && self.matches(
                         list,
                         &[
-                            &issue.key,
+                            issue.key.as_str(),
                             &issue.title,
                             &issue.project,
                             &issue.labels.join(" "),
@@ -48,15 +48,15 @@ impl Model {
     /// An issue's linked work: the worktrees and the carnets, closed ones too, that link its
     /// key, in any group.
     pub fn issue_work(&self, issue: &Issue) -> Vec<&Work> {
-        let worktrees =
-            (self.snapshot.work.iter()).filter(|work| !work.is_carnet() && work.links(&issue.key));
-        let carnets = (self.snapshot.carnets.iter()).filter(|carnet| carnet.links(&issue.key));
+        let worktrees = (self.snapshot.work.iter())
+            .filter(|work| !work.is_carnet() && work.links_to(&issue.key));
+        let carnets = (self.snapshot.carnets.iter()).filter(|carnet| carnet.links_to(&issue.key));
         worktrees.chain(carnets).collect()
     }
 
     /// An issue's key as shown.
     pub fn issue_label(&self, issue: &Issue) -> String {
-        self.tracker_config.display_key(&issue.key)
+        issue.key.display(&self.tracker_config)
     }
 }
 
@@ -141,7 +141,7 @@ impl ListKind for Issues {
     /// An issue's key, which unlike its URL is never empty.
     fn ids(&self, model: &Model, list: List) -> Vec<String> {
         (model.issues(list).iter())
-            .map(|issue| issue.key.clone())
+            .map(|issue| issue.key.to_string())
             .collect()
     }
 

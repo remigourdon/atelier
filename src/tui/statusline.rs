@@ -40,8 +40,8 @@ pub fn line(state: &State, config: &Config, runner: &dyn Runner, dir: &Path) -> 
     let Some(located) = context::locate(state, config, dir)? else {
         return Ok(String::new());
     };
-    let first = located.issue_keys.first().map_or("", String::as_str);
-    let key = config.tracker.display_key(first);
+    let first = located.links.issue_keys.first();
+    let key = first.map_or(String::new(), |key| key.display(&config.tracker));
     let subject = match located.item.kind {
         ItemKind::Carnet => Subject {
             title: (located.carnet.as_ref()).map_or(String::new(), |carnet| carnet.summary.clone()),
@@ -52,8 +52,8 @@ pub fn line(state: &State, config: &Config, runner: &dyn Runner, dir: &Path) -> 
         ItemKind::Worktree => {
             let tree = context::current_tree(runner, &located.item).ok();
             let title = match first {
-                "" => None,
-                first => {
+                None => None,
+                Some(first) => {
                     issues::cached(state, &config.tracker, first)?.map(|(issue, _)| issue.title)
                 }
             };
@@ -167,6 +167,7 @@ mod tests {
     use super::*;
     use crate::config::Icons;
     use crate::issues::tests::issue;
+    use crate::links::tests::links;
     use crate::process::fake::Fake;
     use crate::worktrunk::Listing;
 
@@ -298,8 +299,7 @@ mod tests {
             &tree,
             ItemKind::Worktree,
             Some(Path::new("/a")),
-            "LOGIN",
-            &["ABC-1".into(), "DEF-2".into()],
+            &links("LOGIN", &["ABC-1", "DEF-2"]),
             "default",
         ))
         .unwrap();

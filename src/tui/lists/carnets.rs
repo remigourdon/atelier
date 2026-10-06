@@ -8,6 +8,7 @@ use ratatui::text::{Line, Span};
 
 use super::{ListKind, close_tabs, issue_keys, pair, tab_detail, tab_mark, tag_style};
 use crate::issues::TrackerConfig;
+use crate::links::group_text;
 use crate::tui::app::{Action, Cmd, Effect, Job, Kind, List, Model, Submit, Work, WorkKind};
 use crate::tui::update::{run, update};
 use crate::tui::view::{Palette, icon};
@@ -35,8 +36,8 @@ impl Model {
                     WorkKind::Carnet { summary, .. } => summary.as_str(),
                     WorkKind::Worktree { .. } => "",
                 };
-                let keys = work.issue_keys.join(" ");
-                self.matches(List::Carnets, &[&work.title(), &work.group, &keys, summary])
+                let (group, keys) = (group_text(work.group()), work.links.issue_keys.join(" "));
+                self.matches(List::Carnets, &[&work.title(), group, &keys, summary])
             })
             .collect()
     }
@@ -75,7 +76,7 @@ pub fn detail(
         pair("Carnet", work.title()),
         pair("Path", work.path.display().to_string()),
         pair("Workspace", work.workspace.clone()),
-        pair("Group", work.group.clone()),
+        pair("Group", group_text(work.group()).to_owned()),
         pair("Issue keys", issue_keys(work, tracker, ", ", palette)),
         pair("Summary", summary),
         pair("Tab", tab_detail(work.tab, palette)),
@@ -113,10 +114,10 @@ impl ListKind for Carnets {
                 let mut spans = vec![tab_mark(work.tab, palette)];
                 spans.extend(icon(glyphs.carnet, dim));
                 spans.push(Span::raw(work.title()));
-                if !work.group.is_empty() {
-                    spans.push(Span::styled(format!(" {}", work.group), tag_style(palette)));
+                if let Some(group) = work.group() {
+                    spans.push(Span::styled(format!(" {group}"), tag_style(palette)));
                 }
-                if !work.issue_keys.is_empty() {
+                if !work.links.issue_keys.is_empty() {
                     let keys = issue_keys(work, &model.tracker_config, ",", palette);
                     spans.push(Span::raw(" "));
                     spans.push(keys);

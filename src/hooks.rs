@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 use crate::git;
 use crate::items::Items;
+use crate::links::Group;
 use crate::process::Runner;
 use crate::state::Tab;
 
@@ -57,8 +58,8 @@ pub const WORKSPACE_VAR: &str = "ATELIER_WORKSPACE";
 /// What the caller knows about a new worktree, passed through worktrunk in the environment.
 #[derive(Debug, Default)]
 pub struct Hints {
-    /// `ATELIER_GROUP`: the worktree's group, normalised.
-    pub group: Option<String>,
+    /// `ATELIER_GROUP`: the worktree's group.
+    pub group: Option<Group>,
     /// `ATELIER_ISSUE_KEYS`: the issue keys it links before those in its branch, comma-separated.
     pub issue_keys: Option<Vec<String>>,
     /// `ATELIER_WORKSPACE`: the workspace a new worktree goes to, over the caller's session.
@@ -74,7 +75,7 @@ impl Hints {
     fn from_vars(var: impl Fn(&str) -> Option<String>) -> Self {
         let var = |name| var(name).filter(|value| !value.trim().is_empty());
         Self {
-            group: var(GROUP_VAR).map(|group| crate::state::group(&group)),
+            group: var(GROUP_VAR).and_then(|group| Group::parse(&group)),
             issue_keys: var(ISSUE_KEYS_VAR).map(|keys| {
                 (keys.split(','))
                     .map(str::trim)
@@ -142,6 +143,8 @@ mod tests {
 
     use super::*;
     use crate::config::Config;
+    use crate::links::group_text;
+    use crate::links::tests::{group, keys, links};
     use crate::process::fake::Fake;
     use crate::state::{ItemKind, State};
     use crate::zellij::layouts;
@@ -232,11 +235,18 @@ mod tests {
         assert_eq!(repo.default_workspace, "w");
         let item = w.state.require_item(w.path("wt")).unwrap();
         assert_eq!(
-            (item.group.as_str(), item.workspace.as_str()),
+            (
+                group_text(item.links.group.as_ref()),
+                item.workspace.as_str()
+            ),
             ("", "w"),
             "no group without a hint"
         );
-        assert_eq!(item.issue_keys, ["ABC-1"], "the keys in its branch");
+        assert_eq!(
+            item.links.issue_keys,
+            keys(&["ABC-1"]),
+            "the keys in its branch"
+        );
     }
 
     #[test]
@@ -261,8 +271,7 @@ mod tests {
                 w.path("wt"),
                 ItemKind::Worktree,
                 Some(&w.path("repo")),
-                "",
-                &[],
+                &links("", &[]),
                 "w",
             )
             .unwrap();
@@ -277,7 +286,7 @@ mod tests {
     fn worktrees_of_a_carnet_are_not_tracked() {
         let w = world();
         w.state
-            .add_item(w.path("repo"), ItemKind::Carnet, None, "", &[], "w")
+            .add_item(w.path("repo"), ItemKind::Carnet, None, &links("", &[]), "w")
             .unwrap();
         let fake = w.fake();
         assert_eq!(w.run(&fake, Some("w"), Phase::PreStart, "ABC-1-x"), None);
@@ -292,7 +301,7 @@ mod tests {
         w.state.add_repo(w.path("repo"), None, "default").unwrap();
         let fake = w.fake();
         let hints = Hints {
-            group: Some("LOGIN".into()),
+            group: group("LOGIN"),
             issue_keys: Some(vec!["XYZ-9".into(), "o/r#2".into()]),
             workspace: Some("w".into()),
         };
@@ -302,12 +311,15 @@ mod tests {
         assert_eq!(tab.session, "w");
         let item = w.state.require_item(w.path("wt")).unwrap();
         assert_eq!(
-            (item.group.as_str(), item.workspace.as_str()),
+            (
+                group_text(item.links.group.as_ref()),
+                item.workspace.as_str()
+            ),
             ("LOGIN", "w")
         );
         assert_eq!(
-            item.issue_keys,
-            ["XYZ-9", "o/r#2", "ABC-1"],
+            item.links.issue_keys,
+            keys(&["XYZ-9", "o/r#2", "ABC-1"]),
             "then the branch's keys"
         );
     }
@@ -322,7 +334,7 @@ mod tests {
             })
         };
         let hints = vars("  login rewrite ", " ABC-1, ,o/r#2 ");
-        assert_eq!(hints.group.as_deref(), Some("LOGIN REWRITE"));
+        assert_eq!(hints.group, group("LOGIN REWRITE"));
         assert_eq!(
             hints.issue_keys,
             Some(vec!["ABC-1".to_owned(), "o/r#2".to_owned()])
@@ -351,14 +363,14 @@ mod tests {
         let w = world();
         let fake = w.fake();
         let hints = Hints {
-            group: Some(" slow pages".into()),
+            group: group(" slow pages"),
             ..Hints::default()
         };
         w.run_with(&fake, Some("w"), Phase::PreStart, "ABC-1-x", &hints)
             .unwrap();
         let item = w.state.require_item(w.path("wt")).unwrap();
-        assert_eq!(item.group, "SLOW PAGES");
-        assert_eq!(item.issue_keys, ["ABC-1"]);
+        assert_eq!(item.links.group, group("SLOW PAGES"));
+        assert_eq!(item.links.issue_keys, keys(&["ABC-1"]));
     }
 
     #[test]

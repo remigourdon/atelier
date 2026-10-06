@@ -12,9 +12,10 @@ Goals: a fast lazygit-style TUI and CLI over worktrunk and zellij, and no assump
 Single crate. `src/tui` depends on core modules, never the reverse.
 
 ```
-src/  cli  config  state  items  finish  hooks  shell  process  git  zellij  worktrunk  reviews  issues  carnet  context  tui/{app,update,view,widgets,jobs,schedule,lists}
+src/  cli  config  state  items  links  finish  hooks  shell  process  git  zellij  worktrunk  reviews  issues  carnet  context  tui/{app,update,view,widgets,jobs,schedule,lists}
 ```
 
+- **Links**: `links` holds the vocabulary of [ADR 0002](adr/0002-groups-are-labels-links-live-on-items.md) as types. A `Group` is never empty, trimmed and uppercased when parsed, so "no group" is `None` everywhere and `""` only at the edges (sqlite, front matter, the environment, prompts). An `IssueKey` is canonical: listed by a tracker, resolved from typed or hand-written text against the configured trackers, or read back as stored; it shows itself short. `IssueKeys` is an item's ordered list, never holding a key twice, and `Links` bundles an item's group and keys. `carnet::Carnets`, built once from the config, reads and edits carnets with the issue key pattern and the trackers it needs.
 - **Processes**: every external command goes through the `process::Runner` trait, so orchestration is tested against a fake that records calls.
 - **TUI loop**: Elm architecture. `tokio::select!` over crossterm events, timers and task results produces `Action`s; `update(&mut Model, Action) -> Vec<Effect>` is pure; effects run as tokio tasks and send result actions back; the UI redraws only when state is dirty.
 - **Crates**: ratatui, crossterm (`event-stream`), tokio, clap (dynamic completions), serde/serde_json, rusqlite (bundled), toml_edit, tui-input, catppuccin, tui-markdown (carnet README only), color-eyre, tracing (file log), insta.

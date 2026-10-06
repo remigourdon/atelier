@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use toml_edit::{DocumentMut, Item, Table, value};
 
 use crate::hooks::{self, Phase};
+use crate::links::{Links, group_text};
 use crate::process::Runner;
 use crate::reviews::Provider;
 
@@ -386,19 +387,19 @@ pub struct Statusline {
 }
 
 /// Switches `repo` to `target` (`[--create] <branch>`, or `pr:N`), creating the worktree when
-/// needed, and tells atelier's hooks the workspace it goes to, its group and its issue keys.
+/// needed, and tells atelier's hooks the workspace it goes to, its group and the issue keys it
+/// links beyond its branch's.
 pub fn switch(
     runner: &dyn Runner,
     repo: &Path,
     target: &[&str],
     workspace: &str,
-    group: &str,
-    keys: &[String],
+    links: &Links,
 ) -> Result<()> {
     let repo = repo.to_string_lossy();
     let workspace = format!("{}={workspace}", hooks::WORKSPACE_VAR);
-    let group = format!("{}={group}", hooks::GROUP_VAR);
-    let keys = format!("{}={}", hooks::ISSUE_KEYS_VAR, keys.join(","));
+    let group = format!("{}={}", hooks::GROUP_VAR, group_text(links.group.as_ref()));
+    let keys = format!("{}={}", hooks::ISSUE_KEYS_VAR, links.issue_keys.join(","));
     let mut args = vec![
         workspace.as_str(),
         &group,

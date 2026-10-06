@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use color_eyre::eyre::{Result, WrapErr, eyre};
+use color_eyre::eyre::{Result, WrapErr};
 use regex::Regex;
 use serde::Deserialize;
 
@@ -112,12 +112,6 @@ impl Config {
 
     pub fn carnets_enabled(&self) -> bool {
         self.carnet_root().is_some()
-    }
-
-    /// Where carnets live, or why there are none.
-    pub fn require_carnet_root(&self) -> Result<PathBuf> {
-        self.carnet_root()
-            .ok_or_else(|| eyre!("carnets are disabled: set `root` under [carnets] in the config"))
     }
 
     /// The configured browser, else `$BROWSER`; `None` means the platform opener.

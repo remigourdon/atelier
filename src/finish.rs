@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::items::{Removal, Snapshot, Work};
+use crate::links::{Group, IssueKey};
 use crate::worktrunk::Worktree;
 
 /// Why a worktree is finished.
@@ -52,7 +53,7 @@ pub fn tree_signal(tree: &Worktree) -> Option<Signal> {
 pub enum Scope {
     /// Whole groups, across repos and workspaces, and items in no group on their own.
     Work {
-        groups: Vec<String>,
+        groups: Vec<Group>,
         items: Vec<PathBuf>,
     },
     /// A sweep of a workspace: each of its groups with a finished worktree, and its finished
@@ -61,7 +62,7 @@ pub enum Scope {
     /// An issue's linked work: the whole groups of the items linking `key`, and those in no
     /// group on their own. `label` is the key as shown, and `state` the issue's, for the title.
     Issue {
-        key: String,
+        key: IssueKey,
         label: String,
         state: String,
     },
@@ -69,16 +70,16 @@ pub enum Scope {
 
 /// What a plan covers: a group, or an item in no group.
 enum Cover {
-    Group(String),
+    Group(Group),
     Item(PathBuf),
 }
 
 impl Scope {
     /// One group's scope, as `f` on a group's row makes it, for tests.
     #[cfg(test)]
-    pub fn group(key: &str) -> Self {
+    pub fn group(name: &str) -> Self {
         Scope::Work {
-            groups: vec![key.to_owned()],
+            groups: Group::parse(name).into_iter().collect(),
             items: Vec::new(),
         }
     }
@@ -89,31 +90,12 @@ impl Scope {
                 .chain(items.iter().cloned().map(Cover::Item))
                 .collect(),
             Scope::Workspace(_) => {
-                let own = || (snapshot.work.iter()).filter(|work| self.touches(work));
-                let groups: BTreeSet<&String> = (own().map(|work| &work.group))
-                    .filter(|group| !group.is_empty())
-                    .collect();
-                let ungrouped = own()
-                    .filter(|work| work.group.is_empty() && work.removable())
-                    .map(|work| Cover::Item(work.path.clone()));
-                (groups.into_iter().cloned().map(Cover::Group))
-                    .chain(ungrouped)
-                    .collect()
+                let own = (snapshot.work.iter()).filter(|work| self.touches(work));
+                covers(own, |work| work.removable())
             }
             Scope::Issue { key, .. } => {
-                let linked = || (snapshot.work.iter()).filter(|work| work.links(key));
-                let mut groups: Vec<&String> = Vec::new();
-                for work in linked().filter(|work| !work.group.is_empty()) {
-                    if !groups.contains(&&work.group) {
-                        groups.push(&work.group);
-                    }
-                }
-                let ungrouped = linked()
-                    .filter(|work| work.group.is_empty())
-                    .map(|work| Cover::Item(work.path.clone()));
-                (groups.into_iter().cloned().map(Cover::Group))
-                    .chain(ungrouped)
-                    .collect()
+                let linked = (snapshot.work.iter()).filter(|work| work.links_to(key));
+                covers(linked, |_| true)
             }
         }
     }
@@ -156,11 +138,25 @@ impl Scope {
     }
 }
 
+/// The groups of `work`, each once, then the items in no group that `alone` keeps, each on its
+/// own.
+fn covers<'a>(work: impl Iterator<Item = &'a Work>, alone: impl Fn(&Work) -> bool) -> Vec<Cover> {
+    let (grouped, ungrouped): (Vec<&Work>, Vec<&Work>) =
+        work.partition(|work| work.group().is_some());
+    let groups: BTreeSet<&Group> = grouped.into_iter().filter_map(Work::group).collect();
+    let items = (ungrouped.into_iter())
+        .filter(|work| alone(work))
+        .map(|work| Cover::Item(work.path.clone()));
+    (groups.into_iter().cloned().map(Cover::Group))
+        .chain(items)
+        .collect()
+}
+
 /// Everything `cover` holds, in any workspace.
 fn members<'a>(snapshot: &'a Snapshot, cover: &Cover) -> Vec<&'a Work> {
     (snapshot.work.iter())
         .filter(|work| match cover {
-            Cover::Group(key) => work.group == *key,
+            Cover::Group(group) => work.group() == Some(group),
             Cover::Item(path) => work.path == *path,
         })
         .collect()
@@ -168,7 +164,7 @@ fn members<'a>(snapshot: &'a Snapshot, cover: &Cover) -> Vec<&'a Work> {
 
 fn cover_name(snapshot: &Snapshot, cover: &Cover) -> String {
     match cover {
-        Cover::Group(key) => key.clone(),
+        Cover::Group(group) => group.to_string(),
         Cover::Item(path) => (members(snapshot, cover).first())
             .map_or_else(|| path.display().to_string(), |work| work.title()),
     }
@@ -419,6 +415,7 @@ mod tests {
 
     use super::*;
     use crate::items::WorkKind;
+    use crate::links::tests::{key, links};
     use crate::worktrunk::Worktree;
 
     fn work(repo: &str, branch: &str, group: &str, workspace: &str) -> Work {
@@ -435,8 +432,7 @@ mod tests {
         Work {
             path: path.clone(),
             workspace: workspace.into(),
-            group: group.into(),
-            issue_keys: keys.iter().map(|&key| key.into()).collect(),
+            links: links(group, keys),
             tab: false,
             kind: WorkKind::Worktree {
                 repo: PathBuf::from(format!("/src/{repo}")),
@@ -474,8 +470,7 @@ mod tests {
         Work {
             path: PathBuf::from(format!("/data/{name}")),
             workspace: "default".into(),
-            group: group.into(),
-            issue_keys: keys.iter().map(|&key| key.into()).collect(),
+            links: links(group, keys),
             tab: false,
             kind: WorkKind::Carnet {
                 closed: false,
@@ -739,7 +734,7 @@ mod tests {
             integrated(work("api", "2-other", "OTHER", "default")),
         ]);
         let scope = Scope::Issue {
-            key: "o/api#1".into(),
+            key: key("o/api#1"),
             label: "api#1".into(),
             state: "done".into(),
         };

@@ -147,10 +147,8 @@ fn issue_keys(
     separator: &str,
     palette: &Palette,
 ) -> Span<'static> {
-    let keys: Vec<String> = (work.issue_keys.iter())
-        .map(|key| tracker.display_key(key))
-        .collect();
-    Span::styled(keys.join(separator), tag_style(palette))
+    let keys = work.links.issue_keys.display(tracker, separator);
+    Span::styled(keys, tag_style(palette))
 }
 
 /// The mark of an item whose tab is open or closed, and its style.
