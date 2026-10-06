@@ -191,6 +191,16 @@ pub(super) fn run(model: &mut Model, job: Job) -> Effect {
     Effect::Run(job)
 }
 
+/// Switches to another workspace's session, leaving this TUI as it should be found on
+/// switching back: on its own session, listed first, with its work focused.
+pub(super) fn switch_workspace(model: &mut Model, name: String) -> Vec<Effect> {
+    let mut effects = vec![run(model, Job::SwitchWorkspace(name))];
+    model.filters.remove(&List::Workspaces);
+    model.selected.insert(List::Workspaces, 0);
+    effects.extend(focus_panel(model, Panel::Work));
+    effects
+}
+
 fn start(model: &mut Model, jobs: Vec<Job>) -> Vec<Effect> {
     jobs.into_iter().map(|job| run(model, job)).collect()
 }
@@ -1483,6 +1493,14 @@ pub mod tests {
     }
 
     #[test]
+    fn startup_focuses_work_with_the_current_session_selected() {
+        let model = model();
+        assert_eq!(model.focus, Focus::Panel(Panel::Work));
+        assert_eq!(model.index(List::Workspaces), 0);
+        assert_eq!(model.workspace(), model.snapshot.here.as_deref());
+    }
+
+    #[test]
     fn space_on_a_workspace_switches_or_attaches() {
         let mut model = model();
         press(&mut model, "1j");
@@ -1490,6 +1508,10 @@ pub mod tests {
             jobs(press(&mut model, " ")),
             [Job::SwitchWorkspace("side".into())]
         );
+        assert_eq!(model.focus, Focus::Panel(Panel::Work));
+        assert_eq!(model.workspace(), model.snapshot.here.as_deref());
+        // Back onto "side" to attach to it.
+        press(&mut model, "1j");
         model.snapshot.here = None;
         assert_eq!(press(&mut model, " "), [Effect::Attach("side".into())]);
     }

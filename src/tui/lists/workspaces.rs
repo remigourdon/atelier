@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use super::{ListKind, pair, plan, subtle};
 use crate::finish::Scope;
 use crate::tui::app::{Action, Effect, Job, Kind, List, Model, Submit};
-use crate::tui::update::{confirm, run, update};
+use crate::tui::update::{confirm, switch_workspace, update};
 use crate::tui::view::{Palette, icon};
 
 pub struct Workspaces;
@@ -127,7 +127,7 @@ impl ListKind for Workspaces {
             return Vec::new();
         };
         if model.snapshot.here.is_some() {
-            vec![run(model, Job::SwitchWorkspace(name))]
+            switch_workspace(model, name)
         } else {
             vec![Effect::Attach(name)]
         }
