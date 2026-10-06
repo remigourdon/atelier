@@ -1,4 +1,5 @@
-//! Panel 2's Work list: the selected workspace's worktrees and open carnets, in groups.
+//! Panel 2's Work list: the selected workspace's worktrees and open carnets, and closed
+//! carnets with their tab open, in groups.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -7,15 +8,16 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::{
-    ListKind, carnets, edit_links, group_span, group_style, issue_keys, kind, pair, paths, plan,
-    subtle, tab_detail, tab_mark,
+    ListKind, carnets, edit_links, group_span, group_style, issue_keys, kind, move_menu, pair,
+    paths, plan, subtle, tab_detail, tab_mark,
 };
 use crate::finish::{self, Scope, Signal};
 use crate::links::{Group, group_text};
 use crate::tui::app::{
-    Action, Cmd, Effect, Job, Kind, List, MenuEntry, Modal, Model, Removal, Submit, Work, WorkKind,
+    Action, Cmd, Draft, DraftStep, Effect, Job, Kind, List, MenuEntry, Modal, Model, Removal,
+    Submit, Work, WorkKind,
 };
-use crate::tui::update::{confirm, note, run, update, workspace_menu};
+use crate::tui::update::{confirm, note, run, update};
 use crate::tui::view::{Palette, icon};
 use crate::worktrunk::{Ci, CiReview, CiState, Decision, Forge, Worktree};
 
@@ -86,6 +88,7 @@ impl Model {
                             &work.title(),
                             group_text(work.group()),
                             &work.path.to_string_lossy(),
+                            work.summary(),
                         ],
                     )
             })
@@ -227,12 +230,12 @@ impl ListKind for WorkList {
                         tab_mark(work.tab, palette)
                     };
                     let mut spans = vec![Span::raw(indent), marker];
-                    let glyph = if work.is_carnet() {
-                        glyphs.carnet
-                    } else {
-                        glyphs.worktree
-                    };
-                    spans.extend(icon(glyph, dim));
+                    if work.is_carnet() {
+                        let tracker = &model.tracker_config;
+                        let standing = carnets::Standing::of(work, false);
+                        return carnets::row(work, spans, standing, true, tracker, palette);
+                    }
+                    spans.extend(icon(glyphs.worktree, dim));
                     spans.push(Span::raw(work.title()));
                     let tree = work.tree();
                     if let Some(ci) = tree.and_then(|tree| tree.ci.as_ref()) {
@@ -425,7 +428,18 @@ impl ListKind for WorkList {
             entries.push(MenuEntry {
                 key: "c".into(),
                 label: "carnet".into(),
-                action: Action::ask("New carnet: name", "", Submit::Carnet { workspace, group }),
+                action: Action::ask(
+                    "New carnet: summary",
+                    "",
+                    Submit::Carnet {
+                        draft: Draft {
+                            workspace,
+                            group,
+                            ..Draft::default()
+                        },
+                        step: DraftStep::Summary,
+                    },
+                ),
             });
         }
         if entries.is_empty() {
@@ -471,15 +485,8 @@ impl ListKind for WorkList {
         };
         let current = first.workspace.clone();
         let paths = paths(&targets);
-        workspace_menu(
-            model,
-            format!("Move {} item(s) to", paths.len()),
-            &current,
-            |workspace| Job::Move {
-                paths: paths.clone(),
-                workspace,
-            },
-        )
+        let title = format!("Move {} item(s) to", paths.len());
+        move_menu(model, title, &paths, &current)
     }
 
     fn remove(&self, model: &mut Model, _list: List) -> Vec<Effect> {

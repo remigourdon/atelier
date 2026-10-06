@@ -117,7 +117,7 @@ enum Ws {
 enum Carnet {
     /// Create a carnet `<root>/YYYY-MM-DD-<name>`: a git repo with a README. Prints its path.
     New {
-        /// Its name; an issue key at its start is linked first.
+        /// Its name, which becomes its folder name; it links nothing.
         name: String,
         /// Its workspace (default: the current session's, else the default workspace).
         #[arg(short, long, add = ArgValueCandidates::new(complete_workspaces))]

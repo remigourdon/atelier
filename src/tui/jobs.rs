@@ -11,7 +11,7 @@ use crate::finish::{self, Scope};
 use crate::git;
 use crate::issues;
 use crate::items::{Items, Snapshot};
-use crate::links::{KeyFinder, Links};
+use crate::links::KeyFinder;
 use crate::process::{Logged, Recorder, Runner, System};
 use crate::reviews::{self, Role};
 use crate::state::{self, State};
@@ -333,15 +333,13 @@ fn execute(context: &Context, state: &State, runner: &dyn Runner, job: Job) -> R
         Job::NewCarnet {
             name,
             workspace,
-            group,
+            links,
+            summary,
         } => {
-            let links = Links {
-                group,
-                ..Links::default()
-            };
-            let carnet = items.create_carnet(&name, &workspace, &links, "")?;
+            let carnet = items.create_carnet(&name, &workspace, &links, &summary)?;
             items.open(&[carnet.path])
         }
+        Job::SetSummary { path, summary } => items.amend_carnet(&path, |_, kept| *kept = summary),
         Job::Remove(removals) => items.remove(&removals),
         Job::Finish(steps) => items.finish(&steps),
         Job::CloseCarnet(paths) => items.set_carnets_closed(&paths, true),

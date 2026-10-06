@@ -11,15 +11,16 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use super::app::{
-    Action, Binding, Cmd, Completion, Effect, Feed, Focus, IssueStep, Job, KEYMAP, List, MenuEntry,
-    Modal, Model, On, Panel, Pending, Popup, PopupCmd, Row, Rows, Screen, Search, Snapshot, Source,
-    Submit, Work, WorkKind, lookup, popup_lookup,
+    Action, Binding, Cmd, Completion, Draft, DraftStep, Effect, Feed, Focus, IssueStep, Job,
+    KEYMAP, List, MenuEntry, Modal, Model, On, Panel, Pending, Popup, PopupCmd, Row, Rows, Screen,
+    Search, Snapshot, Source, Submit, Work, WorkKind, lookup, popup_lookup,
 };
 use super::lists;
 use super::view::{Glyphs, Legend, areas, main_len, offset};
 use super::widgets;
+use crate::carnet::slug;
 use crate::finish::Plan;
-use crate::links::{Group, IssueKeys};
+use crate::links::{Group, IssueKeys, Links, group_text};
 use crate::process::Logged;
 use crate::reviews::Provider;
 use crate::worktrunk;
@@ -583,10 +584,7 @@ fn submit(model: &mut Model, then: Submit, value: &str) -> Vec<Effect> {
         _ if value.is_empty()
             && matches!(
                 then,
-                Submit::Branch { .. }
-                    | Submit::Start { .. }
-                    | Submit::Carnet { .. }
-                    | Submit::Workspace
+                Submit::Branch { .. } | Submit::Start { .. } | Submit::Workspace
             ) =>
         {
             return Vec::new();
@@ -614,10 +612,10 @@ fn submit(model: &mut Model, then: Submit, value: &str) -> Vec<Effect> {
             };
             return join_linked_group(model, pending);
         }
-        Submit::Carnet { workspace, group } => Job::NewCarnet {
-            name: value.into(),
-            workspace,
-            group,
+        Submit::Carnet { draft, step } => return draft_carnet(model, draft, step, value),
+        Submit::Summary(path) => Job::SetSummary {
+            path,
+            summary: value.into(),
         },
         Submit::Group(paths) => Job::Regroup {
             paths,
@@ -887,6 +885,59 @@ fn screen(model: &Model) -> Rect {
     Rect::new(0, 0, model.size.0, model.size.1)
 }
 
+/// Takes `value` as a new carnet's `step`, then asks the next one, or makes the carnet once
+/// its issue keys are in.
+fn draft_carnet(model: &mut Model, mut draft: Draft, step: DraftStep, value: &str) -> Vec<Effect> {
+    let (title, initial, groups, next) = match step {
+        DraftStep::Summary => {
+            draft.summary = value.into();
+            // The summary's first words name the folder unless edited.
+            let name = slug(value).split('-').take(5).collect::<Vec<_>>().join("-");
+            ("New carnet: folder name", name, Vec::new(), DraftStep::Name)
+        }
+        // A name without a letter or a digit has no folder name: asked again, as typed.
+        DraftStep::Name if slug(value).is_empty() => (
+            "New carnet: folder name, with a letter or a digit",
+            value.to_owned(),
+            Vec::new(),
+            DraftStep::Name,
+        ),
+        DraftStep::Name => {
+            draft.name = value.into();
+            let group = group_text(draft.group.as_ref()).to_owned();
+            ("New carnet: group", group, model.groups(), DraftStep::Group)
+        }
+        DraftStep::Group => {
+            draft.group = Group::parse(value);
+            let next = DraftStep::IssueKeys;
+            ("New carnet: issue keys", String::new(), Vec::new(), next)
+        }
+        DraftStep::IssueKeys => {
+            let links = Links {
+                group: draft.group,
+                issue_keys: IssueKeys::resolve(value.split(','), &model.tracker_config),
+            };
+            let job = Job::NewCarnet {
+                name: draft.name,
+                workspace: draft.workspace,
+                links,
+                summary: draft.summary,
+            };
+            return vec![run(model, job)];
+        }
+    };
+    let then = Submit::Carnet { draft, step: next };
+    let action = Action::Ask {
+        title: title.into(),
+        initial,
+        then,
+        groups,
+    };
+    update(model, action)
+}
+
+/// A menu, titled `title`, of the workspaces other than `current`, each running `job` with its
+/// name; a note when there is no other.
 pub(super) fn workspace_menu(
     model: &mut Model,
     title: String,
@@ -1667,6 +1718,16 @@ pub mod tests {
         assert_eq!(model.filter(List::Work), "form");
         press(&mut model, "\x1b");
         assert_eq!(titles(&model).len(), 4);
+    }
+
+    #[test]
+    fn the_work_filter_matches_a_carnets_summary() {
+        let mut model = with_carnets(model());
+        if let WorkKind::Carnet { summary, .. } = &mut model.snapshot.work[4].kind {
+            *summary = "Token refresh".into();
+        }
+        press(&mut model, "/token");
+        assert_eq!(titles(&model), ["[ABC-1]", "2026-10-01-ABC-1-logs"]);
     }
 
     #[test]
@@ -2727,12 +2788,16 @@ pub mod tests {
         assert_eq!(titles(&model).len(), 7);
         press(&mut model, ">n");
         press(&mut model, "c");
+        press(&mut model, "x\n");
+        press(&mut model, "\n");
+        assert_eq!(prompt(&model), ("New carnet: group".into(), String::new()));
         assert_eq!(
-            jobs(press(&mut model, "x\n")),
+            jobs(press(&mut model, "\n\n")),
             [Job::NewCarnet {
                 name: "x".into(),
                 workspace: "default".into(),
-                group: None,
+                links: Links::default(),
+                summary: "x".into(),
             }],
             "an ungrouped carnet's group is none"
         );
@@ -2902,15 +2967,61 @@ pub mod tests {
         assert_eq!(menu_labels(&model), ["worktree of api", "carnet"]);
         press(&mut model, "c");
         assert!(matches!(&model.modal, Some(Modal::Prompt { .. })));
-        assert!(jobs(press(&mut model, "\n")).is_empty(), "no name");
-        press(&mut model, "nc");
         assert_eq!(
-            jobs(press(&mut model, "logs\n")),
+            prompt(&model),
+            ("New carnet: summary".into(), String::new())
+        );
+        press(&mut model, "\n");
+        assert_eq!(
+            prompt(&model),
+            ("New carnet: folder name".into(), String::new()),
+            "no summary, no name to suggest"
+        );
+        assert!(jobs(press(&mut model, "-/\n")).is_empty(), "no name");
+        assert_eq!(
+            prompt(&model),
+            (
+                "New carnet: folder name, with a letter or a digit".into(),
+                "-/".into()
+            ),
+            "asked again, as typed"
+        );
+        press(&mut model, "\x1b");
+        press(&mut model, "nc");
+        press(&mut model, "Login fails: after token-refresh, again\n");
+        assert_eq!(
+            prompt(&model),
+            (
+                "New carnet: folder name".into(),
+                "login-fails-after-token-refresh".into()
+            ),
+            "the summary's first five words, punctuation dropped"
+        );
+        press(&mut model, "\n");
+        assert_eq!(
+            prompt(&model),
+            ("New carnet: group".into(), "ABC-1".into()),
+            "the selection's group"
+        );
+        press(&mut model, "\n");
+        assert_eq!(
+            prompt(&model),
+            ("New carnet: issue keys".into(), String::new())
+        );
+        assert_eq!(
+            jobs(press(&mut model, "ABC-1, DEF-2\n")),
             [Job::NewCarnet {
-                name: "logs".into(),
+                name: "login-fails-after-token-refresh".into(),
                 workspace: "default".into(),
-                group: Group::parse("ABC-1"),
+                links: crate::links::tests::links("ABC-1", &["ABC-1", "DEF-2"]),
+                summary: "Login fails: after token-refresh, again".into(),
             }]
+        );
+        press(&mut model, "nc");
+        press(&mut model, "x\n");
+        assert!(
+            jobs(press(&mut model, "\x1b")).is_empty() && model.modal.is_none(),
+            "Esc at any step makes nothing"
         );
         press(&mut model, "n1");
         let Some(Modal::Prompt { title, .. }) = &model.modal else {
@@ -3196,8 +3307,36 @@ pub mod tests {
             }],
             "an empty list unlinks every key"
         );
-        press(&mut model, "eg");
+        press(&mut model, "e");
+        assert_eq!(menu_labels(&model), ["group", "issue keys", "summary"]);
+        press(&mut model, "g");
         assert_eq!(prompt(&model).0, "Group of 2026-10-02-ideas");
+        press(&mut model, "\x1bes");
+        assert_eq!(
+            prompt(&model),
+            ("Summary of 2026-10-02-ideas".into(), String::new())
+        );
+        assert_eq!(
+            jobs(press(&mut model, "Found it\n")),
+            [Job::SetSummary {
+                path: "/data/2026-10-02-ideas".into(),
+                summary: "Found it".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn m_in_the_carnets_list_moves_a_carnet_closed_or_not() {
+        let mut model = with_carnets(model());
+        press(&mut model, "]jjjm");
+        assert_eq!(menu_labels(&model), ["default"], "the closed one, in side");
+        assert_eq!(
+            jobs(press(&mut model, "1")),
+            [Job::Move {
+                paths: vec!["/data/2026-08-01-done".into()],
+                workspace: "default".into(),
+            }]
+        );
     }
 
     #[test]
