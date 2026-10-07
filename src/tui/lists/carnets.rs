@@ -7,8 +7,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::{
-    ListKind, close_tabs, edit_links, group_span, group_style, issue_keys, move_menu, pair, subtle,
-    tab_detail, tab_mark, workspace_span, workspace_style,
+    ListKind, close_tabs, dim_after, edit_links, group_span, group_style, issue_keys, move_menu,
+    pair, subtle, tab_detail, tab_mark, workspace_span, workspace_style,
 };
 use crate::carnet::dated;
 use crate::issues::TrackerConfig;
@@ -85,8 +85,7 @@ pub fn row(
     palette: &Palette,
 ) -> Line<'static> {
     let dim = Style::new().fg(palette.dim);
-    let kept = lead.len();
-    let mut spans = lead;
+    let (lead, mut spans) = (lead.len(), lead);
     spans.extend(icon(
         palette.glyphs.carnet,
         glyph_style(work.closed(), palette),
@@ -110,9 +109,8 @@ pub fn row(
         spans.push(Span::raw(" "));
         spans.push(issue_keys(work, tracker, ",", palette));
     }
-    // The lead, such as the tab dot, keeps its colour.
     if work.closed() {
-        spans[kept..].iter_mut().for_each(|span| span.style = dim);
+        dim_after(&mut spans, lead, palette);
     }
     Line::from(spans)
 }

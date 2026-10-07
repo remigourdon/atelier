@@ -199,6 +199,13 @@ pub fn key_style(palette: &Palette) -> Style {
     Style::new().fg(palette.issue_key)
 }
 
+/// Dims a finished or closed item's row after its `lead` spans: its tab dot or spinner keeps its
+/// colour.
+fn dim_after(spans: &mut [Span], lead: usize, palette: &Palette) {
+    let dim = Style::new().fg(palette.dim);
+    spans[lead..].iter_mut().for_each(|span| span.style = dim);
+}
+
 /// A workspace's name, wherever an item shows the one it is in.
 pub fn workspace_style(palette: &Palette) -> Style {
     Style::new().fg(palette.workspace)

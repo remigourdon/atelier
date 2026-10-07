@@ -255,6 +255,12 @@ impl Severity {
         Some(tone.color(palette))
     }
 
+    /// The name's style, in its colour.
+    pub fn style(self, palette: &Palette) -> Style {
+        self.color(palette)
+            .map_or(Style::new(), |color| Style::new().fg(color))
+    }
+
     /// A worktree's most severe fact: its status symbols, its checks unless dimmed, its review's
     /// decision and whether that review conflicts.
     pub fn of(tree: &Worktree) -> Self {

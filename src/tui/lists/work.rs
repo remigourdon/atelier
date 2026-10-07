@@ -8,8 +8,8 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 use super::{
-    ListKind, carnets, edit_links, group_span, group_style, issue_keys, kind, move_menu, pair,
-    paths, plan, subtle, tab_detail, tab_mark, workspace_span,
+    ListKind, carnets, dim_after, edit_links, group_span, group_style, issue_keys, kind, move_menu,
+    pair, paths, plan, subtle, tab_detail, tab_mark, workspace_span,
 };
 use crate::finish::{self, Scope, Signal};
 use crate::links::{Group, group_text};
@@ -242,11 +242,11 @@ impl ListKind for WorkList {
                         let tracker = &model.tracker_config;
                         return carnets::row(work, spans, None, true, tracker, palette);
                     }
+                    let lead = spans.len();
                     spans.extend(icon(glyphs.worktree, dim));
-                    spans.push(Span::styled(work.title(), tint(severity(work), palette)));
-                    // Finished: dimmed, all but the tab dot or spinner.
+                    spans.push(Span::styled(work.title(), severity(work).style(palette)));
                     if finish::signal(work).is_some() {
-                        spans[2..].iter_mut().for_each(|span| span.style = dim);
+                        dim_after(&mut spans, lead, palette);
                     }
                     Line::from(spans)
                 }
@@ -533,13 +533,6 @@ pub(crate) fn severity(work: &Work) -> Severity {
         Some(tree) if finish::signal(work).is_none() => Severity::of(tree),
         _ => Severity::Fine,
     }
-}
-
-/// A name in its severity's colour.
-pub(crate) fn tint(severity: Severity, palette: &Palette) -> Style {
-    severity
-        .color(palette)
-        .map_or(Style::new(), |color| Style::new().fg(color))
 }
 
 /// worktrunk's status symbols, such as `!?↑`, each in its own colour.

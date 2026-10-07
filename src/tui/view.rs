@@ -208,17 +208,13 @@ macro_rules! status {
     };
 }
 
-fn severity(severity: Severity, palette: &Palette) -> Style {
-    lists::work::tint(severity, palette)
-}
-
 /// The legend: every mark the lists, the main view and the command log draw, one a line, under
 /// headings in the order `?` lists them. The status symbols are worktrunk's, from `wt list`.
 #[rustfmt::skip]
 pub const LEGEND: &[Legend] = &[
-    Legend { section: "Row colour", mark: |_| "name", style: |p| severity(Severity::Broken, p), help: "broken", on: On::Lists(WORK) },
-    Legend { section: "Row colour", mark: |_| "name", style: |p| severity(Severity::NeedsYou, p), help: "needs you", on: On::Lists(WORK) },
-    Legend { section: "Row colour", mark: |_| "name", style: |p| severity(Severity::Waiting, p), help: "waiting for approval", on: On::Lists(WORK) },
+    Legend { section: "Row colour", mark: |_| "name", style: |p| Severity::Broken.style(p), help: "broken", on: On::Lists(WORK) },
+    Legend { section: "Row colour", mark: |_| "name", style: |p| Severity::NeedsYou.style(p), help: "needs you", on: On::Lists(WORK) },
+    Legend { section: "Row colour", mark: |_| "name", style: |p| Severity::Waiting.style(p), help: "waiting for approval", on: On::Lists(WORK) },
     Legend { section: "Row colour", mark: |_| "name", style: dim, help: "closed or finished", on: On::Lists(WORK) },
     Legend { section: "Row colour", mark: |_| "name", style: dim, help: "closed", on: On::Lists(CARNETS) },
     Legend { section: "Rows", mark: |g| g.workspace, style: dim, help: "workspace", on: On::Lists(&[Kind::Workspaces]) },
