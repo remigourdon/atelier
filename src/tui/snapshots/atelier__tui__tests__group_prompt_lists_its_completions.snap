@@ -1,5 +1,6 @@
 ---
 source: src/tui/mod.rs
+assertion_line: 504
 expression: "render(&model, 100, 30)"
 ---
 "╭[1] Workspaces │ Repos─────────╮╭ Main ───────────────────────────────────────────────────────────╮"
@@ -13,7 +14,7 @@ expression: "render(&model, 100, 30)"
 "│  ◉ api:ABC-1-login            ││Changes     clean                                                │"
 "│  ○ web:ABC-1-form             ││Remote      ⇣ behind: 3 commits to pull                          │"
 "│○ api:main                     ││Commit      abc1234 Commit ()                                    │"
-"│                               ││Checks      none                                                 │"
+"│                               ││                                                                 │"
 "│                               ││                                                                 │"
 "│             ╭ Group of api:main ───────────────────────────────────────────────────╮             │"
 "│             │ABC-1                                                                 │             │"

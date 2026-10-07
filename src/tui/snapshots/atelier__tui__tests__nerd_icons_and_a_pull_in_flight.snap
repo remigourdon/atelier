@@ -1,5 +1,6 @@
 ---
 source: src/tui/mod.rs
+assertion_line: 220
 expression: "render_with(&model, 120, 16, Icons::Nerd)"
 ---
 "[1] Workspaces │ Repos──────────────────╭ Main ────────────────────────────────────────────────────────────────────────╮"
@@ -14,7 +15,7 @@ expression: "render_with(&model, 120, 16, Icons::Nerd)"
 "│                                      ││            +0 −0 lines                                                       │"
 "│                                      ││Remote      no upstream                                                       │"
 "│                                      ││Commit      abc1234 Commit ()                                                 │"
-"╰──────────────────────────────────────╯│Checks      none                                                              │"
-"[3] To review │ Mine────────────────────│                                                                              │"
+"╰──────────────────────────────────────╯│                                                                              │"
+"[3] To review │ Mine────────────────────│Recent commits                                                                │"
 "[4] To do │ In progress │ Done──────────╰──────────────────────────────────────────────────────────────────────────────╯"
 "Space open · n new · e edit · m move · d remove · x close tab · g open · p pull · f finish · ? actions · q quit   ⟳ run "

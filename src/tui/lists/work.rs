@@ -724,21 +724,17 @@ fn tree_detail(
     ));
 
     let ci = tree.ci.as_ref();
-    let checks = match ci.and_then(|ci| Some((ci, ci.checks?))) {
-        None => vec![subtle("none", palette)],
-        Some((ci, checks)) => {
-            let mark = checks_span(ci, palette).unwrap_or_default();
-            let mut line = vec![mark, Span::raw(format!(" {}", checks_label(checks)))];
-            if ci.branch_workflow {
-                line.push(subtle(" (branch workflow)", palette));
-            }
-            if ci.stale {
-                line.push(subtle(" · stale: local commits not pushed", palette));
-            }
-            line
+    if let Some((ci, checks)) = ci.and_then(|ci| Some((ci, ci.checks?))) {
+        let mark = checks_span(ci, palette).unwrap_or_default();
+        let mut line = vec![mark, Span::raw(format!(" {}", checks_label(checks)))];
+        if ci.branch_workflow {
+            line.push(subtle(" (branch workflow)", palette));
         }
-    };
-    pairs.push(pair("Checks", checks));
+        if ci.stale {
+            line.push(subtle(" · stale: local commits not pushed", palette));
+        }
+        pairs.push(pair("Checks", line));
+    }
 
     if let Some((ci, review)) = ci.and_then(|ci| Some((ci, ci.review.as_ref()?))) {
         let mut line = vec![Span::raw(review_reference(review, forge))];
@@ -942,9 +938,32 @@ mod tests {
                 "Changes: clean",
                 "Remote: no upstream",
                 "Commit:   ()",
-                "Checks: none",
                 "Finished: ⊂ merged into the default branch (f to finish)",
             ]
+        );
+        let unchecked = Worktree {
+            ci: Some(Ci {
+                state: None,
+                checks: None,
+                conflicts: false,
+                stale: false,
+                branch_workflow: false,
+                review: Some(CiReview {
+                    number: Some(7),
+                    url: None,
+                    decision: Some(Decision::Draft),
+                }),
+            }),
+            ..clean
+        };
+        assert_eq!(
+            facts(&unchecked, false, false)[4..],
+            [
+                "Review: #7 draft",
+                "Merge: mergeable",
+                "Finished: ⊂ merged into the default branch (f to finish)"
+            ],
+            "a review with no checks still shows, with no Checks line"
         );
     }
 }

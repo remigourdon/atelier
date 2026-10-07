@@ -1,5 +1,6 @@
 ---
 source: src/tui/mod.rs
+assertion_line: 473
 expression: "render(&finished(120, 30), 120, 30)"
 ---
 "╭[1] Workspaces │ Repos────────────────╮╭ Main ────────────────────────────────────────────────────────────────────────╮"
@@ -13,11 +14,11 @@ expression: "render(&finished(120, 30), 120, 30)"
 "│  ◉ api:ABC-1-login                   ││Changes     clean                                                             │"
 "│  ○ web:ABC-1-form                    ││Remote      no upstream                                                       │"
 "│  ○ ✎ 2026-10-01 ABC-1-logs ABC-1     ││Commit      abc1234 Commit ()                                                 │"
-"│○ api:main                            ││Checks      none                                                              │"
-"│○ ✎ 2026-10-02 ideas                  ││Finished    ⊂ merged into the default branch (f to finish)                    │"
-"│○ ✎ 2026-09-20 old                    ││                                                                              │"
-"│                                      ││Recent commits                                                                │"
+"│○ api:main                            ││Finished    ⊂ merged into the default branch (f to finish)                    │"
+"│○ ✎ 2026-10-02 ideas                  ││                                                                              │"
+"│○ ✎ 2026-09-20 old                    ││Recent commits                                                                │"
 "│                                      ││abc1234 Add login (2 hours ago, R)                                            │"
+"│                                      ││                                                                              │"
 "╰──────────────────────────────────────╯│                                                                              │"
 "╭[3] To review │ Mine──────────────────╮│                                                                              │"
 "│  api#2 Change 2 @alice               ││                                                                              │"
