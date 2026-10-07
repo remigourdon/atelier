@@ -1388,7 +1388,12 @@ pub mod tests {
         model.snapshot.work[1].tree_mut().integrated = true;
         let form = model.snapshot.work[2].tree_mut();
         (form.gone, form.dirty) = (true, true);
-        let plan = finish::plan(&model.snapshot, &Scope::group("ABC-1"), &[]);
+        let plan = finish::plan(
+            &model.snapshot,
+            &Scope::group("ABC-1"),
+            &[],
+            &model.tracker_config,
+        );
         let log = vec![Logged {
             command: "git -C /src/api fetch --prune".into(),
             error: None,

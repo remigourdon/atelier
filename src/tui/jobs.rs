@@ -187,7 +187,12 @@ fn plan(
         let names: Vec<String> = (failed.iter())
             .map(|repo| repo_name(&snapshot, repo))
             .collect();
-        Ok(finish::plan(&snapshot, scope, &names))
+        Ok(finish::plan(
+            &snapshot,
+            scope,
+            &names,
+            &context.config.tracker,
+        ))
     });
     log.extend((recorder.take().into_iter()).filter(|entry| entry.error.is_some()));
     (plan, log)
