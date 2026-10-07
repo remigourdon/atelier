@@ -418,10 +418,11 @@ pub enum Modal {
         title: String,
         entries: Vec<MenuEntry>,
         selected: usize,
-        /// What the marks of the focused list mean, below the entries and never selected.
+        /// What the marks of the focused list mean, on a page of its own.
         legend: Vec<&'static Legend>,
-        /// Lines scrolled past the last entry to read the legend.
-        peek: usize,
+        page: MenuPage,
+        /// Lines of the legend scrolled past.
+        scroll: usize,
     },
     /// A finish plan, its lines toggled before running; `selected` indexes its lines.
     Finish { plan: Plan, selected: usize },
@@ -439,9 +440,17 @@ impl Modal {
             entries,
             selected: 0,
             legend: Vec::new(),
-            peek: 0,
+            page: MenuPage::Actions,
+            scroll: 0,
         }
     }
+}
+
+/// A menu's two pages, which `Tab` switches between when it has a legend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuPage {
+    Actions,
+    Legend,
 }
 
 /// What a line of `Space`'s plan on an issue does.
@@ -760,6 +769,8 @@ pub enum PopupCmd {
     Toggle,
     /// Complete the prompt's text.
     Complete,
+    /// Switch a menu's page.
+    Page,
 }
 
 pub struct PopupBinding {
@@ -784,6 +795,7 @@ pub const POPUP_KEYMAP: &[PopupBinding] = &[
     PopupBinding { popup: Popup::Menu, keys: &[ch('>'), code(KeyCode::End)], label: ">/End", cmd: PopupCmd::Bottom, help: "bottom" },
     PopupBinding { popup: Popup::Menu, keys: &[code(KeyCode::Enter)], label: "Enter", cmd: PopupCmd::Accept, help: "run" },
     PopupBinding { popup: Popup::Menu, keys: &[code(KeyCode::Esc), ch('q')], label: "Esc", cmd: PopupCmd::Cancel, help: "close" },
+    PopupBinding { popup: Popup::Menu, keys: &[code(KeyCode::Tab), code(KeyCode::BackTab)], label: "Tab", cmd: PopupCmd::Page, help: "legend" },
     PopupBinding { popup: Popup::Finish, keys: &[ch('j'), code(KeyCode::Down)], label: "j/↓", cmd: PopupCmd::Down, help: "next" },
     PopupBinding { popup: Popup::Finish, keys: &[ch('k'), code(KeyCode::Up)], label: "k/↑", cmd: PopupCmd::Up, help: "previous" },
     PopupBinding { popup: Popup::Finish, keys: &[ch(' ')], label: "Space", cmd: PopupCmd::Toggle, help: "toggle" },

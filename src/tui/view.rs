@@ -12,7 +12,7 @@ use super::app::{
 use super::lists;
 use super::lists::carnets;
 use super::markdown::{self, Markdown};
-use super::marks::{self, Tone};
+use super::marks::{self, Severity, Tone};
 use super::widgets;
 use crate::config::Icons;
 use crate::finish::Signal;
@@ -158,6 +158,8 @@ impl Glyphs {
 /// What a mark on screen means, as the `?` menu's legend lists it.
 #[derive(Debug)]
 pub struct Legend {
+    /// The heading it goes under, as the detail's sections are named.
+    pub section: &'static str,
     /// A glyph, or a sample of text in its colour; left out when empty.
     pub mark: fn(&Glyphs) -> &'static str,
     pub style: fn(&Palette) -> Style,
@@ -170,61 +172,99 @@ const WORK: &[Kind] = &[Kind::Work];
 const ITEMS: &[Kind] = &[Kind::Work, Kind::Carnets];
 const GROUPED: &[Kind] = &[Kind::Work, Kind::Carnets, Kind::Reviews];
 const KEYED: &[Kind] = &[Kind::Work, Kind::Carnets, Kind::Reviews, Kind::Issues];
+const CARNETS: &[Kind] = &[Kind::Carnets];
+const REVIEWS: &[Kind] = &[Kind::Reviews];
+const ISSUES: &[Kind] = &[Kind::Issues];
 
 fn dim(palette: &Palette) -> Style {
     Style::new().fg(palette.dim)
 }
 
-fn warn(palette: &Palette) -> Style {
-    Style::new().fg(palette.warn)
+fn fg(color: Color) -> Style {
+    Style::new().fg(color)
 }
 
 fn checks(checks: Checks, palette: &Palette) -> Style {
-    Style::new().fg(lists::work::checks_mark(checks, palette).1)
+    fg(lists::work::checks_mark(checks, palette).1)
 }
 
 /// A status symbol's colour.
 fn symbol(mark: char, palette: &Palette) -> Style {
     let tone = marks::lookup(mark).map_or(Tone::Quiet, |symbol| symbol.tone);
-    Style::new().fg(tone.color(palette))
+    fg(tone.color(palette))
 }
 
-/// The legend: every mark the lists, the main view and the command log draw, in the order `?`
-/// lists them. The `status:` marks are worktrunk's, from `wt list`'s Status column.
+fn severity(severity: Severity, palette: &Palette) -> Style {
+    lists::work::tint(severity, palette)
+}
+
+/// The legend: every mark the lists, the main view and the command log draw, one a line, under
+/// headings in the order `?` lists them. The status symbols are worktrunk's, from `wt list`.
 #[rustfmt::skip]
 pub const LEGEND: &[Legend] = &[
-    Legend { mark: |g| g.workspace, style: dim, help: "workspace", on: On::Lists(&[Kind::Workspaces]) },
-    Legend { mark: |g| g.repo, style: dim, help: "repo", on: On::Lists(&[Kind::Repos]) },
-    Legend { mark: |g| g.worktree, style: dim, help: "worktree", on: On::Lists(WORK) },
-    Legend { mark: |g| g.carnet, style: |p| carnets::glyph_style(false, p), help: "carnet, open", on: On::Lists(ITEMS) },
-    Legend { mark: |g| g.carnet, style: |p| carnets::glyph_style(true, p), help: "carnet, closed, the row dimmed", on: On::Lists(ITEMS) },
-    Legend { mark: |g| g.review, style: dim, help: "review", on: On::Lists(&[Kind::Reviews]) },
-    Legend { mark: |g| g.issue, style: dim, help: "issue", on: On::Lists(&[Kind::Issues]) },
-    Legend { mark: |g| g.open, style: |p| lists::tab(true, p).1, help: "tab open", on: On::Lists(ITEMS) },
-    Legend { mark: |g| g.closed, style: |p| lists::tab(false, p).1, help: "tab closed", on: On::Lists(ITEMS) },
-    Legend { mark: |g| g.open, style: |p| lists::tab(true, p).1, help: "checked out, its tab open", on: On::Lists(&[Kind::Reviews]) },
-    Legend { mark: |g| g.closed, style: |p| lists::tab(false, p).1, help: "checked out, its tab closed", on: On::Lists(&[Kind::Reviews]) },
-    Legend { mark: |g| g.open, style: |p| lists::tab(true, p).1, help: "linked work, a tab open", on: On::Lists(&[Kind::Issues]) },
-    Legend { mark: |g| g.closed, style: |p| lists::tab(false, p).1, help: "linked work, no tab open", on: On::Lists(&[Kind::Issues]) },
-    Legend { mark: |g| g.reviewed, style: lists::review_style, help: "an open review links it", on: On::Lists(&[Kind::Issues]) },
-    Legend { mark: |g| g.spinner[0], style: |p| Style::new().fg(p.info), help: "pulling", on: On::Lists(WORK) },
-    Legend { mark: |g| g.folded, style: |p| lists::group_style(p).bold(), help: "folded group", on: On::Lists(WORK) },
-    Legend { mark: |g| g.unfolded, style: |p| lists::group_style(p).bold(), help: "unfolded group", on: On::Lists(WORK) },
-    Legend { mark: |_| "group", style: lists::group_style, help: "a group", on: On::Lists(GROUPED) },
-    Legend { mark: |_| "KEY-1", style: lists::key_style, help: "an issue key", on: On::Lists(KEYED) },
-    Legend { mark: |g| g.passed, style: |p| checks(Checks::Passed, p), help: "checks passed", on: On::Lists(WORK) },
-    Legend { mark: |g| g.running, style: |p| checks(Checks::Running, p), help: "checks running", on: On::Lists(WORK) },
-    Legend { mark: |g| g.failed, style: |p| checks(Checks::Failed, p), help: "checks failed", on: On::Lists(WORK) },
-    Legend { mark: |g| g.unavailable, style: |p| checks(Checks::Unavailable, p), help: "checks unavailable", on: On::Lists(WORK) },
-    Legend { mark: |g| g.passed, style: |p| checks(Checks::Passed, p).add_modifier(Modifier::DIM), help: "dimmed: stale, or a draft", on: On::Lists(WORK) },
-    Legend { mark: |g| g.conflicts, style: |p| Style::new().fg(p.error), help: "merge conflicts", on: On::Lists(WORK) },
-    Legend { mark: |g| g.changes_requested, style: |p| Style::new().fg(p.changes_requested), help: "changes requested", on: On::Lists(WORK) },
-    Legend { mark: |g| g.approval, style: |p| Style::new().fg(p.approval_pending), help: "waiting for approval", on: On::Lists(WORK) },
-    Legend { mark: |g| g.integrated, style: dim, help: "finished, the row dimmed: integrated into the default branch", on: On::Lists(WORK) },
-    Legend { mark: |g| g.gone, style: dim, help: "finished, the row dimmed: its upstream branch is gone", on: On::Lists(WORK) },
-    Legend { mark: |_| "✓", style: dim, help: "command log: the command succeeded", on: On::Global },
-    Legend { mark: |_| "✗", style: |p| Style::new().fg(p.error), help: "command log: the command failed", on: On::Global },
-    Legend { mark: |_| "⟳", style: dim, help: "hint bar: loading", on: On::Global },
+    Legend { section: "Row colour", mark: |_| "name", style: |p| severity(Severity::Broken, p), help: "broken", on: On::Lists(WORK) },
+    Legend { section: "Row colour", mark: |_| "name", style: |p| severity(Severity::NeedsYou, p), help: "needs you", on: On::Lists(WORK) },
+    Legend { section: "Row colour", mark: |_| "name", style: |p| severity(Severity::Waiting, p), help: "waiting for approval", on: On::Lists(WORK) },
+    Legend { section: "Row colour", mark: |_| "name", style: dim, help: "closed or finished", on: On::Lists(WORK) },
+    Legend { section: "Row colour", mark: |_| "name", style: dim, help: "closed", on: On::Lists(CARNETS) },
+    Legend { section: "Rows", mark: |g| g.workspace, style: dim, help: "workspace", on: On::Lists(&[Kind::Workspaces]) },
+    Legend { section: "Rows", mark: |g| g.repo, style: dim, help: "repo", on: On::Lists(&[Kind::Repos]) },
+    Legend { section: "Rows", mark: |g| g.worktree, style: dim, help: "worktree", on: On::Lists(WORK) },
+    Legend { section: "Rows", mark: |g| g.carnet, style: |p| carnets::glyph_style(false, p), help: "carnet, open", on: On::Lists(ITEMS) },
+    Legend { section: "Rows", mark: |g| g.carnet, style: |p| carnets::glyph_style(true, p), help: "carnet, closed: row dimmed", on: On::Lists(ITEMS) },
+    Legend { section: "Rows", mark: |_| "vrac", style: lists::workspace_style, help: "another workspace, by name", on: On::Lists(CARNETS) },
+    Legend { section: "Rows", mark: |g| g.review, style: dim, help: "review", on: On::Lists(REVIEWS) },
+    Legend { section: "Rows", mark: |_| "draft", style: |p| fg(p.warn), help: "a draft review", on: On::Lists(REVIEWS) },
+    Legend { section: "Rows", mark: |g| g.issue, style: dim, help: "issue", on: On::Lists(ISSUES) },
+    Legend { section: "Tab", mark: |g| g.open, style: |p| lists::tab(true, p).1, help: "tab open", on: On::Lists(ITEMS) },
+    Legend { section: "Tab", mark: |g| g.closed, style: |p| lists::tab(false, p).1, help: "no tab open", on: On::Lists(ITEMS) },
+    Legend { section: "Tab", mark: |g| g.open, style: |p| lists::tab(true, p).1, help: "checked out, tab open", on: On::Lists(REVIEWS) },
+    Legend { section: "Tab", mark: |g| g.closed, style: |p| lists::tab(false, p).1, help: "checked out, no tab open", on: On::Lists(REVIEWS) },
+    Legend { section: "Tab", mark: |g| g.open, style: |p| lists::tab(true, p).1, help: "linked work, a tab open", on: On::Lists(ISSUES) },
+    Legend { section: "Tab", mark: |g| g.closed, style: |p| lists::tab(false, p).1, help: "linked work, no tab open", on: On::Lists(ISSUES) },
+    Legend { section: "Tab", mark: |g| g.spinner[0], style: |p| fg(p.info), help: "pulling", on: On::Lists(WORK) },
+    Legend { section: "Groups", mark: |g| g.folded, style: |p| lists::group_style(p).bold(), help: "folded group", on: On::Lists(WORK) },
+    Legend { section: "Groups", mark: |g| g.unfolded, style: |p| lists::group_style(p).bold(), help: "unfolded group", on: On::Lists(WORK) },
+    Legend { section: "Groups", mark: |_| "GROUP", style: lists::group_style, help: "group name", on: On::Lists(GROUPED) },
+    Legend { section: "Groups", mark: |_| "KEY-1", style: lists::key_style, help: "issue key", on: On::Lists(KEYED) },
+    Legend { section: "Changes", mark: |_| "+", style: |p| symbol('+', p), help: "staged changes", on: On::Lists(WORK) },
+    Legend { section: "Changes", mark: |_| "!", style: |p| symbol('!', p), help: "unstaged changes", on: On::Lists(WORK) },
+    Legend { section: "Changes", mark: |_| "?", style: |p| symbol('?', p), help: "untracked files", on: On::Lists(WORK) },
+    Legend { section: "Checkout", mark: |_| "✘", style: |p| symbol('✘', p), help: "merge conflicts", on: On::Lists(WORK) },
+    Legend { section: "Checkout", mark: |_| "↻", style: |p| symbol('↻', p), help: "rebase, merge or other operation in progress", on: On::Lists(WORK) },
+    Legend { section: "Checkout", mark: |_| "⊟", style: |p| symbol('⊟', p), help: "prunable: directory or .git missing", on: On::Lists(WORK) },
+    Legend { section: "Checkout", mark: |_| "⊞", style: |p| symbol('⊞', p), help: "locked", on: On::Lists(WORK) },
+    Legend { section: "Checkout", mark: |_| "⊘", style: |p| symbol('⊘', p), help: "detached HEAD", on: On::Lists(WORK) },
+    Legend { section: "Checkout", mark: |_| "⚐", style: |p| symbol('⚐', p), help: "branch checked out elsewhere, or at another path", on: On::Lists(WORK) },
+    Legend { section: "Checkout", mark: |_| "/", style: |p| symbol('/', p), help: "branch with no worktree", on: On::Lists(WORK) },
+    Legend { section: "Default branch", mark: |_| "^", style: |p| symbol('^', p), help: "is the main worktree", on: On::Lists(WORK) },
+    Legend { section: "Default branch", mark: |_| "∅", style: |p| symbol('∅', p), help: "no shared history", on: On::Lists(WORK) },
+    Legend { section: "Default branch", mark: |_| "_", style: |p| symbol('_', p), help: "same commit, clean", on: On::Lists(WORK) },
+    Legend { section: "Default branch", mark: |_| "–", style: |p| symbol('–', p), help: "same commit, uncommitted changes", on: On::Lists(WORK) },
+    Legend { section: "Default branch", mark: |_| "⊂", style: |p| symbol('⊂', p), help: "merged", on: On::Lists(WORK) },
+    Legend { section: "Default branch", mark: |_| "✗", style: |p| symbol('✗', p), help: "would conflict when merged", on: On::Lists(WORK) },
+    Legend { section: "Default branch", mark: |_| "↕", style: |p| symbol('↕', p), help: "ahead and behind", on: On::Lists(WORK) },
+    Legend { section: "Default branch", mark: |_| "↑", style: |p| symbol('↑', p), help: "ahead", on: On::Lists(WORK) },
+    Legend { section: "Default branch", mark: |_| "↓", style: |p| symbol('↓', p), help: "behind", on: On::Lists(WORK) },
+    Legend { section: "Remote", mark: |_| "|", style: |p| symbol('|', p), help: "in sync", on: On::Lists(WORK) },
+    Legend { section: "Remote", mark: |_| "⇡", style: |p| symbol('⇡', p), help: "ahead: unpushed commits", on: On::Lists(WORK) },
+    Legend { section: "Remote", mark: |_| "⇣", style: |p| symbol('⇣', p), help: "behind: commits to pull", on: On::Lists(WORK) },
+    Legend { section: "Remote", mark: |_| "⇅", style: |p| symbol('⇅', p), help: "diverged", on: On::Lists(WORK) },
+    Legend { section: "Checks", mark: |g| g.passed, style: |p| checks(Checks::Passed, p), help: "passed", on: On::Lists(WORK) },
+    Legend { section: "Checks", mark: |g| g.running, style: |p| checks(Checks::Running, p), help: "running", on: On::Lists(WORK) },
+    Legend { section: "Checks", mark: |g| g.failed, style: |p| checks(Checks::Failed, p), help: "failed", on: On::Lists(WORK) },
+    Legend { section: "Checks", mark: |g| g.unavailable, style: |p| checks(Checks::Unavailable, p), help: "unavailable", on: On::Lists(WORK) },
+    Legend { section: "Checks", mark: |g| g.passed, style: |p| checks(Checks::Passed, p).add_modifier(Modifier::DIM), help: "dimmed: stale, or a draft", on: On::Lists(WORK) },
+    Legend { section: "Review", mark: |g| g.reviewed, style: lists::review_style, help: "an open review links it", on: On::Lists(ISSUES) },
+    Legend { section: "Decision", mark: |g| g.approval, style: |p| fg(p.approval_pending), help: "waiting for approval", on: On::Lists(WORK) },
+    Legend { section: "Decision", mark: |g| g.changes_requested, style: |p| fg(p.changes_requested), help: "changes requested", on: On::Lists(WORK) },
+    Legend { section: "Decision", mark: |g| g.passed, style: |p| fg(p.ok), help: "approved", on: On::Lists(WORK) },
+    Legend { section: "Merge", mark: |g| g.conflicts, style: |p| fg(p.error), help: "merge conflicts", on: On::Lists(WORK) },
+    Legend { section: "Finished", mark: |g| g.integrated, style: dim, help: "merged into the default branch, row dimmed", on: On::Lists(WORK) },
+    Legend { section: "Finished", mark: |g| g.gone, style: dim, help: "its remote branch was deleted, row dimmed", on: On::Lists(WORK) },
+    Legend { section: "Command log", mark: |_| "✓", style: dim, help: "succeeded", on: On::Global },
+    Legend { section: "Command log", mark: |_| "✗", style: |p| fg(p.error), help: "failed", on: On::Global },
+    Legend { section: "Hint bar", mark: |_| "⟳", style: dim, help: "loading", on: On::Global },
 ];
 
 impl Legend {
@@ -237,6 +277,14 @@ impl Legend {
             .chain(LEGEND.iter().filter(global))
             .filter(|legend| !(legend.mark)(glyphs).is_empty())
             .collect()
+    }
+
+    /// How many lines a legend takes: its marks and a heading for each section.
+    pub fn lines(legend: &[&Legend]) -> usize {
+        let headings = (legend.iter().enumerate())
+            .filter(|&(index, entry)| index == 0 || legend[index - 1].section != entry.section)
+            .count();
+        legend.len() + headings
     }
 }
 

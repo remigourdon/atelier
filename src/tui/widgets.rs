@@ -6,8 +6,8 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 
-use super::app::{Completion, Modal, Popup, finish_hints, popup_hints};
-use super::view::{Palette, offset};
+use super::app::{Completion, MenuEntry, MenuPage, Modal, Popup, finish_hints, popup_hints};
+use super::view::{Legend, Palette, offset};
 use crate::finish::{Line as PlanLine, Plan, Step};
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -20,22 +20,25 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     rect
 }
 
-/// A menu's lines: its entries, then the legend under its heading.
-pub fn menu_lines(entries: usize, legend: usize) -> usize {
-    entries + if legend == 0 { 0 } else { legend + 1 }
-}
-
-/// How many of a menu's lines its popup shows in `area`.
-pub fn menu_rows(lines: usize, area: Rect) -> u16 {
+/// How many lines a menu's popup shows in `area`: enough for its longer page, so switching
+/// pages keeps its size.
+pub fn menu_rows(entries: &[MenuEntry], legend: &[&Legend], area: Rect) -> u16 {
+    let lines = entries.len().max(Legend::lines(legend));
     (lines as u16).min(area.height.saturating_sub(4))
 }
 
 /// A bordered popup with its accept and cancel keys, `hints`, on the bottom border.
-fn popup(frame: &mut Frame, hints: String, title: &str, rect: Rect, palette: &Palette) -> Rect {
+fn popup<'a>(
+    frame: &mut Frame,
+    hints: String,
+    title: impl Into<Line<'a>>,
+    rect: Rect,
+    palette: &Palette,
+) -> Rect {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(palette.accent))
-        .title(format!(" {title} "))
+        .title(title)
         .title_bottom(Line::styled(
             format!(" {hints} "),
             Style::new().fg(palette.dim),
@@ -83,7 +86,13 @@ pub fn modal(frame: &mut Frame, modal: &Modal, palette: &Palette) {
         } => {
             let completing = !completion.options.is_empty();
             let rect = centered(area, width, if completing { 4 } else { 3 });
-            let inner = popup(frame, popup_hints(Popup::Prompt), title, rect, palette);
+            let inner = popup(
+                frame,
+                popup_hints(Popup::Prompt),
+                framed(title),
+                rect,
+                palette,
+            );
             let scroll = input.visual_scroll(inner.width.saturating_sub(1) as usize);
             frame.render_widget(
                 Paragraph::new(input.value()).scroll((0, scroll as u16)),
@@ -108,7 +117,13 @@ pub fn modal(frame: &mut Frame, modal: &Modal, palette: &Palette) {
         Modal::Confirm { title, lines, .. } => {
             let height = (lines.len() as u16 + 2).min(area.height);
             let rect = centered(area, width, height);
-            let inner = popup(frame, popup_hints(Popup::Confirm), title, rect, palette);
+            let inner = popup(
+                frame,
+                popup_hints(Popup::Confirm),
+                framed(title),
+                rect,
+                palette,
+            );
             let text: Vec<Line> = lines.iter().map(|line| Line::raw(line.as_str())).collect();
             frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), inner);
         }
@@ -117,48 +132,45 @@ pub fn modal(frame: &mut Frame, modal: &Modal, palette: &Palette) {
             entries,
             selected,
             legend,
-            peek,
+            page,
+            scroll,
         } => {
-            let lines = menu_lines(entries.len(), legend.len());
-            let rows = menu_rows(lines, area);
+            let rows = menu_rows(entries, legend, area);
             let rect = centered(area, width, rows + 2);
-            let inner = popup(frame, popup_hints(Popup::Menu), title, rect, palette);
-            let marks: Vec<&str> = legend
-                .iter()
-                .map(|legend| (legend.mark)(&palette.glyphs))
-                .collect();
-            let key_width = (entries.iter().map(|e| e.key.as_str()))
-                .chain(marks.iter().copied())
-                .map(|key| key.chars().count())
-                .max()
-                .unwrap_or(0);
-            let entry_lines = entries.iter().enumerate().map(|(index, entry)| {
-                let line = Line::from(vec![
-                    Span::styled(
-                        format!("{:key_width$}  ", entry.key),
-                        Style::new().fg(palette.accent),
-                    ),
-                    Span::raw(entry.label.as_str()),
-                ]);
-                if index == *selected {
-                    line.style(Style::new().bg(palette.selection).bold())
-                } else {
-                    line
+            let (title, hints) = if legend.is_empty() {
+                (framed(title), popup_hints(Popup::Menu))
+            } else {
+                menu_heading(title, *page, palette)
+            };
+            let inner = popup(frame, hints, title, rect, palette);
+            let lines: Vec<Line> = match page {
+                MenuPage::Actions => {
+                    let key_width = (entries.iter())
+                        .map(|entry| entry.key.chars().count())
+                        .max()
+                        .unwrap_or(0);
+                    let lines = entries.iter().enumerate().map(|(index, entry)| {
+                        let line = Line::from(vec![
+                            Span::styled(
+                                format!("{:key_width$}  ", entry.key),
+                                Style::new().fg(palette.accent),
+                            ),
+                            Span::raw(entry.label.as_str()),
+                        ]);
+                        if index == *selected {
+                            line.style(Style::new().bg(palette.selection).bold())
+                        } else {
+                            line
+                        }
+                    });
+                    lines.skip(offset(*selected, rows)).collect()
                 }
-            });
-            let heading = (!legend.is_empty())
-                .then(|| Line::styled("Legend", Style::new().fg(palette.label).bold()));
-            let legend_lines = legend.iter().zip(&marks).map(|(legend, mark)| {
-                Line::from(vec![
-                    Span::styled(format!("{mark:key_width$}"), (legend.style)(palette)),
-                    Span::raw(format!("  {}", legend.help)),
-                ])
-            });
-            let start = (offset(*selected, rows) + peek).min(lines.saturating_sub(rows as usize));
-            let lines: Vec<Line> = (entry_lines.chain(heading).chain(legend_lines))
-                .skip(start)
-                .take(rows as usize)
-                .collect();
+                MenuPage::Legend => legend_lines(legend, palette)
+                    .into_iter()
+                    .skip(*scroll)
+                    .collect(),
+            };
+            let lines: Vec<Line> = lines.into_iter().take(rows as usize).collect();
             frame.render_widget(Paragraph::new(lines), inner);
         }
         Modal::Finish { plan, selected } => {
@@ -178,6 +190,59 @@ pub fn modal(frame: &mut Frame, modal: &Modal, palette: &Palette) {
             plan_popup(frame, plan, *selected, width, palette, |_| Span::raw("  "));
         }
     }
+}
+
+/// A title between the border's spaces.
+fn framed(title: &str) -> Line<'static> {
+    Line::raw(format!(" {title} "))
+}
+
+/// A menu's title naming its two pages, the one shown picked out, and the keys for that page.
+fn menu_heading(title: &str, page: MenuPage, palette: &Palette) -> (Line<'static>, String) {
+    let tab = |label: &str, shown: bool| {
+        let style = if shown {
+            Style::new().fg(palette.accent).bold()
+        } else {
+            Style::new().fg(palette.dim)
+        };
+        Span::styled(label.to_owned(), style)
+    };
+    let title = Line::from(vec![
+        Span::raw(" "),
+        tab(title, page == MenuPage::Actions),
+        Span::raw(" │ "),
+        tab("Legend", page == MenuPage::Legend),
+        Span::raw(" "),
+    ]);
+    let hints = match page {
+        MenuPage::Actions => format!("{} · Tab legend", popup_hints(Popup::Menu)),
+        MenuPage::Legend => "Tab actions · j/k scroll · Esc close".to_owned(),
+    };
+    (title, hints)
+}
+
+/// A legend's lines: each mark in its colour and what it means, under its section's heading.
+fn legend_lines(legend: &[&Legend], palette: &Palette) -> Vec<Line<'static>> {
+    let marks: Vec<&str> = (legend.iter())
+        .map(|legend| (legend.mark)(&palette.glyphs))
+        .collect();
+    let width = marks
+        .iter()
+        .map(|mark| mark.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut lines = Vec::new();
+    for (index, (entry, mark)) in legend.iter().zip(&marks).enumerate() {
+        if index == 0 || legend[index - 1].section != entry.section {
+            let heading = Style::new().fg(palette.label).bold();
+            lines.push(Line::styled(entry.section, heading));
+        }
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {mark:width$}"), (entry.style)(palette)),
+            Span::raw(format!("  {}", entry.help)),
+        ]));
+    }
+    lines
 }
 
 /// A plan's popup, as wide as its longest line, title or keys, so notes are not cut; `mark`
@@ -200,7 +265,7 @@ fn plan_popup<S: Clone>(
     let width = (widest as u16 + 2).max(width).min(area.width);
     let height = (plan.lines.len() as u16 + 2).min(area.height.saturating_sub(2));
     let rect = centered(area, width, height);
-    let inner = popup(frame, hints, &plan.title, rect, palette);
+    let inner = popup(frame, hints, framed(&plan.title), rect, palette);
     let start = offset(selected, inner.height);
     let lines: Vec<Line> = (lines.into_iter().enumerate())
         .skip(start)

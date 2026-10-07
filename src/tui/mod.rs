@@ -516,6 +516,9 @@ mod tests {
         let mut model = loaded(100, 30);
         model.icons = Icons::Nerd;
         update(&mut model, Action::Key(key('?')));
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        update(&mut model, Action::Key(tab));
         update(&mut model, Action::Key(key('>')));
         insta::assert_snapshot!(render_with(&model, 100, 30, Icons::Nerd));
     }

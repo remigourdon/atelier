@@ -12,8 +12,8 @@ use tui_input::backend::crossterm::EventHandler;
 
 use super::app::{
     Action, Binding, Cmd, Completion, Draft, DraftStep, Effect, Feed, Focus, IssueStep, Job,
-    KEYMAP, List, MenuEntry, Modal, Model, On, Panel, Pending, Popup, PopupCmd, Row, Rows, Screen,
-    Search, Snapshot, Source, Submit, Work, WorkKind, lookup, popup_lookup,
+    KEYMAP, List, MenuEntry, MenuPage, Modal, Model, On, Panel, Pending, Popup, PopupCmd, Row,
+    Rows, Screen, Search, Snapshot, Source, Submit, Work, WorkKind, lookup, popup_lookup,
 };
 use super::lists;
 use super::view::{Glyphs, Legend, areas, main_len, offset};
@@ -469,28 +469,38 @@ fn modal_key(model: &mut Model, modal: Modal, key: KeyEvent) -> Vec<Effect> {
             entries,
             mut selected,
             legend,
-            mut peek,
+            mut page,
+            mut scroll,
         } => {
             let last = entries.len().saturating_sub(1);
-            // Past the last entry, `j` scrolls on through the legend and `k` scrolls back first.
-            let lines = widgets::menu_lines(entries.len(), legend.len());
-            let rows = widgets::menu_rows(lines, screen(model)) as usize;
-            let most = lines
-                .saturating_sub(rows)
-                .saturating_sub(offset(last, rows as u16));
-            match popup_lookup(Popup::Menu, &key) {
-                Some(PopupCmd::Accept) => {
+            let lines = Legend::lines(&legend);
+            let rows = widgets::menu_rows(&entries, &legend, screen(model)) as usize;
+            let most = lines.saturating_sub(rows);
+            match (page, popup_lookup(Popup::Menu, &key)) {
+                (_, Some(PopupCmd::Cancel)) => return Vec::new(),
+                (_, Some(PopupCmd::Page)) if !legend.is_empty() => {
+                    page = match page {
+                        MenuPage::Actions => MenuPage::Legend,
+                        MenuPage::Legend => MenuPage::Actions,
+                    };
+                }
+                (MenuPage::Legend, Some(PopupCmd::Down)) => scroll = (scroll + 1).min(most),
+                (MenuPage::Legend, Some(PopupCmd::Up)) => scroll = scroll.saturating_sub(1),
+                (MenuPage::Legend, Some(PopupCmd::Top)) => scroll = 0,
+                (MenuPage::Legend, Some(PopupCmd::Bottom)) => scroll = most,
+                (MenuPage::Legend, _) => {}
+                (MenuPage::Actions, Some(PopupCmd::Accept)) => {
                     let action = entries[selected].action.clone();
                     return update(model, action);
                 }
-                Some(PopupCmd::Cancel) => return Vec::new(),
-                Some(PopupCmd::Down) if selected == last => peek = (peek + 1).min(most),
-                Some(PopupCmd::Down) => selected += 1,
-                Some(PopupCmd::Up) if peek > 0 => peek -= 1,
-                Some(PopupCmd::Up) => selected = selected.saturating_sub(1),
-                Some(PopupCmd::Top) => (selected, peek) = (0, 0),
-                Some(PopupCmd::Bottom) => (selected, peek) = (last, most),
-                Some(PopupCmd::Toggle | PopupCmd::Complete) | None => {
+                (MenuPage::Actions, Some(PopupCmd::Down)) => selected = (selected + 1).min(last),
+                (MenuPage::Actions, Some(PopupCmd::Up)) => selected = selected.saturating_sub(1),
+                (MenuPage::Actions, Some(PopupCmd::Top)) => selected = 0,
+                (MenuPage::Actions, Some(PopupCmd::Bottom)) => selected = last,
+                (
+                    MenuPage::Actions,
+                    Some(PopupCmd::Toggle | PopupCmd::Complete | PopupCmd::Page) | None,
+                ) => {
                     let shortcut = entries
                         .iter()
                         .find(|entry| match key.code {
@@ -508,7 +518,8 @@ fn modal_key(model: &mut Model, modal: Modal, key: KeyEvent) -> Vec<Effect> {
                 entries,
                 selected,
                 legend,
-                peek,
+                page,
+                scroll,
             });
             Vec::new()
         }
@@ -845,7 +856,8 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
                 entries,
                 selected: 0,
                 legend: Legend::of(list.kind(), &Glyphs::new(model.icons)),
-                peek: 0,
+                page: MenuPage::Actions,
+                scroll: 0,
             });
         }
         Cmd::NextScreen => {
@@ -2046,9 +2058,14 @@ pub mod tests {
         }
     }
 
-    fn menu_scroll(model: &Model) -> (usize, usize) {
+    fn menu_scroll(model: &Model) -> (MenuPage, usize, usize) {
         match &model.modal {
-            Some(Modal::Menu { selected, peek, .. }) => (*selected, *peek),
+            Some(Modal::Menu {
+                page,
+                selected,
+                scroll,
+                ..
+            }) => (*page, *selected, *scroll),
             _ => panic!("no menu"),
         }
     }
@@ -2058,21 +2075,17 @@ pub mod tests {
         let mut model = model();
         press(&mut model, "?");
         let legend = menu_legend(&model);
-        assert!(legend.contains(&"checks failed") && legend.contains(&"folded group"));
+        assert!(legend.contains(&"would conflict when merged") && legend.contains(&"folded group"));
         assert!(!legend.contains(&"an open review links it"));
         assert!(
             !legend.contains(&"worktree"),
             "no Unicode glyph for a worktree"
         );
-        assert_eq!(
-            legend.last(),
-            Some(&"hint bar: loading"),
-            "global marks come last"
-        );
+        assert_eq!(legend.last(), Some(&"loading"), "global marks come last");
         press(&mut model, "\x1b4?");
         let legend = menu_legend(&model);
         assert!(legend.contains(&"an open review links it"));
-        assert!(!legend.contains(&"checks failed"));
+        assert!(!legend.contains(&"would conflict when merged"));
         model.icons = Icons::Nerd;
         press(&mut model, "\x1b?");
         assert!(
@@ -2082,7 +2095,7 @@ pub mod tests {
     }
 
     #[test]
-    fn actions_menu_scrolls_on_through_its_legend() {
+    fn actions_menu_pages_between_its_actions_and_its_legend() {
         let mut model = model();
         model.size = (100, 20);
         press(&mut model, "?");
@@ -2093,32 +2106,76 @@ pub mod tests {
             panic!();
         };
         let last = entries.len() - 1;
-        let (lines, rows) = (entries.len() + legend.len() + 1, 16);
-        let most = lines - rows - (last + 1 - rows);
-        press(&mut model, ">");
+        let most = Legend::lines(legend) - 16;
+        use MenuPage::{Actions, Legend as Marks};
+        press(&mut model, ">j");
         assert_eq!(
             menu_scroll(&model),
-            (last, most),
-            "> shows the legend's end"
+            (Actions, last, 0),
+            "j stops at the last action"
         );
-        press(&mut model, "j");
-        assert_eq!(menu_scroll(&model), (last, most), "no further than its end");
-        press(&mut model, "kk");
+        press(&mut model, "\t");
         assert_eq!(
             menu_scroll(&model),
-            (last, most - 2),
-            "k scrolls back first"
+            (Marks, last, 0),
+            "Tab shows the legend"
         );
-        press(&mut model, "j");
+        press(&mut model, "jj");
         assert_eq!(
             menu_scroll(&model),
-            (last, most - 1),
-            "j scrolls on past the last entry"
+            (Marks, last, 2),
+            "j scrolls the legend"
         );
-        press(&mut model, &"k".repeat(most));
-        assert_eq!(menu_scroll(&model), (last - 1, 0), "then moves the cursor");
+        press(&mut model, ">j");
+        assert_eq!(
+            menu_scroll(&model),
+            (Marks, last, most),
+            "no further than its end"
+        );
+        press(&mut model, "k\n");
+        assert_eq!(
+            menu_scroll(&model),
+            (Marks, last, most - 1),
+            "Enter does nothing there"
+        );
         press(&mut model, "<");
-        assert_eq!(menu_scroll(&model), (0, 0));
+        assert_eq!(menu_scroll(&model), (Marks, last, 0));
+        update(
+            &mut model,
+            Action::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)),
+        );
+        assert_eq!(menu_scroll(&model), (Actions, last, 0), "S-Tab goes back");
+    }
+
+    #[test]
+    fn the_legend_heads_each_section_and_keeps_the_work_order() {
+        let mut model = model();
+        press(&mut model, "?");
+        let Some(Modal::Menu { legend, .. }) = &model.modal else {
+            panic!();
+        };
+        let mut sections: Vec<&str> = legend.iter().map(|legend| legend.section).collect();
+        sections.dedup();
+        assert_eq!(
+            sections,
+            [
+                "Row colour",
+                "Rows",
+                "Tab",
+                "Groups",
+                "Changes",
+                "Checkout",
+                "Default branch",
+                "Remote",
+                "Checks",
+                "Decision",
+                "Merge",
+                "Finished",
+                "Command log",
+                "Hint bar"
+            ]
+        );
+        assert_eq!(Legend::lines(legend), legend.len() + sections.len());
     }
 
     #[test]
