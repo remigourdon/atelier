@@ -100,7 +100,7 @@ fn folder(work: &Work) -> (String, String) {
 
 /// A carnet's row after `lead`: its glyph coloured by its `standing`, its date, its summary (else
 /// its folder name after the date, as a placeholder), its group unless `grouped` says a header
-/// shows it, and its issue keys; dimmed throughout when it is closed.
+/// shows it, and its issue keys; dimmed after `lead` when it is closed.
 pub fn row(
     work: &Work,
     lead: Vec<Span<'static>>,
@@ -110,6 +110,7 @@ pub fn row(
     palette: &Palette,
 ) -> Line<'static> {
     let dim = Style::new().fg(palette.dim);
+    let kept = lead.len();
     let mut spans = lead;
     spans.extend(icon(palette.glyphs.carnet, standing.style(palette)));
     let (date, name) = folder(work);
@@ -125,8 +126,9 @@ pub fn row(
         spans.push(Span::raw(" "));
         spans.push(issue_keys(work, tracker, ",", palette));
     }
+    // The lead, such as the tab dot, keeps its colour.
     if standing == Standing::Closed {
-        spans = spans.into_iter().map(|span| span.style(dim)).collect();
+        spans[kept..].iter_mut().for_each(|span| span.style = dim);
     }
     Line::from(spans)
 }
@@ -290,7 +292,7 @@ mod tests {
     use super::*;
     use crate::config::Icons;
     use crate::tui::app::Panel;
-    use crate::tui::lists::key_style;
+    use crate::tui::lists::{key_style, tab};
     use crate::tui::update::tests::{model, with_carnets};
 
     fn titles(model: &Model) -> Vec<String> {
@@ -380,11 +382,16 @@ mod tests {
         assert_eq!(standing, Standing::Closed, "closed wins over elsewhere");
         let lead = vec![tab_mark(false, &palette)];
         let line = row(closed, lead, standing, false, tracker, &palette);
+        assert_eq!(
+            line.spans[0].style,
+            tab(false, &palette).1,
+            "the tab dot kept"
+        );
         assert!(
-            line.spans
+            line.spans[1..]
                 .iter()
                 .all(|span| span.style.fg == Some(palette.dim)),
-            "the row dimmed"
+            "the rest dimmed"
         );
     }
 }

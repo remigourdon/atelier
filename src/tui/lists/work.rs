@@ -250,11 +250,11 @@ impl ListKind for WorkList {
                         spans.push(Span::raw(" "));
                         spans.push(behind);
                     }
-                    // Finished: dimmed, with why.
+                    // Finished: dimmed, with why, all but the tab dot or spinner.
                     if let Some(signal) = finish::signal(work) {
                         spans.push(Span::raw(" "));
                         spans.push(finished_mark(signal, palette));
-                        spans = spans.into_iter().map(|span| span.style(dim)).collect();
+                        spans[2..].iter_mut().for_each(|span| span.style = dim);
                     }
                     Line::from(spans)
                 }
