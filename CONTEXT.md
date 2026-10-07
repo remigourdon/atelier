@@ -19,7 +19,7 @@ Atelier organises git worktrees into zellij sessions, on top of worktrunk (`wt`)
 - **Issue key** — an issue's identifier: `ABC-5` on Jira; on GitHub always `owner/repo#12`, shown as `repo#12` when no other configured repo shares the name. Every item links issues through its own ordered list of issue keys.
 - **State** — an issue's normalised progress: `todo`, `in_progress` or `done`.
 - **Section** — an ordered rule that places issues in an Issues sub-tab; first match wins.
-- **Linked work** — every item, worktree or carnet, that links an issue's key, in any group.
+- **Linked work** — of an issue: every item, worktree or carnet, open or closed, that links its key, in any group. Of an item: its group's members and the linked work of its issue keys.
 - **Finished worktree** — a worktree other than a main one whose work is merged, as of the last fetch: worktrunk reports its branch integrated into the default branch, or its branch's upstream is gone. Integrated wins when both hold. The TUI says merged and remote branch deleted.
-- **Finish plan** — the toggleable lines `f` shows for a group, a workspace or an issue (the whole groups of its linked work, and its linked items in no group alone): remove each finished worktree, close each open carnet of the group, pull each main worktree, and why the rest stays.
+- **Finish plan** — the toggleable lines `f` shows for a group, a workspace or an issue (its linked work alone, never the rest of their groups): remove each finished worktree, close each open carnet, pull each main worktree, and why the rest stays.
 - **Command log** — the TUI's record of every external command atelier ran and its result.
