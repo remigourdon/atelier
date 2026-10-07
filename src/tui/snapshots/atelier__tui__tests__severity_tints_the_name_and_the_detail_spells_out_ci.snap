@@ -1,5 +1,6 @@
 ---
 source: src/tui/mod.rs
+assertion_line: 626
 expression: terminal.backend().to_string()
 ---
 "╭[1] Workspaces │ Repos────────────────╮╭ Main ────────────────────────────────────────────────────────────────────────╮"
@@ -13,14 +14,14 @@ expression: terminal.backend().to_string()
 "│  ◉ api:ABC-1-login                   ││Changes     ! unstaged changes                                                │"
 "│  ○ web:ABC-1-form                    ││            +0 −0 lines                                                       │"
 "│○ api:main                            ││Remote      no upstream                                                       │"
-"│                                      ││Commit      abc1234 Commit ()                                                 │"
 "│                                      ││Checks      ✖ failed · stale: local commits not pushed                        │"
 "│                                      ││Review      #27                                                               │"
 "│                                      ││Decision    ± changes requested                                               │"
 "│                                      ││Merge       mergeable                                                         │"
-"╰──────────────────────────────────────╯│                                                                              │"
-"╭[3] To review │ Mine──────────────────╮│Recent commits                                                                │"
-"│  api#2 Change 2 @alice               ││abc1234 Add login (2 hours ago, R)                                            │"
+"│                                      ││                                                                              │"
+"╰──────────────────────────────────────╯│Recent commits                                                                │"
+"╭[3] To review │ Mine──────────────────╮│abc1234 Add login (2 hours ago, R)                                            │"
+"│  api#2 Change 2 @alice               ││                                                                              │"
 "│  org/other#1 Change 1 @alice         ││                                                                              │"
 "│                                      │╰──────────────────────────────────────────────────────────────────────────────╯"
 "│                                      │╭ Command log ─────────────────────────────────────────────────────────────────╮"

@@ -649,8 +649,8 @@ pub(crate) fn finished_label(signal: Signal) -> &'static str {
 }
 
 /// A worktree's state in the detail, one fact a line, each mark with its meaning in words:
-/// its tab, changes, checkout, the default branch, the remote, its commit, checks, review,
-/// decision, merge and whether it is finished.
+/// its tab, changes, checkout, the default branch, the remote, checks, review, decision, merge
+/// and whether it is finished.
 fn tree_detail(
     tree: &Worktree,
     tab: bool,
@@ -713,15 +713,6 @@ fn tree_detail(
         }
     };
     pairs.push(pair("Remote", remote));
-
-    pairs.push(pair(
-        "Commit",
-        vec![
-            subtle(format!("{} ", tree.short_sha), palette),
-            Span::raw(tree.subject.clone()),
-            subtle(format!(" ({})", tree.committed_at), palette),
-        ],
-    ));
 
     let ci = tree.ci.as_ref();
     if let Some((ci, checks)) = ci.and_then(|ci| Some((ci, ci.checks?))) {
@@ -892,9 +883,6 @@ mod tests {
             ahead_of_default: Some(3),
             default_branch: Some("main".into()),
             upstream: Some((1, 2)),
-            short_sha: "a1b2c3d".into(),
-            subject: "Accept bounds".into(),
-            committed_at: "2 hours ago".into(),
             ci: Some(Ci {
                 state: Some(CiState::Conflicts),
                 checks: Some(Checks::Passed),
@@ -920,7 +908,6 @@ mod tests {
                 "Checkout: ↻ rebase, merge or other operation in progress",
                 "Default branch: ↑ ahead by 3 commits (main)",
                 "Remote: ⇅ diverged: 1 to push, 2 to pull",
-                "Commit: a1b2c3d Accept bounds (2 hours ago)",
                 "Checks: ✔ passed · stale: local commits not pushed",
                 "Review: #464",
                 "Decision: ◇ waiting for approval",
@@ -937,7 +924,6 @@ mod tests {
                 "Tab: ◐ pulling",
                 "Changes: clean",
                 "Remote: no upstream",
-                "Commit:   ()",
                 "Finished: ⊂ merged into the default branch (f to finish)",
             ]
         );
@@ -957,7 +943,7 @@ mod tests {
             ..clean
         };
         assert_eq!(
-            facts(&unchecked, false, false)[4..],
+            facts(&unchecked, false, false)[3..],
             [
                 "Review: #7 draft",
                 "Merge: mergeable",
