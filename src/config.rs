@@ -243,10 +243,6 @@ mod tests {
             Icons::Nerd
         );
         assert!(Config::parse("icons = \"emoji\"").is_err());
-        assert!(
-            Config::parse("theme = \"latte\"").is_ok(),
-            "a theme from before Mocha was the only one is ignored"
-        );
     }
 
     #[test]

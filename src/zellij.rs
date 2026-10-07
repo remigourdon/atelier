@@ -72,7 +72,7 @@ fn kdl_string(value: &str) -> String {
 /// The row under the tab bar: zjstatus running `atelier statusline` in the focused pane's
 /// directory, so it follows the visible tab. Found through `PATH`, which stays current across
 /// updates where the binary's own store path would not. The whole row takes `background`, the
-/// theme's mantle that zellij's catppuccin tab bar is drawn on, so the two read as one header.
+/// Mocha's mantle that zellij's catppuccin tab bar is drawn on, so the two read as one header.
 pub fn info_bar(zjstatus: &Path, background: &str) -> String {
     let location = kdl_string(&format!("file:{}", zjstatus.display()));
     format!(
