@@ -255,6 +255,7 @@ pub const LEGEND: &[Legend] = &[
     Legend { section: "Checks", mark: |g| g.failed, style: |p| checks(Checks::Failed, p), help: "failed", on: On::Lists(WORK) },
     Legend { section: "Checks", mark: |g| g.unavailable, style: |p| checks(Checks::Unavailable, p), help: "unavailable", on: On::Lists(WORK) },
     Legend { section: "Checks", mark: |g| g.passed, style: |p| checks(Checks::Passed, p).add_modifier(Modifier::DIM), help: "dimmed: stale, or a draft", on: On::Lists(WORK) },
+    Legend { section: "Review", mark: |_| "draft", style: dim, help: "a draft review, its checks dimmed", on: On::Lists(WORK) },
     Legend { section: "Review", mark: |g| g.reviewed, style: lists::review_style, help: "an open review links it", on: On::Lists(ISSUES) },
     Legend { section: "Decision", mark: |g| g.approval, style: |p| fg(p.approval_pending), help: "waiting for approval", on: On::Lists(WORK) },
     Legend { section: "Decision", mark: |g| g.changes_requested, style: |p| fg(p.changes_requested), help: "changes requested", on: On::Lists(WORK) },

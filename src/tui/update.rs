@@ -2168,6 +2168,7 @@ pub mod tests {
                 "Default branch",
                 "Remote",
                 "Checks",
+                "Review",
                 "Decision",
                 "Merge",
                 "Finished",
