@@ -104,7 +104,7 @@ impl Glyphs {
                 changes: "±",
                 spinner,
             },
-            // Nerd Fonts: fa-desktop, oct-repo, dev-git_branch, fa-home, fa-book, oct-git_pull_request,
+            // Nerd Fonts: fa-desktop, oct-repo, dev-git_branch, fa-book, oct-git_pull_request,
             // oct-issue_opened, fa-dot_circle_o, fa-circle_o, fa-folder, fa-folder_open,
             // oct-git_merge, fa-chain_broken, oct-check, oct-x, oct-clock, oct-question, oct-diff.
             Icons::Nerd => Self {
