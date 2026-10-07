@@ -728,7 +728,9 @@ pub mod tests {
         assert_eq!(carnets[1].readme.map(|stamp| stamp.len), Some(18));
         assert_eq!(carnets[2].readme, None);
         assert_eq!(self::carnets(&root.join("missing")).scan().unwrap(), []);
-        let read = |name: &str| self::carnets(root).read(&root.join(name));
+        // Canonical, as recorded paths are: macOS's `/var` is a symlink.
+        let canonical = root.canonicalize().unwrap();
+        let read = |name: &str| self::carnets(root).read(&canonical.join(name));
         assert_eq!(read("2026-03-04-notes").as_ref(), carnets.first());
         assert_eq!(read("2026-05-05-not-git"), None);
         assert_eq!(read("undated"), None);
