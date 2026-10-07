@@ -15,7 +15,7 @@ use super::app::{
     KEYMAP, List, MenuEntry, MenuPage, Modal, Model, On, Panel, Pending, Popup, PopupCmd, Row,
     Rows, Screen, Search, Snapshot, Source, Submit, Work, WorkKind, lookup, popup_lookup,
 };
-use super::lists;
+use super::lists::{self, Target};
 use super::view::{Glyphs, Legend, areas, main_len, offset};
 use super::widgets;
 use crate::carnet::slug;
@@ -247,11 +247,8 @@ impl Keep {
     fn of(model: &Model) -> Self {
         let selected = (model.lists().into_iter())
             .filter_map(|list| {
-                let id = lists::of(list)
-                    .ids(model, list)
-                    .into_iter()
-                    .nth(model.index(list))?;
-                Some((list, id))
+                let row = model.rows(list).into_iter().nth(model.index(list))?;
+                Some((list, row.id))
             })
             .collect();
         Self(selected)
@@ -261,8 +258,8 @@ impl Keep {
     /// those of the workspace already restored.
     fn restore(self, model: &mut Model) {
         for (list, id) in self.0 {
-            let ids = lists::of(list).ids(model, list);
-            if let Some(index) = ids.iter().position(|other| *other == id) {
+            let rows = model.rows(list);
+            if let Some(index) = rows.iter().position(|row| row.id == id) {
                 model.selected.insert(list, index);
             }
         }
@@ -337,10 +334,10 @@ fn keep_ci(snapshot: &mut Snapshot, old: &Snapshot) {
     }
 }
 
-/// The active list's selected item, else the Work list's.
-fn selected(model: &Model) -> Option<&Work> {
-    let list = model.active();
-    (lists::of(list).item(model, list)).or_else(|| lists::of(List::Work).item(model, List::Work))
+/// The active list's selected item, whose README and commits the main view shows.
+fn selected(model: &Model) -> Option<Work> {
+    let row = lists::selection(model, model.active())?;
+    row.target.item().cloned()
 }
 
 /// Fetches the selected item's recent commits unless they are loaded, and a carnet's README
@@ -755,12 +752,21 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
             model.sub.insert(model.panel, tabs[next]);
             model.scroll = (0, 0);
         }
-        Cmd::Activate => return lists::of(list).activate(model, list),
-        Cmd::Enter => {
-            if !lists::of(list).enter(model, list) {
-                model.focus = Focus::Main;
-            }
-        }
+        Cmd::Activate
+        | Cmd::Enter
+        | Cmd::New
+        | Cmd::Edit
+        | Cmd::Move
+        | Cmd::Remove
+        | Cmd::Close
+        | Cmd::ToggleCarnet
+        | Cmd::Pull
+        | Cmd::Search
+        | Cmd::Finish
+        | Cmd::Tool
+        | Cmd::Browse
+        | Cmd::CopyMenu
+        | Cmd::CopyPath => return on_selection(model, list, cmd),
         Cmd::CollapseAll | Cmd::ExpandAll => {
             for row in model.work_rows() {
                 if let Row::Group { key, .. } = row {
@@ -768,53 +774,6 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
                 }
             }
             clamp_all(model);
-        }
-        Cmd::New => return lists::of(list).create(model, list),
-        Cmd::Edit => return lists::of(list).edit(model, list),
-        Cmd::Move => return lists::of(list).move_to(model, list),
-        Cmd::Remove => return lists::of(list).remove(model, list),
-        Cmd::Close | Cmd::ToggleCarnet | Cmd::Pull | Cmd::Search => {
-            return lists::of(list).command(model, list, cmd);
-        }
-        Cmd::Finish => return lists::of(list).finish(model, list),
-        Cmd::Tool if matches!(list, List::Work | List::Carnets) => {
-            if let Some(work) = lists::of(list).item(model, list) {
-                let branch = work.tree().map(|_| work.branch());
-                let path = work.path.clone();
-                return vec![Effect::Tool { path, branch }];
-            }
-        }
-        Cmd::Tool => {}
-        Cmd::Browse => {
-            return match lists::of(list).url(model, list) {
-                Some(url) => vec![run(model, Job::Browse(url))],
-                None => note(model, "no forge URL for this selection"),
-            };
-        }
-        Cmd::CopyMenu => {
-            let mut entries = Vec::new();
-            for (key, label, value) in [
-                ("p", "path", lists::of(list).copy_path(model, list)),
-                ("b", "branch", lists::of(list).branch(model, list)),
-                ("u", "URL", lists::of(list).url(model, list)),
-            ] {
-                if let Some(value) = value {
-                    entries.push(MenuEntry {
-                        key: key.into(),
-                        label: format!("{label}: {value}"),
-                        action: Action::Copy(value),
-                    });
-                }
-            }
-            if !entries.is_empty() {
-                model.modal = Some(Modal::menu("Copy", entries));
-            }
-        }
-        Cmd::CopyPath => {
-            let kind = lists::of(list);
-            if let Some(path) = (kind.copy_path(model, list)).or_else(|| kind.url(model, list)) {
-                return update(model, Action::Copy(path));
-            }
         }
         Cmd::Filter if !in_main => model.filtering = Some(list),
         Cmd::Filter => {}
@@ -862,7 +821,7 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
         Cmd::Back => {
             if in_main {
                 model.focus = Focus::Panel(model.panel);
-            } else if model.filters.remove(&list).is_some() || lists::of(list).back(model, list) {
+            } else if model.filters.remove(&list).is_some() || lists::of(list).back(model) {
                 select(model, list, 0);
                 return commits(model);
             }
@@ -872,6 +831,66 @@ fn command(model: &mut Model, cmd: Cmd) -> Vec<Effect> {
         }
     }
     Vec::new()
+}
+
+/// A command on the active list's selection, resolved once.
+fn on_selection(model: &mut Model, list: List, cmd: Cmd) -> Vec<Effect> {
+    let kind = lists::of(list);
+    let (selected, path, branch, url) = match lists::selection(model, list) {
+        Some(row) => (Some(row.target.into_owned()), row.path, row.branch, row.url),
+        None => (None, None, None, None),
+    };
+    match cmd {
+        Cmd::Activate => kind.activate(model, selected),
+        Cmd::Enter => {
+            if !kind.enter(model, selected) {
+                model.focus = Focus::Main;
+            }
+            Vec::new()
+        }
+        Cmd::New => kind.create(model, selected),
+        Cmd::Edit => kind.edit(model, selected),
+        Cmd::Move => kind.move_to(model, selected),
+        Cmd::Remove => kind.remove(model, selected),
+        Cmd::Finish => kind.finish(model, selected),
+        Cmd::Tool => match selected.as_ref().and_then(Target::item) {
+            Some(work) => {
+                let branch = work.tree().map(|_| work.branch());
+                let path = work.path.clone();
+                vec![Effect::Tool { path, branch }]
+            }
+            None => Vec::new(),
+        },
+        Cmd::Browse => match url {
+            Some(url) => vec![run(model, Job::Browse(url))],
+            None => note(model, "no forge URL for this selection"),
+        },
+        Cmd::CopyMenu => {
+            let mut entries = Vec::new();
+            for (key, label, value) in [
+                ("p", "path", path),
+                ("b", "branch", branch),
+                ("u", "URL", url),
+            ] {
+                if let Some(value) = value {
+                    entries.push(MenuEntry {
+                        key: key.into(),
+                        label: format!("{label}: {value}"),
+                        action: Action::Copy(value),
+                    });
+                }
+            }
+            if !entries.is_empty() {
+                model.modal = Some(Modal::menu("Copy", entries));
+            }
+            Vec::new()
+        }
+        Cmd::CopyPath => match path.or(url) {
+            Some(path) => update(model, Action::Copy(path)),
+            None => Vec::new(),
+        },
+        cmd => kind.command(model, selected, cmd),
+    }
 }
 
 /// The whole terminal, for laying out outside a draw.
@@ -1035,6 +1054,41 @@ pub mod tests {
     use crate::reviews::Role;
     use crate::state::Repo;
     use crate::worktrunk::Forge;
+
+    /// The active list's selection, as the tests read it.
+    impl Model {
+        fn target(&self) -> Option<Target<'static>> {
+            lists::selection(self, self.active()).map(|row| row.target.into_owned())
+        }
+
+        pub fn carnet(&self) -> Option<Work> {
+            self.target()?.item().cloned()
+        }
+
+        pub fn review(&self) -> Option<crate::reviews::Review> {
+            match self.target()? {
+                Target::Review(review) => Some(review.into_owned()),
+                _ => None,
+            }
+        }
+
+        pub fn issue(&self) -> Option<crate::issues::Issue> {
+            match self.target()? {
+                Target::Issue(issue) => Some(issue.into_owned()),
+                _ => None,
+            }
+        }
+
+        pub fn targets(&self) -> Vec<Work> {
+            (self.target().iter())
+                .flat_map(|target| target.items().into_iter().cloned())
+                .collect()
+        }
+
+        pub fn carnet_hits(&self) -> Option<&Vec<String>> {
+            self.search_hits(self.active(), &self.carnet()?)
+        }
+    }
 
     /// Links in `group` to the issue keys in `name`, as the default pattern finds them.
     fn linking(group: &str, name: &str) -> Links {
@@ -1264,6 +1318,23 @@ pub mod tests {
             [Effect::Run(Job::Commits("/src/web.ABC-1-form".into()))]
         );
         assert!(press(&mut model, "k").is_empty(), "already loaded");
+    }
+
+    #[test]
+    fn lists_without_items_fetch_no_commits_or_readme() {
+        let mut model = with_carnets(model());
+        press(&mut model, "j");
+        for keys in ["1", "]", "3", "]", "4"] {
+            let effects = press(&mut model, keys);
+            let fetches: Vec<&Effect> = (effects.iter())
+                .filter(|effect| matches!(effect, Effect::Run(Job::Commits(_) | Job::Readme(_))))
+                .collect();
+            assert!(
+                fetches.is_empty(),
+                "{keys} on {:?}: {fetches:?}",
+                model.active()
+            );
+        }
     }
 
     #[test]

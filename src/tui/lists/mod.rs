@@ -22,72 +22,165 @@ use super::app::{
 use super::update::{run, workspace_menu};
 use super::view::Palette;
 use crate::finish::Scope;
+use crate::issues::Issue;
 use crate::issues::TrackerConfig;
 use crate::links::{Group, group_text};
+use crate::reviews::Review;
+use crate::state::Repo;
 
-/// A kind of list. Methods take the `List`, so the issue sections share one implementation;
-/// operations a list doesn't support do nothing.
+/// A list's row, resolved once per update or frame: its identity, which keeps the selection
+/// across a refresh, its line, and what it offers.
+pub struct ListRow<'a> {
+    pub id: String,
+    pub line: Line<'a>,
+    /// What the list's verbs act on and its detail describes.
+    pub target: Target<'a>,
+    /// What `y` copies.
+    pub path: Option<String>,
+    pub branch: Option<String>,
+    /// What `o` opens.
+    pub url: Option<String>,
+}
+
+/// What a row stands for. Rows borrow it from the model; the verbs take it owned, to change the
+/// model.
+#[derive(Debug, Clone)]
+pub enum Target<'a> {
+    Workspace(Cow<'a, str>),
+    Repo(Cow<'a, Repo>),
+    Review(Cow<'a, Review>),
+    Issue(Cow<'a, Issue>),
+    Item(Cow<'a, Work>),
+    /// A Work group header; `key` is its fold's.
+    Group {
+        key: String,
+        group: Group,
+        members: Vec<Cow<'a, Work>>,
+    },
+}
+
+impl Target<'_> {
+    pub fn into_owned(self) -> Target<'static> {
+        match self {
+            Target::Workspace(name) => Target::Workspace(Cow::Owned(name.into_owned())),
+            Target::Repo(repo) => Target::Repo(Cow::Owned(repo.into_owned())),
+            Target::Review(review) => Target::Review(Cow::Owned(review.into_owned())),
+            Target::Issue(issue) => Target::Issue(Cow::Owned(issue.into_owned())),
+            Target::Item(work) => Target::Item(Cow::Owned(work.into_owned())),
+            Target::Group {
+                key,
+                group,
+                members,
+            } => Target::Group {
+                key,
+                group,
+                members: (members.into_iter())
+                    .map(|work| Cow::Owned(work.into_owned()))
+                    .collect(),
+            },
+        }
+    }
+
+    /// The item whose README and commits the main view shows.
+    pub fn item(&self) -> Option<&Work> {
+        match self {
+            Target::Item(work) => Some(work),
+            _ => None,
+        }
+    }
+
+    /// The items the row covers: its item, or its group's members.
+    pub fn items(&self) -> Vec<&Work> {
+        match self {
+            Target::Item(work) => vec![work],
+            Target::Group { members, .. } => members.iter().map(|work| work.as_ref()).collect(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// The selected row of a list's `rows`; `None` when it is empty.
+pub fn selected<'r, 'a>(
+    model: &Model,
+    list: List,
+    rows: &'r [ListRow<'a>],
+) -> Option<&'r ListRow<'a>> {
+    rows.get(model.index(list).min(rows.len().saturating_sub(1)))
+}
+
+/// A list's selected row, resolved for an update.
+pub fn selection(model: &Model, list: List) -> Option<ListRow<'_>> {
+    let mut rows = model.rows(list);
+    let index = model.index(list).min(rows.len().checked_sub(1)?);
+    Some(rows.swap_remove(index))
+}
+
+/// A kind of list. Its verbs receive the selected row's target, resolved once; operations a list
+/// doesn't support do nothing.
 pub trait ListKind: Sync {
     /// What the keymap calls it.
     fn kind(&self) -> Kind;
+    /// Takes the `List`, so the issue sections share one implementation.
     fn title<'a>(&self, model: &'a Model, list: List) -> &'a str;
-    fn len(&self, model: &Model, list: List) -> usize;
-    /// Each row's identity, which keeps the selection across a refresh.
-    fn ids(&self, model: &Model, list: List) -> Vec<String>;
-    fn rows<'a>(&self, model: &'a Model, palette: &Palette, list: List) -> Vec<Line<'a>>;
+    /// The rows, in order; the `List` says which section or which reviews.
+    fn rows<'a>(&self, model: &'a Model, palette: &Palette, list: List) -> Vec<ListRow<'a>>;
     /// The key/value detail of the selection, atop the main view, coloured as its row is.
-    fn detail(&self, model: &Model, palette: &Palette, list: List) -> Vec<(String, Line<'static>)>;
+    fn detail(
+        &self,
+        model: &Model,
+        palette: &Palette,
+        target: &Target,
+    ) -> Vec<(String, Line<'static>)>;
     /// What an empty list says.
-    fn empty(&self, model: &Model, _list: List) -> &'static str {
+    fn empty(&self, model: &Model) -> &'static str {
         if model.loaded {
             "nothing here"
         } else {
             "loading…"
         }
     }
-    /// The selected item whose README and commits the main view shows.
-    fn item<'a>(&self, _model: &'a Model, _list: List) -> Option<&'a Work> {
-        None
-    }
-    fn activate(&self, _model: &mut Model, _list: List) -> Vec<Effect> {
+    fn activate(&self, _model: &mut Model, _selected: Option<Target<'static>>) -> Vec<Effect> {
         Vec::new()
     }
     /// `Enter` on the selection; `false` when it focuses the main view instead.
-    fn enter(&self, _model: &mut Model, _list: List) -> bool {
+    fn enter(&self, _model: &mut Model, _selected: Option<Target<'static>>) -> bool {
         false
     }
-    fn create(&self, _model: &mut Model, _list: List) -> Vec<Effect> {
+    fn create(&self, _model: &mut Model, _selected: Option<Target<'static>>) -> Vec<Effect> {
         Vec::new()
     }
-    fn edit(&self, _model: &mut Model, _list: List) -> Vec<Effect> {
+    fn edit(&self, _model: &mut Model, _selected: Option<Target<'static>>) -> Vec<Effect> {
         Vec::new()
     }
-    fn move_to(&self, _model: &mut Model, _list: List) -> Vec<Effect> {
+    fn move_to(&self, _model: &mut Model, _selected: Option<Target<'static>>) -> Vec<Effect> {
         Vec::new()
     }
-    fn remove(&self, _model: &mut Model, _list: List) -> Vec<Effect> {
+    fn remove(&self, _model: &mut Model, _selected: Option<Target<'static>>) -> Vec<Effect> {
         Vec::new()
     }
     /// `f`: fetches, then shows the finish plan of what the selection covers.
-    fn finish(&self, _model: &mut Model, _list: List) -> Vec<Effect> {
+    fn finish(&self, _model: &mut Model, _selected: Option<Target<'static>>) -> Vec<Effect> {
         Vec::new()
     }
     /// `Esc` on the list, once its filter is clear; `false` when it does nothing.
-    fn back(&self, _model: &mut Model, _list: List) -> bool {
+    fn back(&self, _model: &mut Model) -> bool {
         false
     }
     /// A command only some lists act on, such as `x`, `c` or `p`; the others ignore it.
-    fn command(&self, _model: &mut Model, _list: List, _cmd: Cmd) -> Vec<Effect> {
+    fn command(
+        &self,
+        _model: &mut Model,
+        _selected: Option<Target<'static>>,
+        _cmd: Cmd,
+    ) -> Vec<Effect> {
         Vec::new()
     }
-    fn copy_path(&self, _model: &Model, _list: List) -> Option<String> {
-        None
-    }
-    fn branch(&self, _model: &Model, _list: List) -> Option<String> {
-        None
-    }
-    fn url(&self, _model: &Model, _list: List) -> Option<String> {
-        None
+}
+
+impl Model {
+    /// A list's rows, resolved for an update, which shows none of their lines.
+    pub fn rows(&self, list: List) -> Vec<ListRow<'_>> {
+        of(list).rows(self, &Palette::new(self.icons), list)
     }
 }
 

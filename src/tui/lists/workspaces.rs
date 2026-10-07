@@ -1,9 +1,11 @@
 //! Panel 1's Workspaces list.
 
+use std::borrow::Cow;
+
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, pair, plan, subtle, work};
+use super::{ListKind, ListRow, Target, pair, plan, subtle, work};
 use crate::finish::Scope;
 use crate::tui::app::{Action, Effect, Job, Kind, List, Model, Submit};
 use crate::tui::update::{confirm, switch_workspace, update};
@@ -40,15 +42,7 @@ impl ListKind for Workspaces {
         "Workspaces"
     }
 
-    fn len(&self, model: &Model, _list: List) -> usize {
-        model.workspaces().len()
-    }
-
-    fn ids(&self, model: &Model, _list: List) -> Vec<String> {
-        model.workspaces().into_iter().cloned().collect()
-    }
-
-    fn rows<'a>(&self, model: &'a Model, palette: &Palette, _list: List) -> Vec<Line<'a>> {
+    fn rows<'a>(&self, model: &'a Model, palette: &Palette, _list: List) -> Vec<ListRow<'a>> {
         let dim = Style::new().fg(palette.dim);
         model
             .workspaces()
@@ -69,7 +63,14 @@ impl ListKind for Workspaces {
                 if open > 0 {
                     spans.push(Span::styled(format!(" {open} open"), dim));
                 }
-                Line::from(spans)
+                ListRow {
+                    id: name.clone(),
+                    line: Line::from(spans),
+                    target: Target::Workspace(Cow::Borrowed(name)),
+                    path: Some(name.clone()),
+                    branch: None,
+                    url: None,
+                }
             })
             .collect()
     }
@@ -78,11 +79,12 @@ impl ListKind for Workspaces {
         &self,
         model: &Model,
         palette: &Palette,
-        _list: List,
+        target: &Target,
     ) -> Vec<(String, Line<'static>)> {
-        let Some(name) = model.workspace() else {
+        let Target::Workspace(name) = target else {
             return Vec::new();
         };
+        let name = name.as_ref();
         let work: Vec<_> = model
             .snapshot
             .work
@@ -122,8 +124,8 @@ impl ListKind for Workspaces {
         pairs
     }
 
-    fn activate(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        let Some(name) = model.workspace().map(str::to_owned) else {
+    fn activate(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
+        let Some(name) = name(selected) else {
             return Vec::new();
         };
         if model.snapshot.here.is_some() {
@@ -133,12 +135,12 @@ impl ListKind for Workspaces {
         }
     }
 
-    fn create(&self, model: &mut Model, _list: List) -> Vec<Effect> {
+    fn create(&self, model: &mut Model, _selected: Option<Target<'static>>) -> Vec<Effect> {
         update(model, Action::ask("New workspace", "", Submit::Workspace))
     }
 
-    fn remove(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        let Some(name) = model.workspace().map(str::to_owned) else {
+    fn remove(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
+        let Some(name) = name(selected) else {
             return Vec::new();
         };
         let lines = vec![format!("Remove the workspace {name}?")];
@@ -151,14 +153,18 @@ impl ListKind for Workspaces {
     }
 
     /// A sweep of the workspace.
-    fn finish(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        match model.workspace().map(str::to_owned) {
+    fn finish(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
+        match name(selected) {
             Some(name) => plan(model, Scope::Workspace(name)),
             None => Vec::new(),
         }
     }
+}
 
-    fn copy_path(&self, model: &Model, _list: List) -> Option<String> {
-        model.workspace().map(Into::into)
+/// The selected workspace's name.
+fn name(selected: Option<Target>) -> Option<String> {
+    match selected? {
+        Target::Workspace(name) => Some(name.into_owned()),
+        _ => None,
     }
 }

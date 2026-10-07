@@ -1,9 +1,11 @@
 //! Panel 1's Repos list.
 
+use std::borrow::Cow;
+
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, pair, workspace_span};
+use super::{ListKind, ListRow, Target, pair, workspace_span};
 use crate::state::Repo;
 use crate::tui::app::{Action, Effect, Job, Kind, List, Model, Submit};
 use crate::tui::update::{confirm, note, update, workspace_menu};
@@ -19,9 +21,13 @@ impl Model {
             .filter(|repo| self.matches(List::Repos, &[&repo.name(), &repo.path.to_string_lossy()]))
             .collect()
     }
+}
 
-    pub fn repo(&self) -> Option<&Repo> {
-        self.repos().get(self.index(List::Repos)).copied()
+/// The selected repo.
+fn repo(selected: Option<Target>) -> Option<Repo> {
+    match selected? {
+        Target::Repo(repo) => Some(repo.into_owned()),
+        _ => None,
     }
 }
 
@@ -34,17 +40,7 @@ impl ListKind for Repos {
         "Repos"
     }
 
-    fn len(&self, model: &Model, _list: List) -> usize {
-        model.repos().len()
-    }
-
-    fn ids(&self, model: &Model, _list: List) -> Vec<String> {
-        (model.repos().into_iter())
-            .map(|repo| repo.path.display().to_string())
-            .collect()
-    }
-
-    fn rows<'a>(&self, model: &'a Model, palette: &Palette, _list: List) -> Vec<Line<'a>> {
+    fn rows<'a>(&self, model: &'a Model, palette: &Palette, _list: List) -> Vec<ListRow<'a>> {
         let dim = Style::new().fg(palette.dim);
         model
             .repos()
@@ -53,7 +49,16 @@ impl ListKind for Repos {
                 let mut spans: Vec<Span> = icon(palette.glyphs.repo, dim).into_iter().collect();
                 spans.push(Span::raw(repo.name()));
                 spans.push(Span::styled(format!(" → {}", repo.default_workspace), dim));
-                Line::from(spans)
+                let path = repo.path.display().to_string();
+                ListRow {
+                    id: path.clone(),
+                    line: Line::from(spans),
+                    target: Target::Repo(Cow::Borrowed(repo)),
+                    path: Some(path),
+                    branch: None,
+                    // The repo's forge page.
+                    url: (model.snapshot.forges.get(&repo.path)).map(|forge| forge.url.clone()),
+                }
             })
             .collect()
     }
@@ -62,9 +67,9 @@ impl ListKind for Repos {
         &self,
         model: &Model,
         palette: &Palette,
-        _list: List,
+        target: &Target,
     ) -> Vec<(String, Line<'static>)> {
-        let Some(repo) = model.repo() else {
+        let Target::Repo(repo) = target else {
             return Vec::new();
         };
         let count = model
@@ -94,12 +99,12 @@ impl ListKind for Repos {
         ]
     }
 
-    fn create(&self, model: &mut Model, _list: List) -> Vec<Effect> {
+    fn create(&self, model: &mut Model, _selected: Option<Target<'static>>) -> Vec<Effect> {
         note(model, "register repos with `atelier add <path>`")
     }
 
-    fn edit(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        let Some(repo) = model.repo() else {
+    fn edit(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
+        let Some(repo) = repo(selected) else {
             return Vec::new();
         };
         let action = Action::ask(
@@ -110,8 +115,8 @@ impl ListKind for Repos {
         update(model, action)
     }
 
-    fn move_to(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        let Some(repo) = model.repo().cloned() else {
+    fn move_to(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
+        let Some(repo) = repo(selected) else {
             return Vec::new();
         };
         workspace_menu(
@@ -125,8 +130,8 @@ impl ListKind for Repos {
         )
     }
 
-    fn remove(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        let Some(repo) = model.repo().cloned() else {
+    fn remove(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
+        let Some(repo) = repo(selected) else {
             return Vec::new();
         };
         confirm(
@@ -138,16 +143,5 @@ impl ListKind for Repos {
             ],
             Job::Forget(repo.path),
         )
-    }
-
-    fn copy_path(&self, model: &Model, _list: List) -> Option<String> {
-        model.repo().map(|repo| repo.path.display().to_string())
-    }
-
-    /// The repo's forge page.
-    fn url(&self, model: &Model, _list: List) -> Option<String> {
-        (model.snapshot.forges)
-            .get(&model.repo()?.path)
-            .map(|forge| forge.url.clone())
     }
 }
