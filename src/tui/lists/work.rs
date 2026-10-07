@@ -17,10 +17,10 @@ use crate::tui::app::{
     Action, Cmd, Draft, DraftStep, Effect, Job, Kind, List, MenuEntry, Modal, Model, Removal,
     Submit, Work, WorkKind,
 };
-use crate::tui::marks::Severity;
+use crate::tui::marks::{self, Severity, Tone};
 use crate::tui::update::{confirm, note, run, update};
 use crate::tui::view::{Palette, icon};
-use crate::worktrunk::{Ci, CiReview, CiState, Decision, Forge, Worktree};
+use crate::worktrunk::{Checks, Ci, CiReview, Decision, Forge, Worktree};
 
 pub struct WorkList;
 
@@ -288,20 +288,22 @@ impl ListKind for WorkList {
                 };
                 let mut status = Vec::new();
                 if !tree.symbols.is_empty() {
-                    status.extend([symbols(tree, palette), Span::raw(" ")]);
+                    status.extend(symbols(tree, palette));
+                    status.push(Span::raw(" "));
                 }
-                status.push(Span::styled(status_text, status_style(tree, palette)));
+                status.push(Span::raw(status_text));
                 let upstream = match tree.upstream {
                     // Counts of zero recede.
-                    Some((ahead, _)) => {
-                        let ahead = if ahead > 0 {
-                            Span::raw(format!("↑{ahead}"))
-                        } else {
-                            subtle("↑0", palette)
+                    Some((ahead, behind)) => {
+                        let count = |arrow, count| {
+                            let text = format!("{arrow}{count}");
+                            if count > 0 {
+                                Span::raw(text)
+                            } else {
+                                subtle(text, palette)
+                            }
                         };
-                        let behind =
-                            self::behind(tree, palette).unwrap_or_else(|| subtle("↓0", palette));
-                        Line::from(vec![ahead, Span::raw(" "), behind])
+                        Line::from(vec![count("↑", ahead), Span::raw(" "), count("↓", behind)])
                     }
                     None => subtle("none", palette).into(),
                 };
@@ -589,63 +591,82 @@ pub(crate) fn tint(severity: Severity, palette: &Palette) -> Style {
         .map_or(Style::new(), |color| Style::new().fg(color))
 }
 
-/// worktrunk's status symbols, such as `!?↑`: warning when the tree is dirty.
-pub(crate) fn symbols(tree: &Worktree, palette: &Palette) -> Span<'static> {
-    Span::styled(tree.symbols.clone(), status_style(tree, palette))
+/// worktrunk's status symbols, such as `!?↑`, each in its own colour.
+pub(crate) fn symbols(tree: &Worktree, palette: &Palette) -> Vec<Span<'static>> {
+    (tree.symbols.chars())
+        .map(|mark| {
+            let tone = marks::lookup(mark).map_or(Tone::Quiet, |symbol| symbol.tone);
+            Span::styled(mark.to_string(), Style::new().fg(tone.color(palette)))
+        })
+        .collect()
 }
 
-pub(crate) fn status_style(tree: &Worktree, palette: &Palette) -> Style {
-    Style::new().fg(if tree.dirty {
-        palette.warn
-    } else {
-        palette.dim
-    })
+/// A check status's glyph and colour.
+pub(crate) fn checks_mark(checks: Checks, palette: &Palette) -> (&'static str, Color) {
+    let glyphs = &palette.glyphs;
+    match checks {
+        Checks::Passed => (glyphs.passed, palette.ok),
+        Checks::Running => (glyphs.running, palette.info),
+        Checks::Failed => (glyphs.failed, palette.error),
+        Checks::Unavailable => (glyphs.unavailable, palette.warn),
+    }
 }
 
-/// `↓N` when the branch is behind its upstream.
-pub(crate) fn behind(tree: &Worktree, palette: &Palette) -> Option<Span<'static>> {
-    let (_, behind) = tree.upstream.filter(|&(_, behind)| behind > 0)?;
-    Some(Span::styled(
-        format!("↓{behind}"),
-        Style::new().fg(palette.warn),
-    ))
+/// What a check status is called.
+pub(crate) fn checks_label(checks: Checks) -> &'static str {
+    match checks {
+        Checks::Passed => "passed",
+        Checks::Running => "running",
+        Checks::Failed => "failed",
+        Checks::Unavailable => "unavailable",
+    }
 }
 
-/// A CI status's colour, as worktrunk's: dimmed when stale or for a draft.
-pub(crate) fn ci_style(ci: &Ci, palette: &Palette) -> Style {
-    let style = Style::new().fg(ci_color(ci.state, palette));
-    if ci.stale || ci.draft() {
+/// The checks' mark, dimmed when stale or for a draft; `None` without checks.
+pub(crate) fn checks_span(ci: &Ci, palette: &Palette) -> Option<Span<'static>> {
+    let (glyph, color) = checks_mark(ci.checks?, palette);
+    let style = Style::new().fg(color);
+    let style = if ci.stale || ci.draft() {
         style.add_modifier(Modifier::DIM)
     } else {
         style
-    }
-}
-
-/// A CI status's colour.
-pub(crate) fn ci_color(state: CiState, palette: &Palette) -> Color {
-    match state {
-        CiState::Passed => palette.ok,
-        CiState::Running => palette.info,
-        CiState::Failed => palette.error,
-        CiState::Conflicts | CiState::Error => palette.warn,
-        CiState::ChangesRequested => palette.changes_requested,
-        CiState::ApprovalPending => palette.approval_pending,
-    }
-}
-
-/// A row's CI mark, its colour the status.
-pub(crate) fn ci_mark(ci: &Ci, palette: &Palette) -> Span<'static> {
-    let glyph = if ci.state == CiState::Error {
-        palette.glyphs.ci_error
-    } else {
-        palette.glyphs.ci
     };
-    Span::styled(glyph, ci_style(ci, palette))
+    Some(Span::styled(glyph, style))
 }
 
-/// The detail's CI: the row's mark, what it means, and why it may be dimmed.
+/// A review decision's glyph and colour, none for a draft's.
+pub(crate) fn decision_mark(
+    decision: Decision,
+    palette: &Palette,
+) -> Option<(&'static str, Color)> {
+    let glyphs = &palette.glyphs;
+    match decision {
+        Decision::ChangesRequested => Some((glyphs.changes_requested, palette.changes_requested)),
+        Decision::Pending => Some((glyphs.approval, palette.approval_pending)),
+        Decision::Approved => Some((glyphs.passed, palette.ok)),
+        Decision::Draft => None,
+    }
+}
+
+/// What a review decision is called.
+pub(crate) fn decision_label(decision: Decision) -> &'static str {
+    match decision {
+        Decision::Pending => "waiting for approval",
+        decision => decision.label(),
+    }
+}
+
+/// A review's merge conflicts: its glyph and colour.
+pub(crate) fn conflicts_mark(palette: &Palette) -> (&'static str, Color) {
+    (palette.glyphs.conflicts, palette.error)
+}
+
+/// The detail's CI: its checks' mark, what it means, and why it may be dimmed.
 fn ci_detail(ci: &Ci, palette: &Palette) -> Line<'static> {
-    let mut text = format!(" {}", ci.state.label());
+    let Some(checks) = ci.checks else {
+        return subtle("none", palette).into();
+    };
+    let mut text = format!(" {}", checks_label(checks));
     if ci.branch_workflow {
         text.push_str(" (branch)");
     }
@@ -655,13 +676,11 @@ fn ci_detail(ci: &Ci, palette: &Palette) -> Line<'static> {
     if ci.draft() {
         text.push_str(" · draft");
     }
-    Line::from(vec![
-        ci_mark(ci, palette),
-        Span::styled(text, ci_style(ci, palette)),
-    ])
+    let mark = checks_span(ci, palette).unwrap_or_default();
+    Line::from(vec![mark.clone(), Span::styled(text, mark.style)])
 }
 
-/// The detail's review: its reference and decision, coloured as the CI mark shows it.
+/// The detail's review: its reference, its decision and its conflicts, marked.
 fn review_detail(
     ci: &Ci,
     review: &CiReview,
@@ -669,9 +688,19 @@ fn review_detail(
     palette: &Palette,
 ) -> Line<'static> {
     let mut spans = vec![Span::raw(review_reference(review, forge))];
-    if let Some(decision) = review.decision {
-        let style = decision_style(ci, decision, palette);
-        spans.push(Span::styled(format!(" {}", decision.label()), style));
+    if let Some((glyph, color)) = review.decision.and_then(|d| decision_mark(d, palette)) {
+        let label = decision_label(review.decision.unwrap_or(Decision::Draft));
+        spans.push(Span::styled(
+            format!(" {glyph} {label}"),
+            Style::new().fg(color),
+        ));
+    }
+    if ci.conflicts {
+        let (glyph, color) = conflicts_mark(palette);
+        spans.push(Span::styled(
+            format!(" {glyph} conflicts"),
+            Style::new().fg(color),
+        ));
     }
     Line::from(spans)
 }
@@ -682,17 +711,6 @@ pub(crate) fn review_reference(review: &CiReview, forge: Option<&Forge>) -> Stri
         (Some(number), Some(forge)) => forge.review_reference(number),
         (Some(number), None) => format!("#{number}"),
         (None, _) => "open".into(),
-    }
-}
-
-/// A review decision's colour.
-pub(crate) fn decision_style(ci: &Ci, decision: Decision, palette: &Palette) -> Style {
-    match decision {
-        Decision::ChangesRequested => Style::new().fg(palette.changes_requested),
-        Decision::Pending => Style::new().fg(palette.approval_pending),
-        Decision::Draft => Style::new().fg(palette.dim),
-        // Approval leaves the CI's colour, as in worktrunk.
-        Decision::Approved => ci_style(ci, palette),
     }
 }
 

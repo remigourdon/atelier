@@ -361,8 +361,8 @@ mod tests {
         let linked = "ABC-1 Issue ABC-1";
         assert_eq!(
             style_in(&buffer, linked, -2).fg,
-            Some(palette.issue_key),
-            "the linked-work marker"
+            Some(palette.ok),
+            "the linked-work marker, as any tab dot"
         );
         assert_eq!(
             style_in(&buffer, linked, 0).fg,
@@ -540,13 +540,37 @@ mod tests {
             unfolded,
             integrated,
             gone,
-            ci,
-            ci_error,
+            passed,
+            running,
+            failed,
+            unavailable,
+            conflicts,
+            changes_requested,
+            approval,
             spinner,
         } = glyphs;
         for glyph in [
-            workspace, repo, worktree, carnet, review, reviewed, issue, open, closed, folded,
-            unfolded, integrated, gone, ci, ci_error, spinner[0],
+            workspace,
+            repo,
+            worktree,
+            carnet,
+            review,
+            reviewed,
+            issue,
+            open,
+            closed,
+            folded,
+            unfolded,
+            integrated,
+            gone,
+            passed,
+            running,
+            failed,
+            unavailable,
+            conflicts,
+            changes_requested,
+            approval,
+            spinner[0],
         ] {
             assert!(marks.contains(&glyph), "{glyph} is not in the legend");
         }
@@ -583,7 +607,7 @@ mod tests {
             .unwrap();
         let buffer = terminal.backend().buffer();
         let marks: Vec<_> = (buffer.content.iter())
-            .filter(|cell| cell.symbol() == "◆")
+            .filter(|cell| cell.symbol() == "✖")
             .map(|cell| {
                 (
                     cell.fg,

@@ -12,11 +12,12 @@ use super::app::{
 use super::lists;
 use super::lists::carnets;
 use super::markdown::{self, Markdown};
+use super::marks::{self, Tone};
 use super::widgets;
 use crate::config::Icons;
 use crate::finish::Signal;
 use crate::git::Commit;
-use crate::worktrunk::CiState;
+use crate::worktrunk::Checks;
 
 /// Below this width the main view is hidden until `+`.
 pub const NARROW: u16 = 100;
@@ -71,9 +72,16 @@ pub struct Glyphs {
     /// A finished worktree's mark: integrated, or its upstream gone.
     pub integrated: &'static str,
     pub gone: &'static str,
-    /// A branch's CI mark, its colour the status, and the mark when it could not be fetched.
-    pub ci: &'static str,
-    pub ci_error: &'static str,
+    /// A branch's checks.
+    pub passed: &'static str,
+    pub running: &'static str,
+    pub failed: &'static str,
+    pub unavailable: &'static str,
+    /// A review's merge conflicts.
+    pub conflicts: &'static str,
+    /// A review's decision, short of approval.
+    pub changes_requested: &'static str,
+    pub approval: &'static str,
     pub spinner: [&'static str; 4],
 }
 
@@ -90,19 +98,25 @@ impl Glyphs {
                 review: "",
                 reviewed: "⑂",
                 issue: "",
-                open: "●",
+                open: "◉",
                 closed: "○",
                 folded: "▸",
                 unfolded: "▾",
                 integrated: "⊂",
                 gone: "⊗",
-                ci: "◆",
-                ci_error: "⚠",
+                passed: "✔",
+                running: "◔",
+                failed: "✖",
+                unavailable: "⚠",
+                conflicts: "✗",
+                changes_requested: "±",
+                approval: "◇",
                 spinner,
             },
             // Nerd Fonts: fa-desktop, oct-repo, dev-git_branch, fa-home, fa-book, oct-git_pull_request,
-            // oct-issue_opened, fa-circle, fa-circle_o, fa-folder, fa-folder_open, oct-git_merge,
-            // fa-chain_broken, fa-diamond, fa-warning.
+            // oct-issue_opened, fa-dot_circle_o, fa-circle_o, fa-folder, fa-folder_open,
+            // oct-git_merge, fa-chain_broken, oct-check_circle, oct-clock, oct-x_circle, fa-warning,
+            // oct-file_diff, oct-eye.
             Icons::Nerd => Self {
                 workspace: "\u{f108}",
                 repo: "\u{f401}",
@@ -112,14 +126,19 @@ impl Glyphs {
                 review: "\u{f407}",
                 reviewed: "\u{f407}",
                 issue: "\u{f41b}",
-                open: "\u{f111}",
+                open: "\u{f192}",
                 closed: "\u{f10c}",
                 folded: "\u{f07b}",
                 unfolded: "\u{f07c}",
                 integrated: "\u{f419}",
                 gone: "\u{f127}",
-                ci: "\u{f219}",
-                ci_error: "\u{f071}",
+                passed: "\u{f49e}",
+                running: "\u{f43a}",
+                failed: "\u{f52f}",
+                unavailable: "\u{f071}",
+                conflicts: "✗",
+                changes_requested: "\u{f4d2}",
+                approval: "\u{f441}",
                 spinner,
             },
         }
@@ -160,8 +179,14 @@ fn warn(palette: &Palette) -> Style {
     Style::new().fg(palette.warn)
 }
 
-fn ci(state: CiState, palette: &Palette) -> Style {
-    Style::new().fg(lists::work::ci_color(state, palette))
+fn checks(checks: Checks, palette: &Palette) -> Style {
+    Style::new().fg(lists::work::checks_mark(checks, palette).1)
+}
+
+/// A status symbol's colour.
+fn symbol(mark: char, palette: &Palette) -> Style {
+    let tone = marks::lookup(mark).map_or(Tone::Quiet, |symbol| symbol.tone);
+    Style::new().fg(tone.color(palette))
 }
 
 /// The legend: every mark the lists, the main view and the command log draw, in the order `?`
@@ -179,52 +204,27 @@ pub const LEGEND: &[Legend] = &[
     Legend { mark: |g| g.closed, style: |p| lists::tab(false, p).1, help: "tab closed", on: On::Lists(ITEMS) },
     Legend { mark: |g| g.open, style: |p| lists::tab(true, p).1, help: "checked out, its tab open", on: On::Lists(&[Kind::Reviews]) },
     Legend { mark: |g| g.closed, style: |p| lists::tab(false, p).1, help: "checked out, its tab closed", on: On::Lists(&[Kind::Reviews]) },
-    Legend { mark: |g| g.open, style: lists::key_style, help: "linked work, a tab open", on: On::Lists(&[Kind::Issues]) },
-    Legend { mark: |g| g.closed, style: lists::key_style, help: "linked work, no tab open", on: On::Lists(&[Kind::Issues]) },
+    Legend { mark: |g| g.open, style: |p| lists::tab(true, p).1, help: "linked work, a tab open", on: On::Lists(&[Kind::Issues]) },
+    Legend { mark: |g| g.closed, style: |p| lists::tab(false, p).1, help: "linked work, no tab open", on: On::Lists(&[Kind::Issues]) },
     Legend { mark: |g| g.reviewed, style: lists::review_style, help: "an open review links it", on: On::Lists(&[Kind::Issues]) },
     Legend { mark: |g| g.spinner[0], style: |p| Style::new().fg(p.info), help: "pulling", on: On::Lists(WORK) },
     Legend { mark: |g| g.folded, style: |p| lists::group_style(p).bold(), help: "folded group", on: On::Lists(WORK) },
     Legend { mark: |g| g.unfolded, style: |p| lists::group_style(p).bold(), help: "unfolded group", on: On::Lists(WORK) },
     Legend { mark: |_| "group", style: lists::group_style, help: "a group", on: On::Lists(GROUPED) },
     Legend { mark: |_| "KEY-1", style: lists::key_style, help: "an issue key", on: On::Lists(KEYED) },
-    Legend { mark: |g| g.ci, style: |p| ci(CiState::Passed, p), help: "CI passed", on: On::Lists(WORK) },
-    Legend { mark: |g| g.ci, style: |p| ci(CiState::Running, p), help: "CI running", on: On::Lists(WORK) },
-    Legend { mark: |g| g.ci, style: |p| ci(CiState::Failed, p), help: "CI failed", on: On::Lists(WORK) },
-    Legend { mark: |g| g.ci, style: |p| ci(CiState::Conflicts, p), help: "merge conflicts", on: On::Lists(WORK) },
-    Legend { mark: |g| g.ci, style: |p| ci(CiState::ChangesRequested, p), help: "changes requested", on: On::Lists(WORK) },
-    Legend { mark: |g| g.ci, style: |p| ci(CiState::ApprovalPending, p), help: "approval pending", on: On::Lists(WORK) },
-    Legend { mark: |g| g.ci, style: |p| ci(CiState::Passed, p).add_modifier(Modifier::DIM), help: "CI dimmed: stale, or a draft review", on: On::Lists(WORK) },
-    Legend { mark: |g| g.ci_error, style: |p| ci(CiState::Error, p), help: "CI status could not be fetched", on: On::Lists(WORK) },
-    Legend { mark: |_| "+!?", style: warn, help: "status in yellow: the tree is dirty", on: On::Lists(WORK) },
-    Legend { mark: |_| "+", style: dim, help: "status: staged files", on: On::Lists(WORK) },
-    Legend { mark: |_| "!", style: dim, help: "status: modified files", on: On::Lists(WORK) },
-    Legend { mark: |_| "?", style: dim, help: "status: untracked files", on: On::Lists(WORK) },
-    Legend { mark: |_| "✘", style: dim, help: "status: merge conflicts", on: On::Lists(WORK) },
-    Legend { mark: |_| "↻", style: dim, help: "status: rebase, merge or other git operation in progress", on: On::Lists(WORK) },
-    Legend { mark: |_| "⊟", style: dim, help: "status: prunable, its directory or .git gone", on: On::Lists(WORK) },
-    Legend { mark: |_| "⊞", style: dim, help: "status: locked worktree", on: On::Lists(WORK) },
-    Legend { mark: |_| "⊘", style: dim, help: "status: detached HEAD", on: On::Lists(WORK) },
-    Legend { mark: |_| "⚐", style: dim, help: "status: branch in several worktrees, or not its path", on: On::Lists(WORK) },
-    Legend { mark: |_| "/", style: dim, help: "status: branch without a worktree", on: On::Lists(WORK) },
-    Legend { mark: |_| "^", style: dim, help: "status: the main worktree", on: On::Lists(WORK) },
-    Legend { mark: |_| "∅", style: dim, help: "status: no common ancestor with the default branch", on: On::Lists(WORK) },
-    Legend { mark: |_| "_", style: dim, help: "status: same commit as the default branch, clean", on: On::Lists(WORK) },
-    Legend { mark: |_| "–", style: dim, help: "status: same commit as the default branch, dirty", on: On::Lists(WORK) },
-    Legend { mark: |_| "⊂", style: dim, help: "status: integrated into the default branch", on: On::Lists(WORK) },
-    Legend { mark: |_| "✗", style: dim, help: "status: merging into the default branch would conflict", on: On::Lists(WORK) },
-    Legend { mark: |_| "↕", style: dim, help: "status: ahead of and behind the default branch", on: On::Lists(WORK) },
-    Legend { mark: |_| "↑", style: dim, help: "status: ahead of the default branch", on: On::Lists(WORK) },
-    Legend { mark: |_| "↓", style: dim, help: "status: behind the default branch", on: On::Lists(WORK) },
-    Legend { mark: |_| "|", style: dim, help: "status: in sync with the remote", on: On::Lists(WORK) },
-    Legend { mark: |_| "⇡", style: dim, help: "status: ahead of the remote", on: On::Lists(WORK) },
-    Legend { mark: |_| "⇣", style: dim, help: "status: behind the remote", on: On::Lists(WORK) },
-    Legend { mark: |_| "⇅", style: dim, help: "status: diverged from the remote", on: On::Lists(WORK) },
-    Legend { mark: |_| "↓N", style: warn, help: "behind its upstream by N commits", on: On::Lists(WORK) },
+    Legend { mark: |g| g.passed, style: |p| checks(Checks::Passed, p), help: "checks passed", on: On::Lists(WORK) },
+    Legend { mark: |g| g.running, style: |p| checks(Checks::Running, p), help: "checks running", on: On::Lists(WORK) },
+    Legend { mark: |g| g.failed, style: |p| checks(Checks::Failed, p), help: "checks failed", on: On::Lists(WORK) },
+    Legend { mark: |g| g.unavailable, style: |p| checks(Checks::Unavailable, p), help: "checks unavailable", on: On::Lists(WORK) },
+    Legend { mark: |g| g.passed, style: |p| checks(Checks::Passed, p).add_modifier(Modifier::DIM), help: "dimmed: stale, or a draft", on: On::Lists(WORK) },
+    Legend { mark: |g| g.conflicts, style: |p| Style::new().fg(p.error), help: "merge conflicts", on: On::Lists(WORK) },
+    Legend { mark: |g| g.changes_requested, style: |p| Style::new().fg(p.changes_requested), help: "changes requested", on: On::Lists(WORK) },
+    Legend { mark: |g| g.approval, style: |p| Style::new().fg(p.approval_pending), help: "waiting for approval", on: On::Lists(WORK) },
     Legend { mark: |g| g.integrated, style: dim, help: "finished, the row dimmed: integrated into the default branch", on: On::Lists(WORK) },
     Legend { mark: |g| g.gone, style: dim, help: "finished, the row dimmed: its upstream branch is gone", on: On::Lists(WORK) },
-    Legend { mark: |_| "✓", style: |p| Style::new().fg(p.ok), help: "command log: the command succeeded", on: On::Global },
+    Legend { mark: |_| "✓", style: dim, help: "command log: the command succeeded", on: On::Global },
     Legend { mark: |_| "✗", style: |p| Style::new().fg(p.error), help: "command log: the command failed", on: On::Global },
-    Legend { mark: |_| "⟳", style: |p| Style::new().fg(p.info), help: "hint bar: loading", on: On::Global },
+    Legend { mark: |_| "⟳", style: dim, help: "hint bar: loading", on: On::Global },
 ];
 
 impl Legend {
@@ -260,8 +260,8 @@ impl Palette {
             error: colors.red.into(),
             warn: colors.yellow.into(),
             info: colors.blue.into(),
-            changes_requested: colors.pink.into(),
-            approval_pending: colors.teal.into(),
+            changes_requested: colors.yellow.into(),
+            approval_pending: colors.pink.into(),
             filter: colors.yellow.into(),
             group: colors.lavender.into(),
             issue_key: colors.peach.into(),
@@ -540,7 +540,7 @@ fn render_log(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect) {
         .iter()
         .map(|entry| match &entry.error {
             None => Line::from(vec![
-                Span::styled("✓ ", Style::new().fg(palette.ok)),
+                Span::styled("✓ ", Style::new().fg(palette.dim)),
                 Span::styled(entry.command.as_str(), Style::new().fg(palette.dim)),
             ]),
             Some(error) => Line::from(vec![
@@ -593,7 +593,7 @@ fn render_hints(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect)
         frame.render_widget(
             Paragraph::new(Span::styled(
                 format!("⟳ {}", loading.join(" ")),
-                Style::new().fg(palette.info),
+                Style::new().fg(palette.dim),
             )),
             right,
         );

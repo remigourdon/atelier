@@ -2058,7 +2058,7 @@ pub mod tests {
         let mut model = model();
         press(&mut model, "?");
         let legend = menu_legend(&model);
-        assert!(legend.contains(&"CI failed") && legend.contains(&"folded group"));
+        assert!(legend.contains(&"checks failed") && legend.contains(&"folded group"));
         assert!(!legend.contains(&"an open review links it"));
         assert!(
             !legend.contains(&"worktree"),
@@ -2072,7 +2072,7 @@ pub mod tests {
         press(&mut model, "\x1b4?");
         let legend = menu_legend(&model);
         assert!(legend.contains(&"an open review links it"));
-        assert!(!legend.contains(&"CI failed"));
+        assert!(!legend.contains(&"checks failed"));
         model.icons = Icons::Nerd;
         press(&mut model, "\x1b?");
         assert!(
