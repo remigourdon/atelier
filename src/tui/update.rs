@@ -1047,6 +1047,7 @@ pub mod tests {
     use crate::config::Icons;
     use crate::finish::{self, Scope, Step};
     use crate::git::Commit;
+    use crate::items;
     use crate::links::tests::{key, keys};
     use crate::links::{Group, IssueKey, Links};
     use crate::reviews::Role;
@@ -1065,12 +1066,12 @@ pub mod tests {
 
     /// A worktree linking the issue keys in its branch.
     pub fn work(repo: &str, branch: &str, group: &str, workspace: &str) -> Work {
-        crate::items::tests::tree_work(repo, branch, linking(group, branch), workspace)
+        items::tests::tree_work(repo, branch, linking(group, branch), workspace)
     }
 
     /// A carnet in `group`, linking the issue keys in its name.
     pub fn carnet(name: &str, group: &str, workspace: &str) -> Work {
-        crate::items::tests::carnet_work(name, linking(group, name), workspace)
+        items::tests::carnet_work(name, linking(group, name), workspace)
     }
 
     /// With carnets enabled, one in the ABC-1 group and two ungrouped, open, and one closed in

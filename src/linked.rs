@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use crate::links::{Group, IssueKey, IssueKeys, Links};
 use crate::reviews::Review;
@@ -40,6 +41,12 @@ impl<'a, I: Item> LinkedWork<'a, I> {
             forges,
             reviews,
         }
+    }
+
+    /// A view of `items` alone, for the questions about items: no review is placed.
+    pub fn over(items: &'a [I]) -> Self {
+        static NO_FORGES: LazyLock<HashMap<PathBuf, Forge>> = LazyLock::new(HashMap::new);
+        Self::new(items, &[], &NO_FORGES, &[])
     }
 
     /// An issue's linked work: every item linking `key`, open or closed, in any group.
@@ -134,14 +141,14 @@ mod tests {
     use crate::reviews::{Provider, Role};
 
     /// A worktree, with a repo and a branch, or a carnet, with neither.
-    struct Thing {
+    struct TestItem {
         path: PathBuf,
         links: Links,
         repo: Option<PathBuf>,
         branch: Option<String>,
     }
 
-    impl Item for Thing {
+    impl Item for TestItem {
         fn links(&self) -> &Links {
             &self.links
         }
@@ -153,8 +160,8 @@ mod tests {
         }
     }
 
-    fn tree(repo: &str, branch: &str, links: Links) -> Thing {
-        Thing {
+    fn tree(repo: &str, branch: &str, links: Links) -> TestItem {
+        TestItem {
             path: format!("/src/{repo}.{branch}").into(),
             links,
             repo: Some(format!("/src/{repo}").into()),
@@ -163,8 +170,8 @@ mod tests {
     }
 
     /// Open or closed alike: linked work never asks.
-    fn carnet(name: &str, links: Links) -> Thing {
-        Thing {
+    fn carnet(name: &str, links: Links) -> TestItem {
+        TestItem {
             path: format!("/data/{name}").into(),
             links,
             repo: None,
@@ -175,10 +182,10 @@ mod tests {
     const API: &str = "https://forge/org/api";
     const WEB: &str = "https://forge/org/web";
 
-    /// LOGIN: two api worktrees, one linking ABC-1, and a closed carnet linking ORD-7. ABC-1 is also linked by
-    /// a web worktree in no group and an open carnet in group NOTES. `web` is another project's
-    /// repo with a worktree on `change-2`.
-    fn items() -> Vec<Thing> {
+    /// LOGIN: two api worktrees, one linking ABC-1, and a closed carnet linking ORD-7. ABC-1 is
+    /// also linked by a web worktree in no group and an open carnet in group NOTES. `web` is
+    /// another project's repo with a worktree on `change-2`.
+    fn items() -> Vec<TestItem> {
         vec![
             tree("api", "login", links("LOGIN", &["ABC-1"])),
             tree("api", "change-2", links("LOGIN", &[])),
@@ -198,7 +205,7 @@ mod tests {
     }
 
     struct Fixture {
-        items: Vec<Thing>,
+        items: Vec<TestItem>,
         repos: Vec<Repo>,
         forges: HashMap<PathBuf, Forge>,
         reviews: Vec<Review>,
@@ -229,12 +236,12 @@ mod tests {
             }
         }
 
-        fn linked(&self) -> LinkedWork<'_, Thing> {
+        fn linked(&self) -> LinkedWork<'_, TestItem> {
             LinkedWork::new(&self.items, &self.repos, &self.forges, &self.reviews)
         }
     }
 
-    fn paths(items: Vec<&Thing>) -> Vec<String> {
+    fn paths(items: Vec<&TestItem>) -> Vec<String> {
         (items.iter())
             .map(|item| item.path.display().to_string())
             .collect()

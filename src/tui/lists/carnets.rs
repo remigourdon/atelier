@@ -31,8 +31,7 @@ impl Model {
     /// The Carnets rows, newest first: those the search found, matching the filter on their
     /// folder name, group, issue keys and summary.
     pub fn carnet_rows(&self) -> Vec<&Work> {
-        (self.snapshot.work.iter())
-            .filter(|work| work.is_carnet())
+        (self.snapshot.carnets().into_iter())
             .filter(|work| {
                 (self.search.as_ref()).is_none_or(|search| search.hits.contains_key(&work.path))
             })

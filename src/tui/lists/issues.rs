@@ -58,14 +58,15 @@ impl Model {
 /// repo holds issues whose work happens elsewhere. It goes to the workspace of the linked work
 /// in that repo, else of any linked work, else the repo's default one.
 fn ask_start(model: &mut Model, issue: Issue) -> Vec<Effect> {
-    let linked = model.linked().of_issue(&issue.key);
+    let view = model.linked();
+    let linked = view.of_issue(&issue.key);
     let workspace = |repo: &Repo| {
         let work = (linked.iter().find(|work| work.repo() == Some(&repo.path))).or(linked.first());
         work.map_or(repo.default_workspace.clone(), |work| {
             work.workspace.clone()
         })
     };
-    let own = (issue.project_url.as_deref()).and_then(|url| model.linked().project_repo(url));
+    let own = (issue.project_url.as_deref()).and_then(|url| view.project_repo(url));
     let label = model.issue_label(&issue);
     let mut repos: Vec<&Repo> = model.snapshot.repos.iter().collect();
     repos.sort_by_key(|repo| {
@@ -109,40 +110,37 @@ fn issue_plan(model: &Model, issue: &Issue) -> Plan<IssueStep> {
         note: String::new(),
         checked: true,
     });
-    let reviews = (linked.reviews_linking(&keys(issue)).into_iter())
-        .filter(|review| linked.review_worktree(review).is_none())
-        .map(|review| {
-            let label = format!(
-                "check out {} (@{})",
-                model.review_label(review),
-                review.author
-            );
-            match linked.project_repo(&review.project_url) {
-                Some(repo) => PlanLine::Step {
-                    step: IssueStep::Checkout(Pending::Checkout {
-                        repo: repo.path.clone(),
-                        workspace: repo.default_workspace.clone(),
-                        review: Box::new(review.clone()),
-                    }),
-                    label,
-                    note: String::new(),
-                    checked: false,
-                },
-                None => PlanLine::Info {
-                    label,
-                    note: "not registered".into(),
-                },
-            }
-        });
+    let reviews = (linked
+        .reviews_linking(&IssueKeys::from_iter([issue.key.clone()]))
+        .into_iter())
+    .filter(|review| linked.review_worktree(review).is_none())
+    .map(|review| {
+        let label = format!(
+            "check out {} (@{})",
+            model.review_label(review),
+            review.author
+        );
+        match linked.project_repo(&review.project_url) {
+            Some(repo) => PlanLine::Step {
+                step: IssueStep::Checkout(Pending::Checkout {
+                    repo: repo.path.clone(),
+                    workspace: repo.default_workspace.clone(),
+                    review: Box::new(review.clone()),
+                }),
+                label,
+                note: String::new(),
+                checked: false,
+            },
+            None => PlanLine::Info {
+                label,
+                note: "not registered".into(),
+            },
+        }
+    });
     Plan {
         title: format!("Work on {}", model.issue_label(issue)),
         lines: open.chain(reviews).collect(),
     }
-}
-
-/// An issue's key, to find the reviews linking it.
-fn keys(issue: &Issue) -> IssueKeys {
-    [issue.key.clone()].into_iter().collect()
 }
 
 /// An issue's state: in progress or done stand out, to do does not.
@@ -266,7 +264,7 @@ impl ListKind for Issues {
         pairs.extend((work.into_iter()).map(|work| pair(kind(work), work_line(work, palette))));
         pairs.extend(
             linked
-                .reviews_linking(&keys(issue))
+                .reviews_linking(&IssueKeys::from_iter([issue.key.clone()]))
                 .into_iter()
                 .map(|review| {
                     let checked_out = match linked.review_worktree(review) {

@@ -380,8 +380,7 @@ pub fn describe(
     };
     // Built twice: over the recorded items to pick the linked ones, then over the linked
     // worktrees as listed, to place reviews on them.
-    let no_forges = HashMap::new();
-    let linked = LinkedWork::new(&items, &[], &no_forges, &[]).of_links(&links);
+    let linked = LinkedWork::over(&items).of_links(&links);
     let trees: Vec<&Recorded> = (linked.iter().copied())
         .filter(|item| !item.is_carnet())
         .collect();

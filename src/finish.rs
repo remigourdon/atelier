@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use crate::issues::TrackerConfig;
 use crate::items::{Removal, Snapshot, Work};
+use crate::linked::LinkedWork;
 use crate::links::{Group, IssueKey};
 use crate::worktrunk::Worktree;
 
@@ -92,21 +93,24 @@ impl Scope {
                 .chain(items.iter().cloned().map(Cover::Item))
                 .collect(),
             Scope::Workspace(_) => {
-                let own =
-                    (snapshot.work.iter()).filter(|work| self.touches(work) && !work.closed());
+                // A closed carnet counts only while its tab is open, as the Work panel shows it.
+                let own = (snapshot.work.iter())
+                    .filter(|work| self.touches(work) && (!work.closed() || work.tab));
                 covers(own, |work| work.removable())
             }
-            Scope::Issue { key, .. } => (snapshot.linked(&[]).of_issue(key).into_iter())
-                .filter(|work| !work.closed())
-                .map(|work| Cover::Item(work.path.clone()))
-                .collect(),
+            Scope::Issue { key, .. } => {
+                (LinkedWork::over(&snapshot.work).of_issue(key).into_iter())
+                    .filter(|work| !work.closed())
+                    .map(|work| Cover::Item(work.path.clone()))
+                    .collect()
+            }
         }
     }
 
     /// What a carnet's close waits on: the issue's linked work, else what `cover` holds.
     fn unit<'a>(&self, snapshot: &'a Snapshot, cover: &Cover) -> Vec<&'a Work> {
         match self {
-            Scope::Issue { key, .. } => snapshot.linked(&[]).of_issue(key),
+            Scope::Issue { key, .. } => LinkedWork::over(&snapshot.work).of_issue(key),
             _ => members(snapshot, cover),
         }
     }
@@ -177,7 +181,7 @@ fn covers<'a>(work: impl Iterator<Item = &'a Work>, alone: impl Fn(&Work) -> boo
 /// Everything `cover` holds, in any workspace.
 fn members<'a>(snapshot: &'a Snapshot, cover: &Cover) -> Vec<&'a Work> {
     match cover {
-        Cover::Group(group) => snapshot.linked(&[]).members(group),
+        Cover::Group(group) => LinkedWork::over(&snapshot.work).members(group),
         Cover::Item(path) => (snapshot.work.iter())
             .filter(|work| work.path == *path)
             .collect(),

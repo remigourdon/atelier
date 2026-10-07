@@ -42,8 +42,7 @@ impl Snapshot {
         LinkedWork::new(&self.work, &self.repos, &self.forges, reviews)
     }
 
-    /// Its carnets, newest first, for tests.
-    #[cfg(test)]
+    /// Its carnets, closed ones included, newest first.
     pub fn carnets(&self) -> Vec<&Work> {
         self.work.iter().filter(|work| work.is_carnet()).collect()
     }
@@ -378,8 +377,7 @@ impl<'a> Items<'a> {
     /// it is now.
     pub fn linked_group(&self, keys: &IssueKeys) -> Result<Option<Group>> {
         let items = read(self.state, &self.carnets)?;
-        let forges = HashMap::new();
-        Ok(LinkedWork::new(&items, &[], &forges, &[]).linked_group(keys))
+        Ok(LinkedWork::over(&items).linked_group(keys))
     }
 
     /// The workspace a new item goes to: `explicit` when it is a workspace, else the current
