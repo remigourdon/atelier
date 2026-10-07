@@ -104,7 +104,7 @@ title = "Backlog"                  # the catch-all
 
 - The built-in layouts are `session.kdl` and `worktree.kdl`. The worktree layout runs the resolved editor and `agent_command`.
 - A tab's anchor pane is found by `title == anchor_pane`. A name set in the layout survives programs setting the terminal title (verified on zellij 0.45). Custom layouts must name one pane `editor`.
-- `g` runs `tool` with `zellij run --floating --close-on-exit --cwd <path> -- sh -c <tool>`, so it needs no tab and opens none.
+- `g` runs `tool` with `zellij run --floating --width 90% --height 90% --x 5% --y 5% --close-on-exit --cwd <path> -- sh -c <tool>`, so it needs no tab and opens none; the pane covers 90% of the screen, centred.
 - A tab is named `GROUP·repo` when its item is in a group (`GROUP·repo:branch` when the group has several open tabs of that repo in the workspace), else `repo` for a main worktree, `repo:branch` for another, and its folder name for a carnet; each part is elided in the middle to keep the name to 30 characters. `e` renames only the tabs whose group changed.
 - The core also owns reconcile, tab naming and elision, and cross-session focus.
 

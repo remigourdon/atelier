@@ -362,6 +362,14 @@ impl<'a> Zellij<'a> {
             &[
                 "run",
                 "--floating",
+                "--width",
+                "90%",
+                "--height",
+                "90%",
+                "--x",
+                "5%",
+                "--y",
+                "5%",
                 "--close-on-exit",
                 "--cwd",
                 &path,
@@ -780,7 +788,7 @@ mod tests {
         assert_eq!(
             fake.calls(),
             [
-                "zellij run --floating --close-on-exit --cwd /r/a -- sh -c tig 'feat'",
+                "zellij run --floating --width 90% --height 90% --x 5% --y 5% --close-on-exit --cwd /r/a -- sh -c tig 'feat'",
                 "sh -c cd '/r/a b' && lazygit",
             ]
         );
