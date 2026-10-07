@@ -7,6 +7,7 @@ mod git;
 mod hooks;
 mod issues;
 mod items;
+mod linked;
 mod links;
 mod process;
 mod reviews;

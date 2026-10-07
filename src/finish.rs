@@ -92,11 +92,12 @@ impl Scope {
                 .chain(items.iter().cloned().map(Cover::Item))
                 .collect(),
             Scope::Workspace(_) => {
-                let own = (snapshot.work.iter()).filter(|work| self.touches(work));
+                let own =
+                    (snapshot.work.iter()).filter(|work| self.touches(work) && !work.closed());
                 covers(own, |work| work.removable())
             }
-            Scope::Issue { key, .. } => (snapshot.work.iter())
-                .filter(|work| work.links_to(key) && !work.closed())
+            Scope::Issue { key, .. } => (snapshot.linked(&[]).of_issue(key).into_iter())
+                .filter(|work| !work.closed())
                 .map(|work| Cover::Item(work.path.clone()))
                 .collect(),
         }
@@ -105,9 +106,7 @@ impl Scope {
     /// What a carnet's close waits on: the issue's linked work, else what `cover` holds.
     fn unit<'a>(&self, snapshot: &'a Snapshot, cover: &Cover) -> Vec<&'a Work> {
         match self {
-            Scope::Issue { key, .. } => (snapshot.work.iter())
-                .filter(|work| work.links_to(key))
-                .collect(),
+            Scope::Issue { key, .. } => snapshot.linked(&[]).of_issue(key),
             _ => members(snapshot, cover),
         }
     }
@@ -177,12 +176,12 @@ fn covers<'a>(work: impl Iterator<Item = &'a Work>, alone: impl Fn(&Work) -> boo
 
 /// Everything `cover` holds, in any workspace.
 fn members<'a>(snapshot: &'a Snapshot, cover: &Cover) -> Vec<&'a Work> {
-    (snapshot.work.iter())
-        .filter(|work| match cover {
-            Cover::Group(group) => work.group() == Some(group),
-            Cover::Item(path) => work.path == *path,
-        })
-        .collect()
+    match cover {
+        Cover::Group(group) => snapshot.linked(&[]).members(group),
+        Cover::Item(path) => (snapshot.work.iter())
+            .filter(|work| work.path == *path)
+            .collect(),
+    }
 }
 
 fn cover_name(snapshot: &Snapshot, cover: &Cover) -> String {
@@ -461,40 +460,17 @@ mod tests {
 
     use super::*;
     use crate::issues::TrackerConfig;
-    use crate::items::WorkKind;
+    use crate::items::{self, WorkKind};
     use crate::links::tests::{key, links};
-    use crate::worktrunk::Worktree;
 
     fn work(repo: &str, branch: &str, group: &str, workspace: &str) -> Work {
         linking(repo, branch, group, &[], workspace)
     }
 
     fn linking(repo: &str, branch: &str, group: &str, keys: &[&str], workspace: &str) -> Work {
-        let main = branch == "main";
-        let path = if main {
-            PathBuf::from(format!("/src/{repo}"))
-        } else {
-            PathBuf::from(format!("/src/{repo}.{branch}"))
-        };
-        Work {
-            path: path.clone(),
-            workspace: workspace.into(),
-            links: links(group, keys),
-            tab: false,
-            kind: WorkKind::Worktree {
-                repo: PathBuf::from(format!("/src/{repo}")),
-                repo_name: repo.into(),
-                tree: Box::new(Worktree {
-                    path,
-                    branch: Some(branch.into()),
-                    main,
-                    on_default: main,
-                    default_branch: Some("main".into()),
-                    upstream: Some((0, 0)),
-                    ..Worktree::default()
-                }),
-            },
-        }
+        let mut work = items::tests::tree_work(repo, branch, links(group, keys), workspace);
+        work.tree_mut().upstream = Some((0, 0));
+        work
     }
 
     fn integrated(mut work: Work) -> Work {
@@ -514,17 +490,7 @@ mod tests {
     }
 
     fn carnet(name: &str, group: &str, keys: &[&str]) -> Work {
-        Work {
-            path: PathBuf::from(format!("/data/{name}")),
-            workspace: "default".into(),
-            links: links(group, keys),
-            tab: false,
-            kind: WorkKind::Carnet {
-                closed: false,
-                summary: String::new(),
-                readme: None,
-            },
-        }
+        items::tests::carnet_work(name, links(group, keys), "default")
     }
 
     /// The plan, keys shown with no tracker configured.
@@ -838,19 +804,14 @@ mod tests {
         let mut tabbed = closed(carnet("2026-10-01-login", "LOGIN", &["ABC-1"]));
         tabbed.tab = true;
         let untabbed = closed(carnet("2026-10-02-old", "LOGIN", &["ABC-1"]));
-        let with_tab = snapshot(vec![login(), unlinked(), tabbed]);
-        let mut without_tab = snapshot(vec![login(), unlinked()]);
-        without_tab.carnets.push(untabbed.clone());
-        for snapshot in [&with_tab, &without_tab] {
-            assert_eq!(
-                issue_plan(snapshot, "ABC-1"),
-                ["[x] remove api:1-login · integrated"],
-                "no line, no heading, and the group is not widened to"
-            );
-            assert_eq!(issue("ABC-1").repos(snapshot), [Path::new("/src/api")]);
-        }
-        let mut alone = snapshot(Vec::new());
-        alone.carnets.push(untabbed);
+        let linked = snapshot(vec![login(), unlinked(), tabbed, untabbed.clone()]);
+        assert_eq!(
+            issue_plan(&linked, "ABC-1"),
+            ["[x] remove api:1-login · integrated"],
+            "no line, no heading, and the group is not widened to, tab open or not"
+        );
+        assert_eq!(issue("ABC-1").repos(&linked), [Path::new("/src/api")]);
+        let alone = snapshot(vec![untabbed]);
         assert_eq!(issue_plan(&alone, "ABC-1"), ["    nothing to finish · "]);
     }
 

@@ -437,15 +437,15 @@ mod tests {
     fn carnets_sub_tab() {
         let mut model = update::tests::with_carnets(loaded(120, 30));
         // One open carnet, with a tab, a second issue key and a summary, and one closed.
-        model.snapshot.carnets.retain(|work| {
-            work.path.ends_with("2026-10-01-ABC-1-logs") || work.path.ends_with("2026-08-01-done")
+        model.snapshot.work.retain(|work| {
+            !work.is_carnet()
+                || work.path.ends_with("2026-10-01-ABC-1-logs")
+                || work.path.ends_with("2026-08-01-done")
         });
-        model.snapshot.carnets[0].tab = true;
-        model.snapshot.carnets[0]
-            .links
-            .issue_keys
-            .push(issue_key("o/api#4"));
-        if let WorkKind::Carnet { summary, .. } = &mut model.snapshot.carnets[0].kind {
+        let logs = model.snapshot.carnets_mut().swap_remove(0);
+        logs.tab = true;
+        logs.links.issue_keys.push(issue_key("o/api#4"));
+        if let WorkKind::Carnet { summary, .. } = &mut logs.kind {
             *summary = "Login fails after the token refresh".into();
         }
         update(&mut model, Action::Key(key(']')));

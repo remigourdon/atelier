@@ -6,10 +6,11 @@ use ratatui::text::{Line, Span};
 use super::{ListKind, close_tabs, kind, pair, plan, subtle, tab_mark, tag_style, work_line};
 use crate::finish::{Line as PlanLine, Plan, Scope};
 use crate::issues::{Issue, State};
+use crate::links::IssueKeys;
 use crate::state::Repo;
 use crate::tui::app::{
     Action, Cmd, Effect, Feed, IssueStep, Kind, List, MenuEntry, Modal, Model, Pending, Source,
-    Submit, Work,
+    Submit,
 };
 use crate::tui::update::note;
 use crate::tui::view::{Palette, icon};
@@ -46,15 +47,6 @@ impl Model {
         self.issues(list).get(self.index(list)).copied()
     }
 
-    /// An issue's linked work: the worktrees and the carnets, closed ones too, that link its
-    /// key, in any group.
-    pub fn issue_work(&self, issue: &Issue) -> Vec<&Work> {
-        let worktrees = (self.snapshot.work.iter())
-            .filter(|work| !work.is_carnet() && work.links_to(&issue.key));
-        let carnets = (self.snapshot.carnets.iter()).filter(|carnet| carnet.links_to(&issue.key));
-        worktrees.chain(carnets).collect()
-    }
-
     /// An issue's key as shown.
     pub fn issue_label(&self, issue: &Issue) -> String {
         issue.key.display(&self.tracker_config)
@@ -66,14 +58,14 @@ impl Model {
 /// repo holds issues whose work happens elsewhere. It goes to the workspace of the linked work
 /// in that repo, else of any linked work, else the repo's default one.
 fn ask_start(model: &mut Model, issue: Issue) -> Vec<Effect> {
-    let linked = model.issue_work(&issue);
+    let linked = model.linked().of_issue(&issue.key);
     let workspace = |repo: &Repo| {
         let work = (linked.iter().find(|work| work.repo() == Some(&repo.path))).or(linked.first());
         work.map_or(repo.default_workspace.clone(), |work| {
             work.workspace.clone()
         })
     };
-    let own = (issue.project_url.as_deref()).and_then(|url| model.project_repo(url));
+    let own = (issue.project_url.as_deref()).and_then(|url| model.linked().project_repo(url));
     let label = model.issue_label(&issue);
     let mut repos: Vec<&Repo> = model.snapshot.repos.iter().collect();
     repos.sort_by_key(|repo| {
@@ -110,21 +102,22 @@ fn ask_start(model: &mut Model, issue: Issue) -> Vec<Effect> {
 /// linking it that no worktree has checked out yet, unchecked. A review of an unregistered
 /// project can't be checked out, and says why.
 fn issue_plan(model: &Model, issue: &Issue) -> Plan<IssueStep> {
-    let open = (model.issue_work(issue).into_iter()).map(|work| PlanLine::Step {
+    let linked = model.linked();
+    let open = (linked.of_issue(&issue.key).into_iter()).map(|work| PlanLine::Step {
         step: IssueStep::Open(work.path.clone()),
         label: format!("open {}", work.title()),
         note: String::new(),
         checked: true,
     });
-    let reviews = (model.issue_reviews(&issue.key).into_iter())
-        .filter(|review| model.review_work(review).is_none())
+    let reviews = (linked.reviews_linking(&keys(issue)).into_iter())
+        .filter(|review| linked.review_worktree(review).is_none())
         .map(|review| {
             let label = format!(
                 "check out {} (@{})",
                 model.review_label(review),
                 review.author
             );
-            match model.project_repo(&review.project_url) {
+            match linked.project_repo(&review.project_url) {
                 Some(repo) => PlanLine::Step {
                     step: IssueStep::Checkout(Pending::Checkout {
                         repo: repo.path.clone(),
@@ -145,6 +138,11 @@ fn issue_plan(model: &Model, issue: &Issue) -> Plan<IssueStep> {
         title: format!("Work on {}", model.issue_label(issue)),
         lines: open.chain(reviews).collect(),
     }
+}
+
+/// An issue's key, to find the reviews linking it.
+fn keys(issue: &Issue) -> IssueKeys {
+    [issue.key.clone()].into_iter().collect()
 }
 
 /// An issue's state: in progress or done stand out, to do does not.
@@ -190,12 +188,13 @@ impl ListKind for Issues {
 
     fn rows<'a>(&self, model: &'a Model, palette: &Palette, list: List) -> Vec<Line<'a>> {
         let dim = Style::new().fg(palette.dim);
+        let linked = model.linked();
         model
             .issues(list)
             .into_iter()
             .map(|issue| {
                 let glyphs = &palette.glyphs;
-                let work = model.issue_work(issue);
+                let work = linked.of_issue(&issue.key);
                 // Linked work is marked as any tab is: open or not.
                 let marker = if work.is_empty() {
                     Span::raw("  ")
@@ -258,31 +257,37 @@ impl ListKind for Issues {
         for (key, value) in [("Type", &issue.kind), ("Priority", &issue.priority)] {
             pairs.extend(value.clone().map(|value| pair(key, value)));
         }
-        let work = model.issue_work(issue);
+        let linked = model.linked();
+        let work = linked.of_issue(&issue.key);
         if work.is_empty() {
             let none = subtle("none: Space or n creates one", palette);
             pairs.push(pair("Worktree", none));
         }
         pairs.extend((work.into_iter()).map(|work| pair(kind(work), work_line(work, palette))));
-        pairs.extend(model.issue_reviews(&issue.key).into_iter().map(|review| {
-            let checked_out = match model.review_work(review) {
-                Some(_) => Span::styled("checked out", Style::new().fg(palette.ok)),
-                None => subtle("not checked out", palette),
-            };
-            let line = vec![
-                Span::styled(
-                    format!("{} ", palette.glyphs.reviewed),
-                    review_style(palette),
-                ),
-                Span::raw(format!(
-                    "{} · @{} · ",
-                    model.review_label(review),
-                    review.author
-                )),
-                checked_out,
-            ];
-            pair("Review", line)
-        }));
+        pairs.extend(
+            linked
+                .reviews_linking(&keys(issue))
+                .into_iter()
+                .map(|review| {
+                    let checked_out = match linked.review_worktree(review) {
+                        Some(_) => Span::styled("checked out", Style::new().fg(palette.ok)),
+                        None => subtle("not checked out", palette),
+                    };
+                    let line = vec![
+                        Span::styled(
+                            format!("{} ", palette.glyphs.reviewed),
+                            review_style(palette),
+                        ),
+                        Span::raw(format!(
+                            "{} · @{} · ",
+                            model.review_label(review),
+                            review.author
+                        )),
+                        checked_out,
+                    ];
+                    pair("Review", line)
+                }),
+        );
         pairs
     }
 
@@ -319,7 +324,8 @@ impl ListKind for Issues {
             .issue()
             .map(|issue| {
                 model
-                    .issue_work(issue)
+                    .linked()
+                    .of_issue(&issue.key)
                     .into_iter()
                     .filter(|work| work.tab)
                     .map(|work| work.path.clone())

@@ -3,7 +3,7 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, pair, plan, subtle};
+use super::{ListKind, pair, plan, subtle, work};
 use crate::finish::Scope;
 use crate::tui::app::{Action, Effect, Job, Kind, List, Model, Submit};
 use crate::tui::update::{confirm, switch_workspace, update};
@@ -87,7 +87,7 @@ impl ListKind for Workspaces {
             .snapshot
             .work
             .iter()
-            .filter(|work| work.workspace == name)
+            .filter(|work| work.workspace == name && work::shown(work))
             .collect();
         let carnets = work.iter().filter(|work| work.is_carnet()).count();
         let repos: Vec<String> = model

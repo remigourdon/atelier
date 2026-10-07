@@ -676,7 +676,7 @@ fn ask_group(model: &mut Model, pending: Pending) -> Vec<Effect> {
         ),
         initial: String::new(),
         then: Submit::Join(pending),
-        groups: model.groups(),
+        groups: model.linked().groups(),
     };
     update(model, action)
 }
@@ -917,7 +917,12 @@ fn draft_carnet(model: &mut Model, mut draft: Draft, step: DraftStep, value: &st
         DraftStep::Name => {
             draft.name = value.into();
             let group = group_text(draft.group.as_ref()).to_owned();
-            ("New carnet: group", group, model.groups(), DraftStep::Group)
+            (
+                "New carnet: group",
+                group,
+                model.linked().groups(),
+                DraftStep::Group,
+            )
         }
         DraftStep::Group => {
             draft.group = Group::parse(value);
@@ -1042,11 +1047,11 @@ pub mod tests {
     use crate::config::Icons;
     use crate::finish::{self, Scope, Step};
     use crate::git::Commit;
-    use crate::links::tests::{group, key, keys};
+    use crate::links::tests::{key, keys};
     use crate::links::{Group, IssueKey, Links};
     use crate::reviews::Role;
     use crate::state::Repo;
-    use crate::worktrunk::{Forge, Worktree};
+    use crate::worktrunk::Forge;
 
     /// Links in `group` to the issue keys in `name`, as the default pattern finds them.
     fn linking(group: &str, name: &str) -> Links {
@@ -1060,47 +1065,12 @@ pub mod tests {
 
     /// A worktree linking the issue keys in its branch.
     pub fn work(repo: &str, branch: &str, group: &str, workspace: &str) -> Work {
-        let main = branch == "main";
-        let path = if main {
-            PathBuf::from(format!("/src/{repo}"))
-        } else {
-            PathBuf::from(format!("/src/{repo}.{branch}"))
-        };
-        Work {
-            path: path.clone(),
-            workspace: workspace.into(),
-            links: linking(group, branch),
-            tab: false,
-            kind: WorkKind::Worktree {
-                repo: PathBuf::from(format!("/src/{repo}")),
-                repo_name: repo.into(),
-                tree: Box::new(Worktree {
-                    path,
-                    branch: Some(branch.into()),
-                    main,
-                    on_default: main,
-                    default_branch: Some("main".into()),
-                    short_sha: "abc1234".into(),
-                    subject: "Commit".into(),
-                    ..Worktree::default()
-                }),
-            },
-        }
+        crate::items::tests::tree_work(repo, branch, linking(group, branch), workspace)
     }
 
     /// A carnet in `group`, linking the issue keys in its name.
     pub fn carnet(name: &str, group: &str, workspace: &str) -> Work {
-        Work {
-            path: PathBuf::from(format!("/data/{name}")),
-            workspace: workspace.into(),
-            links: linking(group, name),
-            tab: false,
-            kind: WorkKind::Carnet {
-                closed: false,
-                summary: String::new(),
-                readme: None,
-            },
-        }
+        crate::items::tests::carnet_work(name, linking(group, name), workspace)
     }
 
     /// With carnets enabled, one in the ABC-1 group and two ungrouped, open, and one closed in
@@ -1116,10 +1086,10 @@ pub mod tests {
         if let WorkKind::Carnet { closed, .. } = &mut closed.kind {
             *closed = true;
         }
-        model.snapshot.work.extend(open.clone());
-        model.snapshot.carnets = open.into_iter().chain([closed]).collect();
-        // Newest first, as a snapshot lists them.
-        model.snapshot.carnets.sort_by(|a, b| b.path.cmp(&a.path));
+        let mut carnets: Vec<Work> = open.into_iter().chain([closed]).collect();
+        // Newest first, after the worktrees, as a snapshot lists them.
+        carnets.sort_by(|a, b| b.path.cmp(&a.path));
+        model.snapshot.work.extend(carnets);
         model
     }
 
@@ -1139,7 +1109,6 @@ pub mod tests {
                 work("web", "ABC-1-form", "ABC-1", "default"),
                 work("web", "main", "", "side"),
             ],
-            carnets: Vec::new(),
             forges: [(
                 PathBuf::from("/src/api"),
                 Forge {
@@ -1592,7 +1561,7 @@ pub mod tests {
         let mut model = with_carnets(model());
         press(&mut model, "]>");
         assert!(jobs(press(&mut model, "x")).is_empty());
-        model.snapshot.carnets.last_mut().unwrap().tab = true;
+        model.snapshot.work.last_mut().unwrap().tab = true;
         assert_eq!(
             jobs(press(&mut model, "x")),
             [Job::Close(vec!["/data/2026-08-01-done".into()])]
@@ -1600,7 +1569,7 @@ pub mod tests {
         assert!(model.carnet().unwrap().closed());
         assert!(model.modal.is_none());
         press(&mut model, "<");
-        model.snapshot.carnets[0].tab = true;
+        model.snapshot.carnets_mut()[0].tab = true;
         assert_eq!(
             jobs(press(&mut model, "x")),
             [Job::Close(vec!["/data/2026-10-02-ideas".into()])]
@@ -1648,7 +1617,7 @@ pub mod tests {
         if let WorkKind::Carnet { closed, .. } = &mut shared.kind {
             *closed = true;
         }
-        model.snapshot.carnets.push(shared);
+        model.snapshot.work.push(shared);
         assert_eq!(
             jobs(press(&mut model, "x")),
             [Job::Close(vec![
@@ -1656,7 +1625,7 @@ pub mod tests {
                 "/data/shared".into()
             ])]
         );
-        assert!(model.snapshot.carnets.last().unwrap().closed());
+        assert!(model.snapshot.work.last().unwrap().closed());
         assert!(model.modal.is_none());
     }
 
@@ -1740,9 +1709,20 @@ pub mod tests {
     }
 
     #[test]
+    fn the_work_list_shows_a_closed_carnet_only_while_its_tab_is_open() {
+        let mut model = with_carnets(model());
+        let done = || "2026-08-01-done".to_owned();
+        model.snapshot.work.last_mut().unwrap().workspace = "default".into();
+        assert!(!titles(&model).contains(&done()));
+        model.snapshot.work.last_mut().unwrap().tab = true;
+        assert!(titles(&model).contains(&done()));
+    }
+
+    #[test]
     fn the_work_filter_matches_a_carnets_summary() {
         let mut model = with_carnets(model());
-        if let WorkKind::Carnet { summary, .. } = &mut model.snapshot.work[4].kind {
+        let logs = model.snapshot.carnets_mut().swap_remove(1);
+        if let WorkKind::Carnet { summary, .. } = &mut logs.kind {
             *summary = "Token refresh".into();
         }
         press(&mut model, "/token");
@@ -1842,9 +1822,7 @@ pub mod tests {
         snapshot
             .work
             .retain(|work| work.path != Path::new("/src/web"));
-        for listed in [&mut snapshot.work, &mut snapshot.carnets] {
-            listed.retain(|work| !work.path.ends_with("2026-09-20-old"));
-        }
+        (snapshot.work).retain(|work| !work.path.ends_with("2026-09-20-old"));
         refresh(&mut model, snapshot, false);
         assert_eq!(
             loaded(&model),
@@ -2412,36 +2390,6 @@ pub mod tests {
         }
     }
 
-    #[test]
-    fn a_review_row_knows_its_worktree() {
-        let mut model = with_reviews(model());
-        model.snapshot.work[1].tree_mut().branch = Some("change-2".into());
-        let review = model.reviews(List::ToReview)[0].clone();
-        assert_eq!(model.review_project(&review), "api");
-        assert_eq!(
-            model.review_work(&review).map(|work| work.path().clone()),
-            Some("/src/api.ABC-1-login".into())
-        );
-        assert_eq!(model.review_group(&review), group("ABC-1"));
-        let other = model.reviews(List::ToReview)[1].clone();
-        assert_eq!(model.review_project(&other), "org/other");
-        assert!(model.review_work(&other).is_none());
-        assert_eq!(model.review_group(&other), None);
-    }
-
-    #[test]
-    fn a_review_never_matches_another_repos_worktree_on_its_branch() {
-        let mut model = with_reviews(model());
-        model.snapshot.work[2].tree_mut().branch = Some("change-2".into());
-        let review = model.reviews(List::ToReview)[0].clone();
-        assert_eq!(review.branch, "change-2");
-        assert!(
-            model.review_work(&review).is_none(),
-            "web:change-2 is not api's"
-        );
-        assert_eq!(model.review_group(&review), None);
-    }
-
     /// The triage label scheme, with an issue in each section and in Other, one hidden, and a
     /// Jira issue whose key the ABC-1 worktrees link.
     pub fn with_issues(mut model: Model) -> Model {
@@ -2900,8 +2848,7 @@ pub mod tests {
         };
         let refresh = |model: &mut Model, len| {
             let mut snapshot = model.snapshot.clone();
-            let listed = snapshot.work.iter_mut().chain(&mut snapshot.carnets);
-            for work in listed.filter(|work| work.path == path) {
+            for work in (snapshot.work.iter_mut()).filter(|work| work.path == path) {
                 if let WorkKind::Carnet { readme, .. } = &mut work.kind {
                     *readme = Some(Stamp {
                         len,
@@ -2971,36 +2918,6 @@ pub mod tests {
             "{effects:?}"
         );
         assert_eq!(model.commits.get(&path), Some(&commits));
-    }
-
-    #[test]
-    fn an_item_linking_an_issues_key_is_its_linked_work() {
-        let mut model = with_issues(with_carnets(model()));
-        let mut linked = carnet("2026-07-01-notes", "OTHER", "side");
-        linked.links.issue_keys = keys(&["XYZ-1", "api#4"]);
-        if let WorkKind::Carnet { closed, .. } = &mut linked.kind {
-            *closed = true;
-        }
-        model.snapshot.carnets.push(linked);
-        let issue = |key: &str| {
-            let issue = model.issues.iter().find(|issue| issue.key.as_str() == key);
-            issue.unwrap().clone()
-        };
-        let titles = |issue| {
-            (model.issue_work(&issue).iter())
-                .map(|work| work.title())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            titles(issue("api#4")),
-            ["2026-07-01-notes"],
-            "a closed carnet, by a later key, in another group"
-        );
-        assert_eq!(
-            titles(issue("ABC-1")),
-            ["api:ABC-1-login", "web:ABC-1-form", "2026-10-01-ABC-1-logs"],
-            "an open carnet once, after the worktrees"
-        );
     }
 
     #[test]
@@ -3239,7 +3156,7 @@ pub mod tests {
         if let WorkKind::Carnet { closed, .. } = &mut closed.kind {
             *closed = true;
         }
-        model.snapshot.carnets.push(closed);
+        model.snapshot.work.push(closed);
         model
     }
 
@@ -3311,7 +3228,7 @@ pub mod tests {
             .work
             .push(work("api", "x", "slow pages", "side"));
         assert_eq!(
-            model.groups(),
+            model.linked().groups(),
             [
                 Group::parse("ABC-1").unwrap(),
                 Group::parse("SLOW PAGES").unwrap()
