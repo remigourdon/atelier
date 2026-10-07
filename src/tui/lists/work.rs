@@ -692,7 +692,9 @@ fn tree_detail(
             _ => s.help.into(),
         };
         let mut line = symbol(s, words);
-        if let Some(branch) = &tree.default_branch {
+        // Named only where the line compares the branch with it.
+        let compares = !matches!(s.mark, '^' | '∅');
+        if let Some(branch) = tree.default_branch.as_ref().filter(|_| compares) {
             line.push(subtle(format!(" ({branch})"), palette));
         }
         line
@@ -950,6 +952,15 @@ mod tests {
                 "Finished: ⊂ merged into the default branch (f to finish)"
             ],
             "a review with no checks still shows, with no Checks line"
+        );
+        let main = Worktree {
+            symbols: "^".into(),
+            default_branch: Some("main".into()),
+            ..Worktree::default()
+        };
+        assert!(
+            facts(&main, false, false).contains(&"Default branch: ^ is the main worktree".into()),
+            "no branch named where nothing is compared with it"
         );
     }
 }
