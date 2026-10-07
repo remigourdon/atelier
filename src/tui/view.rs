@@ -10,7 +10,7 @@ use super::app::{
     Cmd, Focus, KEYMAP, Kind, List, Model, On, Panel, Popup, Screen, Source, Work, popup_hints,
 };
 use super::lists;
-use super::lists::carnets::Standing;
+use super::lists::carnets;
 use super::markdown::{self, Markdown};
 use super::widgets;
 use crate::config::Icons;
@@ -45,6 +45,8 @@ pub struct Palette {
     pub group: Color,
     /// An issue key, set apart from groups.
     pub issue_key: Color,
+    /// The name of the workspace an item is in.
+    pub workspace: Color,
     /// How a carnet's README is drawn.
     pub markdown: Markdown,
     pub glyphs: Glyphs,
@@ -169,9 +171,8 @@ pub const LEGEND: &[Legend] = &[
     Legend { mark: |g| g.workspace, style: dim, help: "workspace", on: On::Lists(&[Kind::Workspaces]) },
     Legend { mark: |g| g.repo, style: dim, help: "repo", on: On::Lists(&[Kind::Repos]) },
     Legend { mark: |g| g.worktree, style: dim, help: "worktree", on: On::Lists(WORK) },
-    Legend { mark: |g| g.carnet, style: |p| Standing::Open.style(p), help: "carnet, open", on: On::Lists(ITEMS) },
-    Legend { mark: |g| g.carnet, style: |p| Standing::Elsewhere.style(p), help: "carnet, open in another workspace", on: On::Lists(&[Kind::Carnets]) },
-    Legend { mark: |g| g.carnet, style: |p| Standing::Closed.style(p), help: "carnet, closed, the row dimmed", on: On::Lists(ITEMS) },
+    Legend { mark: |g| g.carnet, style: |p| carnets::glyph_style(false, p), help: "carnet, open", on: On::Lists(ITEMS) },
+    Legend { mark: |g| g.carnet, style: |p| carnets::glyph_style(true, p), help: "carnet, closed, the row dimmed", on: On::Lists(ITEMS) },
     Legend { mark: |g| g.review, style: dim, help: "review", on: On::Lists(&[Kind::Reviews]) },
     Legend { mark: |g| g.issue, style: dim, help: "issue", on: On::Lists(&[Kind::Issues]) },
     Legend { mark: |g| g.open, style: |p| lists::tab(true, p).1, help: "tab open", on: On::Lists(ITEMS) },
@@ -264,6 +265,7 @@ impl Palette {
             filter: colors.yellow.into(),
             group: colors.lavender.into(),
             issue_key: colors.peach.into(),
+            workspace: colors.teal.into(),
             markdown: Markdown::new(&colors),
         }
     }

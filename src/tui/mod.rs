@@ -4,6 +4,7 @@ mod app;
 mod jobs;
 mod lists;
 mod markdown;
+mod marks;
 mod schedule;
 pub mod statusline;
 mod update;
@@ -423,11 +424,6 @@ mod tests {
         let palette = Palette::new(Icons::Unicode);
         let buffer = draw(&model, &palette);
         assert_eq!(palette.warn, catppuccin::PALETTE.mocha.colors.yellow.into());
-        assert_eq!(
-            style_of(&buffer, "↓3").fg,
-            Some(palette.warn),
-            "main is behind"
-        );
         assert_eq!(style_of(&buffer, "↑2").fg, Some(palette.text));
         assert_eq!(style_of(&buffer, "↓0").fg, Some(palette.dim));
         assert_eq!(style_of(&buffer, "abc1234 Add").fg, Some(palette.dim));
@@ -557,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn ci_marks_rows_and_carries_its_colour_to_the_detail() {
+    fn severity_tints_the_name_and_the_detail_spells_out_ci() {
         use crate::worktrunk::{Checks, Ci, CiReview, CiState, Decision};
         let mut model = loaded(120, 30);
         model.snapshot.work[0].tree_mut().ci = Some(Ci {
@@ -595,15 +591,9 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(
-            marks,
-            [
-                (palette.error, true),
-                (palette.ok, false),
-                (palette.error, true)
-            ],
-            "the grouped stale row and its detail, then main's row"
-        );
+        assert_eq!(marks, [(palette.error, true)], "only the detail's");
+        assert_eq!(style_of(buffer, "api:ABC-1-login").fg, Some(palette.error));
+        assert_ne!(style_of(buffer, "api:main").fg, Some(palette.error));
         insta::assert_snapshot!(terminal.backend().to_string());
     }
 }

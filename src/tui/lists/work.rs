@@ -17,6 +17,7 @@ use crate::tui::app::{
     Action, Cmd, Draft, DraftStep, Effect, Job, Kind, List, MenuEntry, Modal, Model, Removal,
     Submit, Work, WorkKind,
 };
+use crate::tui::marks::Severity;
 use crate::tui::update::{confirm, note, run, update};
 use crate::tui::view::{Palette, icon};
 use crate::worktrunk::{Ci, CiReview, CiState, Decision, Forge, Worktree};
@@ -214,8 +215,15 @@ impl ListKind for WorkList {
                     } else {
                         palette.glyphs.unfolded
                     };
+                    // Folded, its name takes its members' worst tint.
+                    let worst = (members.iter().filter(|_| folded))
+                        .map(|&index| severity(&model.snapshot.work[index]))
+                        .max()
+                        .and_then(|severity| severity.color(palette));
+                    let name = worst.map_or(group_style(palette), |color| Style::new().fg(color));
                     Line::from(vec![
-                        Span::styled(format!("{glyph} {group}"), group_style(palette).bold()),
+                        Span::styled(format!("{glyph} "), group_style(palette).bold()),
+                        Span::styled(group.to_string(), name.bold()),
                         Span::styled(format!(" {} · {open} open", members.len()), dim),
                     ])
                 }
@@ -232,28 +240,12 @@ impl ListKind for WorkList {
                     let mut spans = vec![Span::raw(indent), marker];
                     if work.is_carnet() {
                         let tracker = &model.tracker_config;
-                        let standing = carnets::Standing::of(work, false);
-                        return carnets::row(work, spans, standing, true, tracker, palette);
+                        return carnets::row(work, spans, None, true, tracker, palette);
                     }
                     spans.extend(icon(glyphs.worktree, dim));
-                    spans.push(Span::raw(work.title()));
-                    let tree = work.tree();
-                    if let Some(ci) = tree.and_then(|tree| tree.ci.as_ref()) {
-                        spans.push(Span::raw(" "));
-                        spans.push(ci_mark(ci, palette));
-                    }
-                    if let Some(tree) = tree.filter(|tree| !tree.symbols.is_empty()) {
-                        spans.push(Span::raw(" "));
-                        spans.push(symbols(tree, palette));
-                    }
-                    if let Some(behind) = tree.and_then(|tree| behind(tree, palette)) {
-                        spans.push(Span::raw(" "));
-                        spans.push(behind);
-                    }
-                    // Finished: dimmed, with why, all but the tab dot or spinner.
-                    if let Some(signal) = finish::signal(work) {
-                        spans.push(Span::raw(" "));
-                        spans.push(finished_mark(signal, palette));
+                    spans.push(Span::styled(work.title(), tint(severity(work), palette)));
+                    // Finished: dimmed, all but the tab dot or spinner.
+                    if finish::signal(work).is_some() {
                         spans[2..].iter_mut().for_each(|span| span.style = dim);
                     }
                     Line::from(spans)
@@ -580,6 +572,21 @@ impl ListKind for WorkList {
             Row::Group { .. } => None,
         }
     }
+}
+
+/// A Work item's severity: a finished worktree's row is dimmed instead, and a carnet has none.
+pub(crate) fn severity(work: &Work) -> Severity {
+    match work.tree() {
+        Some(tree) if finish::signal(work).is_none() => Severity::of(tree),
+        _ => Severity::Fine,
+    }
+}
+
+/// A name in its severity's colour.
+pub(crate) fn tint(severity: Severity, palette: &Palette) -> Style {
+    severity
+        .color(palette)
+        .map_or(Style::new(), |color| Style::new().fg(color))
 }
 
 /// worktrunk's status symbols, such as `!?↑`: warning when the tree is dirty.

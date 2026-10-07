@@ -206,10 +206,6 @@ impl ListKind for Issues {
                 let mut spans = vec![marker];
                 spans.extend(icon(glyphs.issue, dim));
                 spans.push(Span::styled(format!("{} ", model.issue_label(issue)), dim));
-                if !model.issue_reviews(&issue.key).is_empty() {
-                    let glyph = palette.glyphs.reviewed;
-                    spans.push(Span::styled(format!("{glyph} "), review_style(palette)));
-                }
                 if issue.state != State::Todo {
                     let label = format!("{} ", issue.state.label().to_lowercase());
                     spans.push(Span::styled(label, state_style(issue.state, palette)));

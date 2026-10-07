@@ -199,6 +199,11 @@ pub fn key_style(palette: &Palette) -> Style {
     Style::new().fg(palette.issue_key)
 }
 
+/// A workspace's name, wherever an item shows the one it is in.
+pub fn workspace_style(palette: &Palette) -> Style {
+    Style::new().fg(palette.workspace)
+}
+
 /// An optional group, as the detail shows it.
 fn group_span(group: Option<&Group>, palette: &Palette) -> Span<'static> {
     Span::styled(group_text(group).to_owned(), group_style(palette))
