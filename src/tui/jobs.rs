@@ -127,20 +127,6 @@ pub fn run(context: &Context, job: Job) -> Action {
                 log,
             }
         }
-        Job::LinkedGroup(pending) => {
-            let group = context
-                .state()
-                .and_then(|state| {
-                    let items = context.items(&state, &recorder)?;
-                    items.linked_group(&pending.issue_keys())
-                })
-                .map_err(|err| err.to_string());
-            Action::Linked {
-                pending,
-                group,
-                log: recorder.take(),
-            }
-        }
         // Like refreshes, these run constantly: log only failures.
         Job::Fetch { feed, keys, force } => {
             let (rows, log) = match context.state() {
@@ -307,7 +293,6 @@ fn execute(context: &Context, state: &State, runner: &dyn Runner, job: Job) -> R
         | Job::SearchCarnets(_)
         | Job::ExportLog(_)
         | Job::Plan { .. }
-        | Job::LinkedGroup(_)
         | Job::Fetch { .. } => {
             unreachable!("run handles these")
         }

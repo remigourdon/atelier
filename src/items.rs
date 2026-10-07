@@ -372,14 +372,6 @@ impl<'a> Items<'a> {
         keys
     }
 
-    /// The one group among the items linking any of `keys`; items in no group do not count.
-    /// Carnets are read from their folders, so a README edited since the last refresh counts as
-    /// it is now.
-    pub fn linked_group(&self, keys: &IssueKeys) -> Result<Option<Group>> {
-        let items = read(self.state, &self.carnets)?;
-        Ok(LinkedWork::over(&items).linked_group(keys))
-    }
-
     /// The workspace a new item goes to: `explicit` when it is a workspace, else the current
     /// session when it is one, else `fallback`.
     pub fn workspace(&self, explicit: Option<&str>, fallback: &str) -> String {
@@ -1634,38 +1626,6 @@ pub mod tests {
             item.links().unwrap().clone(),
             links("LOGIN", &["DEF-4", "ABC-1"])
         );
-    }
-
-    #[test]
-    fn the_linked_group_is_the_one_group_among_the_items_linking_the_keys() {
-        let state = state();
-        let dir = tempfile::tempdir().unwrap();
-        let linked = |path: &str, group: &str, linking: &[&str]| {
-            let repo = Path::new("/r");
-            let links = links(group, linking);
-            (state.add_worktree(path, repo, &links, "side")).unwrap();
-        };
-        linked("/r.a", "LOGIN", &["DEF-4"]);
-        linked("/r.b", "", &["ABC-1"]);
-        let fake = Fake::default();
-        let items = with_root(&state, &fake, dir.path());
-        let group_of = |linking: &[&str]| items.linked_group(&keys(linking)).unwrap();
-        assert_eq!(
-            group_of(&["ABC-1", "DEF-4"]),
-            group("LOGIN"),
-            "no group does not count"
-        );
-        assert_eq!(group_of(&["ABC-1"]), None);
-        assert_eq!(group_of(&["XYZ-9"]), None);
-        linked("/r.c", "OTHER", &["ABC-1"]);
-        assert_eq!(group_of(&["ABC-1", "DEF-4"]), None, "two groups: none");
-        let notes = carnet::tests::repo(dir.path(), "2026-10-01-notes", Some("+++\n+++\n"));
-        // Its row is stale: the lookup reads the folder.
-        (state.add_carnet(&notes, "side")).unwrap();
-        let readme = "+++\ngroup = \"notes\"\nissues = [\"Y-1\"]\n+++\n";
-        std::fs::write(notes.join("README.md"), readme).unwrap();
-        assert_eq!(group_of(&["Z-1"]), None);
-        assert_eq!(group_of(&["Y-1"]), group("NOTES"));
     }
 
     #[test]

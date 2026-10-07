@@ -187,8 +187,6 @@ pub enum Job {
         pending: Pending,
         group: Option<Group>,
     },
-    /// Looks up the one group among the items linking a pending worktree's issue keys.
-    LinkedGroup(Pending),
 }
 
 /// A worktree for an issue or a review, waiting for its group.
@@ -316,7 +314,7 @@ impl Job {
     pub fn changes_items(&self) -> bool {
         !matches!(
             self,
-            Job::Browse(_) | Job::SwitchWorkspace(_) | Job::ExportLog(_) | Job::LinkedGroup(_)
+            Job::Browse(_) | Job::SwitchWorkspace(_) | Job::ExportLog(_)
         )
     }
 }
@@ -539,12 +537,6 @@ pub enum Action {
     /// A finish plan, built once its repos were fetched.
     Planned {
         plan: Result<Plan, String>,
-        log: Vec<Logged>,
-    },
-    /// The one group linked to a pending worktree's issue keys, if there is one.
-    Linked {
-        pending: Pending,
-        group: Result<Option<Group>, String>,
         log: Vec<Logged>,
     },
     /// A feed's rows, replacing the ones it listed before.
