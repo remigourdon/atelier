@@ -148,7 +148,7 @@ const fn same(a: &str, b: &str) -> bool {
 }
 
 /// A worktree's status symbols about `part`.
-pub fn symbols(tree: &Worktree, part: Part) -> impl Iterator<Item = &'static Symbol> + '_ {
+pub fn symbols_in(tree: &Worktree, part: Part) -> impl Iterator<Item = &'static Symbol> + '_ {
     (tree.symbols.chars().filter_map(lookup)).filter(move |symbol| symbol.part == part)
 }
 
@@ -325,7 +325,7 @@ mod tests {
         let all = "+!?✘↻⊟⊞⊘⚐/^∅_–⊂✗↕↑↓|⇡⇣⇅";
         assert_eq!(SYMBOLS.len(), all.chars().count());
         assert!(all.chars().all(|mark| lookup(mark).is_some()));
-        let parts: Vec<&str> = symbols(&tree("!?↑⇡"), Part::Changes)
+        let parts: Vec<&str> = symbols_in(&tree("!?↑⇡"), Part::Changes)
             .map(|symbol| symbol.mark)
             .collect();
         assert_eq!(parts, ["!", "?"]);

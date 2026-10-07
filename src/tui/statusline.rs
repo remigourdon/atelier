@@ -7,7 +7,7 @@ use color_eyre::eyre::Result;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 
-use super::lists::work::{finished_mark, review_reference, symbols};
+use super::lists::work::{colored_symbols, finished_mark, review_reference};
 use super::lists::{group_style, key_style};
 use super::marks::{self, Mark};
 use super::view::Palette;
@@ -134,7 +134,7 @@ pub fn spans(subject: &Subject, palette: &Palette) -> Vec<Span<'static>> {
 fn cells(tree: &Worktree, forge: Option<&Forge>, palette: &Palette) -> Vec<Vec<Span<'static>>> {
     let mut cells = Vec::new();
     if !tree.symbols.is_empty() {
-        cells.push(symbols(tree, palette));
+        cells.push(colored_symbols(tree, palette));
     }
     if let Some(ci) = &tree.ci {
         cells.extend(marks::checks_span(ci, palette).map(|span| vec![span]));

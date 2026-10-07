@@ -536,7 +536,7 @@ pub(crate) fn severity(work: &Work) -> Severity {
 }
 
 /// worktrunk's status symbols, such as `!?↑`, each in its own colour.
-pub(crate) fn symbols(tree: &Worktree, palette: &Palette) -> Vec<Span<'static>> {
+pub(crate) fn colored_symbols(tree: &Worktree, palette: &Palette) -> Vec<Span<'static>> {
     (tree.symbols.chars())
         .map(|mark| {
             Span::styled(
@@ -547,8 +547,11 @@ pub(crate) fn symbols(tree: &Worktree, palette: &Palette) -> Vec<Span<'static>> 
         .collect()
 }
 
+/// One line of the detail: a fact's spans.
+type Fact = Vec<Span<'static>>;
+
 /// A mark in its colour, then what it means.
-fn fact(mark: impl Into<String>, color: Color, words: impl Into<String>) -> Vec<Span<'static>> {
+fn explain(mark: impl Into<String>, color: Color, words: impl Into<String>) -> Fact {
     vec![
         Span::styled(mark.into(), Style::new().fg(color)),
         Span::raw(format!(" {}", words.into())),
@@ -556,12 +559,14 @@ fn fact(mark: impl Into<String>, color: Color, words: impl Into<String>) -> Vec<
 }
 
 /// A fact's mark in its colour, then `words`.
-fn marked(mark: Mark, words: impl Into<String>, palette: &Palette) -> Vec<Span<'static>> {
-    fact(
-        (mark.glyph)(&palette.glyphs),
-        mark.tone.color(palette),
-        words,
-    )
+fn explain_mark(mark: Mark, words: impl Into<String>, palette: &Palette) -> Fact {
+    let glyph = (mark.glyph)(&palette.glyphs);
+    explain(glyph, mark.tone.color(palette), words)
+}
+
+/// A status symbol in its colour, then `words`.
+fn explain_symbol(symbol: &Symbol, words: impl Into<String>, palette: &Palette) -> Fact {
+    explain(symbol.mark, symbol.tone.color(palette), words)
 }
 
 /// `n` of `thing`, plural past one.
@@ -573,17 +578,6 @@ fn count(n: u64, thing: &str) -> String {
     }
 }
 
-/// Facts under one key: the key on the first line only.
-fn section(
-    pairs: &mut Vec<(String, Line<'static>)>,
-    key: &str,
-    lines: impl IntoIterator<Item = Vec<Span<'static>>>,
-) {
-    for (index, line) in lines.into_iter().enumerate() {
-        pairs.push(pair(if index == 0 { key } else { "" }, line));
-    }
-}
-
 /// What a finished worktree's mark means.
 pub(crate) fn finished_label(signal: Signal) -> &'static str {
     match signal {
@@ -592,9 +586,9 @@ pub(crate) fn finished_label(signal: Signal) -> &'static str {
     }
 }
 
-/// A worktree's state in the detail, one fact a line, each mark with its meaning in words:
-/// its tab, changes, checkout, the default branch, the remote, checks, review, decision, merge
-/// and whether it is finished.
+/// A worktree's state in the detail, one fact a line, each mark with its meaning in words, under
+/// the key of its section, which shows on its first line only: its tab, changes, checkout, the
+/// default branch, the remote, checks, review, decision, merge and whether it is finished.
 fn tree_detail(
     tree: &Worktree,
     tab: bool,
@@ -602,108 +596,151 @@ fn tree_detail(
     forge: Option<&Forge>,
     palette: &Palette,
 ) -> Vec<(String, Line<'static>)> {
-    let glyphs = &palette.glyphs;
-    let mut pairs = Vec::new();
-    let tab = if pulling {
-        fact(glyphs.spinner[0], palette.info, "pulling")
+    let ci = tree.ci.as_ref();
+    let review = ci.and_then(|ci| Some((ci, ci.review.as_ref()?)));
+    let sections: [(&str, Vec<Fact>); 10] = [
+        ("Tab", vec![tab_fact(tab, pulling, palette)]),
+        (Part::Changes.section(), change_facts(tree, palette)),
+        (Part::Checkout.section(), checkout_facts(tree, palette)),
+        (Part::Default.section(), default_branch_facts(tree, palette)),
+        (Part::Remote.section(), vec![remote_fact(tree, palette)]),
+        (
+            "Checks",
+            Vec::from_iter(ci.and_then(|ci| checks_fact(ci, palette))),
+        ),
+        (
+            "Review",
+            Vec::from_iter(review.map(|(ci, review)| review_fact(ci, review, forge, palette))),
+        ),
+        (
+            "Decision",
+            Vec::from_iter(review.and_then(|(_, review)| decision_fact(review, palette))),
+        ),
+        (
+            "Merge",
+            Vec::from_iter(review.map(|(ci, _)| merge_fact(tree, ci, palette))),
+        ),
+        ("Finished", Vec::from_iter(finished_fact(tree, palette))),
+    ];
+    (sections.into_iter())
+        .flat_map(|(key, facts)| {
+            (facts.into_iter().enumerate())
+                .map(move |(index, fact)| pair(if index == 0 { key } else { "" }, fact))
+        })
+        .collect()
+}
+
+fn tab_fact(tab: bool, pulling: bool, palette: &Palette) -> Fact {
+    if pulling {
+        explain(palette.glyphs.spinner[0], palette.info, "pulling")
     } else {
         tab_detail(tab, palette).spans
-    };
-    pairs.push(pair("Tab", tab));
+    }
+}
 
-    let changes: Vec<_> = (marks::symbols(tree, Part::Changes))
-        .map(|symbol| fact(symbol.mark, palette.text, symbol.help))
+/// worktrunk's `+ ! ?` one a line, then the lines changed; `clean` without any.
+fn change_facts(tree: &Worktree, palette: &Palette) -> Vec<Fact> {
+    let mut facts: Vec<Fact> = (marks::symbols_in(tree, Part::Changes))
+        .map(|symbol| explain(symbol.mark, palette.text, symbol.help))
         .collect();
-    let lines = vec![Span::raw(format!(
-        "+{} −{} lines",
-        tree.diff.0, tree.diff.1
-    ))];
-    if changes.is_empty() && !tree.dirty {
-        pairs.push(pair(Part::Changes.section(), subtle("clean", palette)));
-    } else {
-        let lines = changes.into_iter().chain([lines]);
-        section(&mut pairs, Part::Changes.section(), lines);
+    if facts.is_empty() && !tree.dirty {
+        return vec![vec![subtle("clean", palette)]];
     }
+    let (added, deleted) = tree.diff;
+    facts.push(vec![Span::raw(format!("+{added} −{deleted} lines"))]);
+    facts
+}
 
-    let symbol =
-        |symbol: &Symbol, words: String| fact(symbol.mark, symbol.tone.color(palette), words);
-    let checkout = marks::symbols(tree, Part::Checkout).map(|s| symbol(s, s.help.into()));
-    section(&mut pairs, Part::Checkout.section(), checkout);
+fn checkout_facts(tree: &Worktree, palette: &Palette) -> Vec<Fact> {
+    (marks::symbols_in(tree, Part::Checkout))
+        .map(|symbol| explain_symbol(symbol, symbol.help, palette))
+        .collect()
+}
 
-    let default = marks::symbols(tree, Part::Default).map(|s| {
-        let words = match (s.mark, tree.ahead_of_default) {
-            ("↑", Some(n)) => format!("{} by {}", s.help, count(n, "commit")),
-            ("↕", Some(n)) => format!("{}, {} ahead", s.help, count(n, "commit")),
-            _ => s.help.into(),
-        };
-        let mut line = symbol(s, words);
-        // Named only where the line compares the branch with it.
-        let compares = !matches!(s.mark, "^" | "∅");
-        if let Some(branch) = tree.default_branch.as_ref().filter(|_| compares) {
-            line.push(subtle(format!(" ({branch})"), palette));
-        }
-        line
-    });
-    section(&mut pairs, Part::Default.section(), default);
-
-    let remote = match tree.upstream {
-        None => vec![subtle("no upstream", palette)],
-        Some((ahead, behind)) => {
-            let (mark, counts) = match (ahead, behind) {
-                (0, 0) => ("|", None),
-                (ahead, 0) => ("⇡", Some(ahead.to_string())),
-                (0, behind) => ("⇣", Some(behind.to_string())),
-                (ahead, behind) => ("⇅", Some(format!("{ahead} to push, {behind} to pull"))),
+/// Against the default branch, with the commits ahead, and the branch's name where a line
+/// compares with it.
+fn default_branch_facts(tree: &Worktree, palette: &Palette) -> Vec<Fact> {
+    (marks::symbols_in(tree, Part::Default))
+        .map(|symbol| {
+            let help = symbol.help;
+            let words = match (symbol.mark, tree.ahead_of_default) {
+                ("↑", Some(n)) => format!("{help} by {}", count(n, "commit")),
+                ("↕", Some(n)) => format!("{help}, {} ahead", count(n, "commit")),
+                _ => help.into(),
             };
-            let s = marks::find(mark);
-            let words = counts.map_or(s.help.into(), |counts| format!("{} ({counts})", s.help));
-            symbol(s, words)
-        }
+            let mut fact = explain_symbol(symbol, words, palette);
+            let compares = !matches!(symbol.mark, "^" | "∅");
+            if let Some(branch) = tree.default_branch.as_ref().filter(|_| compares) {
+                fact.push(subtle(format!(" ({branch})"), palette));
+            }
+            fact
+        })
+        .collect()
+}
+
+/// Against the remote, with the commits to push and pull; `no upstream` without one.
+fn remote_fact(tree: &Worktree, palette: &Palette) -> Fact {
+    let Some((ahead, behind)) = tree.upstream else {
+        return vec![subtle("no upstream", palette)];
     };
-    pairs.push(pair(Part::Remote.section(), remote));
+    let (mark, counts) = match (ahead, behind) {
+        (0, 0) => ("|", None),
+        (ahead, 0) => ("⇡", Some(ahead.to_string())),
+        (0, behind) => ("⇣", Some(behind.to_string())),
+        (ahead, behind) => ("⇅", Some(format!("{ahead} to push, {behind} to pull"))),
+    };
+    let symbol = marks::find(mark);
+    let help = symbol.help;
+    let words = counts.map_or(help.into(), |counts| format!("{help} ({counts})"));
+    explain_symbol(symbol, words, palette)
+}
 
-    let ci = tree.ci.as_ref();
-    if let Some((ci, checks)) = ci.and_then(|ci| Some((ci, ci.checks?))) {
-        let mark = marks::checks_span(ci, palette).unwrap_or_default();
-        let mut line = vec![mark, Span::raw(format!(" {}", marks::checks(checks).words))];
-        if ci.branch_workflow {
-            line.push(subtle(" (branch workflow)", palette));
-        }
-        if ci.stale {
-            line.push(subtle(" · stale: local commits not pushed", palette));
-        }
-        pairs.push(pair("Checks", line));
+/// `None` without checks.
+fn checks_fact(ci: &Ci, palette: &Palette) -> Option<Fact> {
+    let mut fact = vec![
+        marks::checks_span(ci, palette)?,
+        Span::raw(format!(" {}", marks::checks(ci.checks?).words)),
+    ];
+    if ci.branch_workflow {
+        fact.push(subtle(" (branch workflow)", palette));
     }
+    if ci.stale {
+        fact.push(subtle(" · stale: local commits not pushed", palette));
+    }
+    Some(fact)
+}
 
-    if let Some((ci, review)) = ci.and_then(|ci| Some((ci, ci.review.as_ref()?))) {
-        let mut line = vec![Span::raw(review_reference(review, forge))];
-        if ci.draft() {
-            line.push(subtle(" draft", palette));
-        }
-        pairs.push(pair("Review", line));
-        if let Some(mark) = review.decision.and_then(marks::decision) {
-            pairs.push(pair("Decision", marked(mark, mark.words, palette)));
-        }
-        let merge = if ci.conflicts {
-            let base = tree
-                .default_branch
-                .as_deref()
-                .unwrap_or("the default branch");
-            let mark = marks::CONFLICTS;
-            marked(mark, format!("{} with {base}", mark.words), palette)
-        } else {
-            vec![Span::raw("mergeable")]
-        };
-        pairs.push(pair("Merge", merge));
+fn review_fact(ci: &Ci, review: &CiReview, forge: Option<&Forge>, palette: &Palette) -> Fact {
+    let mut fact = vec![Span::raw(review_reference(review, forge))];
+    if ci.draft() {
+        fact.push(subtle(" draft", palette));
     }
+    fact
+}
 
-    if let Some(signal) = finish::tree_signal(tree) {
-        let mut line = vec![finished_mark(signal, palette)];
-        line.push(Span::raw(format!(" {}", finished_label(signal))));
-        line.push(subtle(" (f to finish)", palette));
-        pairs.push(pair("Finished", line));
+/// `None` without a decision, or for a draft's, which the review's line says.
+fn decision_fact(review: &CiReview, palette: &Palette) -> Option<Fact> {
+    let mark = marks::decision(review.decision?)?;
+    Some(explain_mark(mark, mark.words, palette))
+}
+
+fn merge_fact(tree: &Worktree, ci: &Ci, palette: &Palette) -> Fact {
+    if !ci.conflicts {
+        return vec![Span::raw("mergeable")];
     }
-    pairs
+    let base = (tree.default_branch.as_deref()).unwrap_or("the default branch");
+    let mark = marks::CONFLICTS;
+    explain_mark(mark, format!("{} with {base}", mark.words), palette)
+}
+
+/// Why it is finished; `None` while it is not.
+fn finished_fact(tree: &Worktree, palette: &Palette) -> Option<Fact> {
+    let signal = finish::tree_signal(tree)?;
+    Some(vec![
+        finished_mark(signal, palette),
+        Span::raw(format!(" {}", finished_label(signal))),
+        subtle(" (f to finish)", palette),
+    ])
 }
 
 /// How the forge refers to a review: `#12`, `!12` on GitLab, `open` without a number.
