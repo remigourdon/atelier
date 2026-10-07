@@ -299,50 +299,6 @@ fn statusline_runs_one_wt_at_a_time_per_directory() {
 }
 
 #[test]
-fn zellij_inherits_a_raised_open_file_limit() {
-    // macOS starts shells at a soft limit of 256 open files; the zellij server inherits it
-    // and panics on accept once its tabs' panes and plugins use them up.
-    let home = Home::new();
-    let bin = home.path("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let limits = home.path("limits");
-    let stub = bin.join("zellij");
-    std::fs::write(
-        &stub,
-        format!(
-            "#!/bin/sh\necho \"$(ulimit -Sn) $(ulimit -Hn)\" > '{}'\n",
-            limits.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
-    let atelier = home.command(&[]);
-    let output = Command::new("sh")
-        .args(["-c", "ulimit -Sn 256 && exec \"$0\" open default"])
-        .arg(atelier.get_program())
-        .envs(atelier.get_envs().filter_map(|(k, v)| Some((k, v?))))
-        .env_remove("ZELLIJ")
-        .env_remove("ZELLIJ_SESSION_NAME")
-        .env_remove("ZELLIJ_PANE_ID")
-        .env("PATH", path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let limits = std::fs::read_to_string(limits).unwrap();
-    let (soft, hard) = limits.trim().split_once(' ').unwrap();
-    let wanted = match hard {
-        "unlimited" => 10240,
-        hard => hard.parse::<u64>().unwrap().min(10240),
-    };
-    assert_eq!(soft.parse::<u64>().unwrap(), wanted.max(256), "{limits}");
-}
-
-#[test]
 fn carnets_are_folders_under_the_configured_root() {
     let home = Home::new();
     assert!(

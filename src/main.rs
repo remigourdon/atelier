@@ -20,6 +20,5 @@ mod zellij;
 
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
-    process::raise_open_file_limit();
     cli::run()
 }
