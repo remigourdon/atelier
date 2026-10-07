@@ -67,7 +67,7 @@ pub const SYMBOLS: &[Symbol] = &[
     symbol('+', Part::Changes, Tone::Neutral, "staged changes"),
     symbol('!', Part::Changes, Tone::Neutral, "unstaged changes"),
     symbol('?', Part::Changes, Tone::Neutral, "untracked files"),
-    symbol('✘', Part::Checkout, Tone::Broken, "merge conflicts"),
+    symbol('✘', Part::Checkout, Tone::Broken, "unresolved conflicts in the checkout"),
     symbol('↻', Part::Checkout, Tone::Busy, "rebase, merge or other operation in progress"),
     symbol('⊟', Part::Checkout, Tone::NeedsYou, "prunable: directory or .git missing"),
     symbol('⊞', Part::Checkout, Tone::NeedsYou, "locked"),
