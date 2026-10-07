@@ -185,7 +185,7 @@ impl ListKind for Reviews {
     }
 
     fn activate(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
-        let Some(review) = review(selected) else {
+        let Some(review) = selected.and_then(Target::into_review) else {
             return Vec::new();
         };
         let Some(repo) = model.linked().project_repo(&review.project_url) else {
@@ -212,20 +212,13 @@ impl ListKind for Reviews {
         if cmd != Cmd::Close {
             return Vec::new();
         }
-        let paths = review(selected)
+        let paths = selected
+            .and_then(Target::into_review)
             .and_then(|review| model.linked().review_worktree(&review))
             .filter(|work| work.tab)
             .map(|work| work.path.clone())
             .into_iter()
             .collect();
         close_tabs(model, paths)
-    }
-}
-
-/// The selected review.
-fn review(selected: Option<Target>) -> Option<Review> {
-    match selected? {
-        Target::Review(review) => Some(review.into_owned()),
-        _ => None,
     }
 }

@@ -23,14 +23,6 @@ impl Model {
     }
 }
 
-/// The selected repo.
-fn repo(selected: Option<Target>) -> Option<Repo> {
-    match selected? {
-        Target::Repo(repo) => Some(repo.into_owned()),
-        _ => None,
-    }
-}
-
 impl ListKind for Repos {
     fn kind(&self) -> Kind {
         Kind::Repos
@@ -104,7 +96,7 @@ impl ListKind for Repos {
     }
 
     fn edit(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
-        let Some(repo) = repo(selected) else {
+        let Some(repo) = selected.and_then(Target::into_repo) else {
             return Vec::new();
         };
         let action = Action::ask(
@@ -116,7 +108,7 @@ impl ListKind for Repos {
     }
 
     fn move_to(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
-        let Some(repo) = repo(selected) else {
+        let Some(repo) = selected.and_then(Target::into_repo) else {
             return Vec::new();
         };
         workspace_menu(
@@ -131,7 +123,7 @@ impl ListKind for Repos {
     }
 
     fn remove(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
-        let Some(repo) = repo(selected) else {
+        let Some(repo) = selected.and_then(Target::into_repo) else {
             return Vec::new();
         };
         confirm(

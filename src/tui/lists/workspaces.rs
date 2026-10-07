@@ -125,7 +125,7 @@ impl ListKind for Workspaces {
     }
 
     fn activate(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
-        let Some(name) = name(selected) else {
+        let Some(name) = selected.and_then(Target::into_workspace) else {
             return Vec::new();
         };
         if model.snapshot.here.is_some() {
@@ -140,7 +140,7 @@ impl ListKind for Workspaces {
     }
 
     fn remove(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
-        let Some(name) = name(selected) else {
+        let Some(name) = selected.and_then(Target::into_workspace) else {
             return Vec::new();
         };
         let lines = vec![format!("Remove the workspace {name}?")];
@@ -154,17 +154,9 @@ impl ListKind for Workspaces {
 
     /// A sweep of the workspace.
     fn finish(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
-        match name(selected) {
+        match selected.and_then(Target::into_workspace) {
             Some(name) => plan(model, Scope::Workspace(name)),
             None => Vec::new(),
         }
-    }
-}
-
-/// The selected workspace's name.
-fn name(selected: Option<Target>) -> Option<String> {
-    match selected? {
-        Target::Workspace(name) => Some(name.into_owned()),
-        _ => None,
     }
 }

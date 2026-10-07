@@ -298,7 +298,7 @@ impl ListKind for Issues {
     /// A plan to open the issue's linked work and check out its open reviews, else asks to
     /// start a worktree for it.
     fn activate(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
-        let Some(issue) = issue(selected) else {
+        let Some(issue) = selected.and_then(Target::into_issue) else {
             return Vec::new();
         };
         let plan = issue_plan(model, &issue);
@@ -318,7 +318,8 @@ impl ListKind for Issues {
         if cmd != Cmd::Close {
             return Vec::new();
         }
-        let paths = issue(selected)
+        let paths = selected
+            .and_then(Target::into_issue)
             .map(|issue| {
                 model
                     .linked()
@@ -333,7 +334,7 @@ impl ListKind for Issues {
     }
 
     fn create(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
-        match issue(selected) {
+        match selected.and_then(Target::into_issue) {
             Some(issue) => ask_start(model, issue),
             None => Vec::new(),
         }
@@ -341,7 +342,7 @@ impl ListKind for Issues {
 
     /// The issue's linked work alone, never the rest of its groups.
     fn finish(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
-        let Some(issue) = issue(selected) else {
+        let Some(issue) = selected.and_then(Target::into_issue) else {
             return Vec::new();
         };
         let scope = Scope::Issue {
@@ -350,13 +351,5 @@ impl ListKind for Issues {
             state: issue.state.label().to_lowercase(),
         };
         plan(model, scope)
-    }
-}
-
-/// The selected issue.
-fn issue(selected: Option<Target>) -> Option<Issue> {
-    match selected? {
-        Target::Issue(issue) => Some(issue.into_owned()),
-        _ => None,
     }
 }

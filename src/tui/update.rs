@@ -1074,17 +1074,11 @@ pub mod tests {
         }
 
         pub fn review(&self) -> Option<crate::reviews::Review> {
-            match self.target()? {
-                Target::Review(review) => Some(review.into_owned()),
-                _ => None,
-            }
+            self.target()?.into_review()
         }
 
         pub fn issue(&self) -> Option<crate::issues::Issue> {
-            match self.target()? {
-                Target::Issue(issue) => Some(issue.into_owned()),
-                _ => None,
-            }
+            self.target()?.into_issue()
         }
 
         pub fn targets(&self) -> Vec<Work> {
