@@ -1,14 +1,13 @@
 //! Zellij orchestration: sessions, tabs, the anchor pane, reconcile and tab naming.
 
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{Result, eyre};
 use serde::Deserialize;
 
 use crate::config::Config;
-use crate::git;
 use crate::links::Group;
 use crate::process::Runner;
 use crate::state::{State, Tab};
@@ -208,6 +207,35 @@ pub fn tab_name(
         middle_elide(repo, MAX_TAB_NAME)
     } else {
         repo_branch(repo, branch, MAX_TAB_NAME)
+    }
+}
+
+/// What names an open item's tab.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Naming {
+    pub path: PathBuf,
+    pub workspace: String,
+    pub group: Option<Group>,
+    /// A worktree's repo and the repo's name; `None` for a carnet.
+    pub repo: Option<(PathBuf, String)>,
+}
+
+impl Naming {
+    /// Its tab's name among `open`, the items whose tab is open: [`tab_name`] of its group and
+    /// its repo's name, or its folder's for a carnet, with its branch from `branch` when it shares
+    /// its repo, workspace and group with another open worktree.
+    pub fn tab_name(&self, open: &[Naming], branch: impl FnOnce() -> String) -> String {
+        let group = self.group.as_ref();
+        let Some((repo, name)) = &self.repo else {
+            return tab_name(group, &crate::state::dir_name(&self.path), "", true, false);
+        };
+        let duplicate = open.iter().any(|other| {
+            other.path != self.path
+                && other.workspace == self.workspace
+                && other.group == self.group
+                && other.repo.as_ref().is_some_and(|(other, _)| other == repo)
+        });
+        tab_name(group, name, &branch(), self.path == *repo, duplicate)
     }
 }
 
@@ -470,14 +498,20 @@ impl<'a> Zellij<'a> {
         Ok(())
     }
 
-    /// Opens an item's tab in the workspace that owns it, or focuses the one already open.
-    pub fn open_tab(&self, state: &State, path: &Path) -> Result<Tab> {
+    /// Opens an item's tab in the workspace that owns it, named `name`, or focuses the one
+    /// already open.
+    pub fn open_tab(
+        &self,
+        state: &State,
+        path: &Path,
+        name: impl FnOnce() -> Result<String>,
+    ) -> Result<Tab> {
         let item = state.require_item(path)?;
         self.reconcile(state)?;
         if let Some(tab) = state.tab(path)? {
             if tab.session == item.workspace {
                 self.focus(&tab)?;
-                if let Some(repo) = &item.repo {
+                if let Some(repo) = item.repo() {
                     state.touch_repo(repo)?;
                 }
                 return Ok(tab);
@@ -486,7 +520,7 @@ impl<'a> Zellij<'a> {
         }
         let session = &item.workspace;
         self.ensure_session(session)?;
-        let name = self.name_for(state, path)?;
+        let name = name()?;
         let output = self.action(
             session,
             &[
@@ -511,20 +545,14 @@ impl<'a> Zellij<'a> {
             pane_id,
         };
         state.set_tab(&tab)?;
-        if let Some(repo) = &item.repo {
+        if let Some(repo) = item.repo() {
             state.touch_repo(repo)?;
-            self.sync_names(state, repo)?;
         }
         Ok(tab)
     }
 
     pub fn close_tab(&self, state: &State, path: &Path) -> Result<()> {
-        if self.forget_tab(state, path)?
-            && let Some(repo) = state.item(path)?.and_then(|item| item.repo)
-        {
-            self.sync_names(state, &repo)?;
-        }
-        Ok(())
+        self.forget_tab(state, path).map(drop)
     }
 
     /// Closes every tab of a repo, before the repo is forgotten.
@@ -547,65 +575,34 @@ impl<'a> Zellij<'a> {
         Ok(true)
     }
 
-    /// The tab name for an item, counting it among the open tabs of its repo, workspace and group.
-    fn name_for(&self, state: &State, path: &Path) -> Result<String> {
-        let item = state.require_item(path)?;
-        let repo_path = match &item.repo {
-            Some(repo) if !item.is_carnet() => repo,
-            _ => {
-                let name = crate::state::dir_name(path);
-                return Ok(tab_name(item.links.group.as_ref(), &name, "", true, false));
-            }
-        };
-        let repo = state
-            .repo_by_path(repo_path)?
-            .ok_or_else(|| eyre!("unknown repo: {}", repo_path.display()))?;
-        let siblings = self.open_siblings(state, &item)?;
-        let branch = git::branch(self.runner, path).unwrap_or_else(|| crate::state::dir_name(path));
-        Ok(tab_name(
-            item.links.group.as_ref(),
-            &repo.name(),
-            &branch,
-            path == repo_path,
-            !siblings.is_empty(),
-        ))
-    }
-
-    fn open_siblings(&self, state: &State, item: &crate::state::Item) -> Result<Vec<PathBuf>> {
-        let Some(repo) = item.repo.as_ref().filter(|_| !item.is_carnet()) else {
-            return Ok(Vec::new());
-        };
-        let mut siblings = Vec::new();
-        for other in state.repo_items(repo)? {
-            if other.path != item.path
-                && other.workspace == item.workspace
-                && other.links.group == item.links.group
-                && state.tab(&other.path)?.is_some()
-            {
-                siblings.push(other.path);
+    /// Renames each live tab whose name is not the one `wanted` gives it. A session that cannot
+    /// be listed is skipped, as are tabs it no longer has.
+    pub fn rename_tabs(&self, wanted: &[(&Tab, String)]) -> Result<()> {
+        let sessions: BTreeSet<&str> = (wanted.iter())
+            .map(|(tab, _)| tab.session.as_str())
+            .collect();
+        let mut errors = Vec::new();
+        for session in sessions {
+            let Ok(live) = self.tabs(session) else {
+                continue;
+            };
+            for (tab, name) in wanted.iter().filter(|(tab, _)| tab.session == session) {
+                let stale =
+                    (live.iter()).any(|live| live.tab_id == tab.tab_id && live.name != *name);
+                if stale
+                    && let Err(err) = self.action(
+                        session,
+                        &["rename-tab-by-id", &tab.tab_id.to_string(), name],
+                    )
+                {
+                    errors.push(err.to_string());
+                }
             }
         }
-        Ok(siblings)
-    }
-
-    /// Renames every open tab of a repo, so duplicates in a group show their branch.
-    pub fn sync_names(&self, state: &State, repo: &Path) -> Result<()> {
-        for item in state.repo_items(repo)? {
-            self.rename_tab(state, &item.path)?;
+        match errors.is_empty() {
+            true => Ok(()),
+            false => Err(eyre!(errors.join("; "))),
         }
-        Ok(())
-    }
-
-    /// Renames an item's open tab, as after its group changed.
-    pub fn rename_tab(&self, state: &State, path: &Path) -> Result<()> {
-        if let Some(tab) = state.tab(path)? {
-            let name = self.name_for(state, path)?;
-            self.action(
-                &tab.session,
-                &["rename-tab-by-id", &tab.tab_id.to_string(), &name],
-            )?;
-        }
-        Ok(())
     }
 }
 
@@ -625,7 +622,6 @@ mod tests {
     use super::*;
     use crate::links::tests::{group, links};
     use crate::process::fake::Fake;
-    use crate::state::ItemKind;
 
     #[test]
     fn a_group_names_the_tab_whatever_it_is() {
@@ -757,13 +753,7 @@ mod tests {
         state.add_workspace("w").unwrap();
         state.add_repo("/r", None, "w").unwrap();
         state
-            .add_item(
-                "/r/a",
-                ItemKind::Worktree,
-                Some(Path::new("/r")),
-                &links("", &[]),
-                "w",
-            )
+            .add_worktree("/r/a", Path::new("/r"), &links("", &[]), "w")
             .unwrap();
         state
     }
@@ -800,10 +790,9 @@ mod tests {
         let fake = Fake::default()
             .always("zellij --session w action list-tabs", Some("[]"))
             .always("zellij --session w action new-tab", Some("4\n"))
-            .always("zellij --session w action list-panes", Some(PANES))
-            .always("git -C /r/a", Some("feat"));
+            .always("zellij --session w action list-panes", Some(PANES));
         let tab = zellij(&fake, Some("default"))
-            .open_tab(&state, Path::new("/r/a"))
+            .open_tab(&state, Path::new("/r/a"), || Ok("r:feat".into()))
             .unwrap();
         assert_eq!(
             tab,
@@ -819,7 +808,10 @@ mod tests {
         assert!(calls.contains(
             &"zellij --session w action new-tab --layout W --cwd /r/a --name r:feat".into()
         ));
-        assert!(calls.contains(&"zellij --session w action rename-tab-by-id 4 r:feat".into()));
+        assert!(
+            !calls.iter().any(|call| call.contains("rename-tab")),
+            "named as it opens: {calls:?}"
+        );
     }
 
     #[test]
@@ -831,7 +823,7 @@ mod tests {
             .always("zellij --session w action new-tab", Some("4"))
             .always("zellij --session w action list-panes", Some(PANES));
         zellij(&fake, None)
-            .open_tab(&state, Path::new("/r/a"))
+            .open_tab(&state, Path::new("/r/a"), || Ok("r".into()))
             .unwrap();
         assert!(
             fake.calls()
@@ -851,9 +843,7 @@ mod tests {
         // Reconcile forgets tabs whose path is gone, so use a real directory.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
-        state
-            .add_item(path, ItemKind::Carnet, None, &links("", &[]), "w")
-            .unwrap();
+        state.add_carnet(path, "w").unwrap();
         state
             .set_tab(&Tab {
                 path: path.into(),
@@ -863,7 +853,9 @@ mod tests {
             })
             .unwrap();
         zellij(&fake, Some("default"))
-            .open_tab(&state, Path::new(path))
+            .open_tab(&state, Path::new(path), || {
+                panic!("an open tab is not renamed")
+            })
             .unwrap();
         assert!(fake.calls().contains(
             &"zellij --session default action switch-session w --pane-id 7 --layout S".into()
@@ -881,9 +873,7 @@ mod tests {
         std::fs::create_dir(&gone).unwrap();
         for path in [&alive, &gone] {
             let path = path.to_str().unwrap();
-            state
-                .add_item(path, ItemKind::Carnet, None, &links("", &[]), "w")
-                .unwrap();
+            state.add_carnet(path, "w").unwrap();
             state
                 .set_tab(&Tab {
                     path: path.into(),
@@ -893,9 +883,7 @@ mod tests {
                 })
                 .unwrap();
         }
-        state
-            .add_item("/missing", ItemKind::Carnet, None, &links("", &[]), "w")
-            .unwrap();
+        state.add_carnet("/missing", "w").unwrap();
         state
             .set_tab(&Tab {
                 path: "/missing".into(),
@@ -926,9 +914,7 @@ mod tests {
         let state = state();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
-        state
-            .add_item(path, ItemKind::Carnet, None, &links("", &[]), "w")
-            .unwrap();
+        state.add_carnet(path, "w").unwrap();
         state
             .set_tab(&Tab {
                 path: path.into(),
@@ -966,69 +952,76 @@ mod tests {
         assert_eq!(fake.calls(), ["zellij --layout S attach --create w"]);
     }
 
+    fn naming(path: &str, workspace: &str, group: &str, repo: Option<&str>) -> Naming {
+        Naming {
+            path: path.into(),
+            workspace: workspace.into(),
+            group: crate::links::Group::parse(group),
+            repo: repo.map(|repo| (repo.into(), "r".into())),
+        }
+    }
+
     #[test]
-    fn closing_a_duplicate_renames_the_remaining_tab() {
-        let state = state();
-        state
-            .add_item(
-                "/r/b",
-                ItemKind::Worktree,
-                Some(Path::new("/r")),
-                &links("", &[]),
-                "w",
-            )
-            .unwrap();
-        for (path, id) in [("/r/a", 1), ("/r/b", 2)] {
-            state
-                .set_tab(&Tab {
-                    path: path.into(),
-                    session: "w".into(),
-                    tab_id: id,
-                    pane_id: "0".into(),
-                })
-                .unwrap();
-        }
-        state
-            .add_item(
-                "/r/c",
-                ItemKind::Worktree,
-                Some(Path::new("/r")),
-                &links("G-1", &[]),
-                "w",
-            )
-            .unwrap();
-        state
-            .add_item(
-                "/r/d",
-                ItemKind::Worktree,
-                Some(Path::new("/r")),
-                &links("G-1", &[]),
-                "w",
-            )
-            .unwrap();
-        for (path, id) in [("/r/c", 3), ("/r/d", 4)] {
-            state
-                .set_tab(&Tab {
-                    path: path.into(),
-                    session: "w".into(),
-                    tab_id: id,
-                    pane_id: "0".into(),
-                })
-                .unwrap();
-        }
-        let fake = Fake::default()
-            .always("git -C /r/d", Some("d"))
-            .always("git -C /r/c", Some("c"));
-        let z = zellij(&fake, None);
-        z.sync_names(&state, Path::new("/r")).unwrap();
-        assert!(
-            fake.calls()
-                .contains(&"zellij --session w action rename-tab-by-id 4 G-1·r:d".into())
-        );
-        z.close_tab(&state, Path::new("/r/c")).unwrap();
+    fn a_tab_shows_its_branch_only_beside_an_open_sibling() {
+        let open = [
+            naming("/r/a", "w", "", Some("/r")),
+            naming("/r/c", "w", "G-1", Some("/r")),
+            naming("/r/d", "w", "G-1", Some("/r")),
+            naming("/r/e", "x", "G-1", Some("/r")),
+            naming("/r", "w", "", Some("/r")),
+            naming("/data/2026-10-01-notes", "w", "G-1", None),
+        ];
+        let names: Vec<String> = (open.iter())
+            .map(|naming| naming.tab_name(&open, || crate::state::dir_name(&naming.path)))
+            .collect();
         assert_eq!(
-            fake.calls().last().unwrap(),
-            "zellij --session w action rename-tab-by-id 4 G-1·r"
+            names,
+            [
+                "r:a",
+                "G-1·r:c",
+                "G-1·r:d",
+                "G-1·r",
+                "r",
+                "G-1·2026-10-01-notes",
+            ],
+            "siblings share a repo, a workspace and a group; a carnet has none"
+        );
+        let alone = &open[2..3];
+        assert_eq!(alone[0].tab_name(alone, || "d".into()), "G-1·r");
+    }
+
+    #[test]
+    fn rename_tabs_renames_only_live_tabs_whose_name_differs() {
+        let fake = Fake::default()
+            .always(
+                "zellij --session w action list-tabs",
+                Some(r#"[{"tab_id":1,"position":0,"name":"ok"},{"tab_id":2,"position":1,"name":"typed"}]"#),
+            )
+            .always("zellij --session gone action list-tabs", None);
+        let tab = |path: &str, session: &str, tab_id| Tab {
+            path: path.into(),
+            session: session.into(),
+            tab_id,
+            pane_id: "0".into(),
+        };
+        let tabs = [
+            tab("/a", "w", 1),
+            tab("/b", "w", 2),
+            tab("/c", "w", 3),
+            tab("/d", "gone", 1),
+        ];
+        let wanted: Vec<(&Tab, String)> = (tabs.iter())
+            .zip(["ok", "b", "c", "d"])
+            .map(|(tab, name)| (tab, name.to_owned()))
+            .collect();
+        zellij(&fake, None).rename_tabs(&wanted).unwrap();
+        let renames: Vec<String> = (fake.calls().into_iter())
+            .filter(|call| call.contains("rename-tab"))
+            .collect();
+        assert_eq!(
+            renames,
+            ["zellij --session w action rename-tab-by-id 2 b"],
+            "a tab renamed by hand is renamed back; a gone tab or session is skipped"
         );
     }
 }

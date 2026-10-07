@@ -146,7 +146,7 @@ mod tests {
     use crate::links::group_text;
     use crate::links::tests::{group, keys, links};
     use crate::process::fake::Fake;
-    use crate::state::{ItemKind, State};
+    use crate::state::State;
     use crate::zellij::layouts;
 
     #[test]
@@ -236,14 +236,14 @@ mod tests {
         let item = w.state.require_item(w.path("wt")).unwrap();
         assert_eq!(
             (
-                group_text(item.links.group.as_ref()),
+                group_text(item.links().unwrap().group.as_ref()),
                 item.workspace.as_str()
             ),
             ("", "w"),
             "no group without a hint"
         );
         assert_eq!(
-            item.links.issue_keys,
+            item.links().unwrap().issue_keys,
             keys(&["ABC-1"]),
             "the keys in its branch"
         );
@@ -267,13 +267,7 @@ mod tests {
         let w = world();
         w.state.add_repo(w.path("repo"), None, "default").unwrap();
         w.state
-            .add_item(
-                w.path("wt"),
-                ItemKind::Worktree,
-                Some(&w.path("repo")),
-                &links("", &[]),
-                "w",
-            )
+            .add_worktree(w.path("wt"), &w.path("repo"), &links("", &[]), "w")
             .unwrap();
         let fake = w.fake();
         let tab = w
@@ -285,9 +279,7 @@ mod tests {
     #[test]
     fn worktrees_of_a_carnet_are_not_tracked() {
         let w = world();
-        w.state
-            .add_item(w.path("repo"), ItemKind::Carnet, None, &links("", &[]), "w")
-            .unwrap();
+        w.state.add_carnet(w.path("repo"), "w").unwrap();
         let fake = w.fake();
         assert_eq!(w.run(&fake, Some("w"), Phase::PreStart, "ABC-1-x"), None);
         assert_eq!(w.state.repos().unwrap(), []);
@@ -312,13 +304,13 @@ mod tests {
         let item = w.state.require_item(w.path("wt")).unwrap();
         assert_eq!(
             (
-                group_text(item.links.group.as_ref()),
+                group_text(item.links().unwrap().group.as_ref()),
                 item.workspace.as_str()
             ),
             ("LOGIN", "w")
         );
         assert_eq!(
-            item.links.issue_keys,
+            item.links().unwrap().issue_keys,
             keys(&["XYZ-9", "o/r#2", "ABC-1"]),
             "then the branch's keys"
         );
@@ -369,8 +361,8 @@ mod tests {
         w.run_with(&fake, Some("w"), Phase::PreStart, "ABC-1-x", &hints)
             .unwrap();
         let item = w.state.require_item(w.path("wt")).unwrap();
-        assert_eq!(item.links.group, group("SLOW PAGES"));
-        assert_eq!(item.links.issue_keys, keys(&["ABC-1"]));
+        assert_eq!(item.links().unwrap().group, group("SLOW PAGES"));
+        assert_eq!(item.links().unwrap().issue_keys, keys(&["ABC-1"]));
     }
 
     #[test]

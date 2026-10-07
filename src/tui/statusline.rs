@@ -14,9 +14,10 @@ use super::view::Palette;
 use crate::config::Config;
 use crate::context;
 use crate::finish;
+use crate::items::RecordedKind;
 use crate::links::Group;
 use crate::process::Runner;
-use crate::state::{ItemKind, State, dir_name};
+use crate::state::{State, dir_name};
 use crate::worktrunk::{Forge, Statusline, Worktree};
 
 /// What the line is about.
@@ -46,20 +47,18 @@ pub fn line(state: &State, config: &Config, runner: &dyn Runner, dir: &Path) -> 
     let keys = (located.links.issue_keys.iter())
         .map(|key| key.display(&config.tracker))
         .collect();
-    let subject = match located.item.kind {
-        ItemKind::Carnet => Subject {
+    let subject = match &located.kind {
+        RecordedKind::Carnet(carnet) => Subject {
             name: "carnet".into(),
-            summary: (located.carnet.as_ref())
-                .map_or(String::new(), |carnet| carnet.summary.clone()),
-            closed: located.carnet.is_some_and(|carnet| carnet.closed),
+            summary: carnet.summary.clone(),
+            closed: carnet.closed,
             ..Subject::default()
         },
-        ItemKind::Worktree => {
-            let repo = located.item.repo.clone().unwrap_or_default();
+        RecordedKind::Worktree { repo } => {
             let name = (state.repos()?.into_iter())
-                .find(|registered| registered.path == repo)
-                .map_or_else(|| dir_name(&repo), |registered| registered.name());
-            let tree = context::current_tree(runner, &located.item).ok();
+                .find(|registered| registered.path == *repo)
+                .map_or_else(|| dir_name(repo), |registered| registered.name());
+            let tree = context::current_tree(runner, &located).ok();
             Subject {
                 name,
                 main: tree.as_ref().is_some_and(|statusline| statusline.tree.main),
@@ -364,10 +363,9 @@ mod tests {
         let state = state();
         let dir = tempfile::tempdir().unwrap();
         let tree = dir.path().canonicalize().unwrap();
-        (state.add_item(
+        (state.add_worktree(
             &tree,
-            ItemKind::Worktree,
-            Some(Path::new("/a")),
+            Path::new("/a"),
             &links("LOGIN", &["ABC-1", "o/web#3"]),
             "default",
         ))
