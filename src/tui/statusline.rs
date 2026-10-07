@@ -74,7 +74,7 @@ pub fn line(state: &State, config: &Config, runner: &dyn Runner, dir: &Path) -> 
         keys,
         ..subject
     };
-    let palette = Palette::new(config.flavor(), config.icons);
+    let palette = Palette::new(config.icons);
     Ok(ansi(&spans(&subject, &palette)))
 }
 
@@ -190,7 +190,7 @@ mod tests {
     use crate::worktrunk::Listing;
 
     fn palette(icons: Icons) -> Palette {
-        Palette::new(PALETTE.mocha, icons)
+        Palette::new(icons)
     }
 
     /// The text without its ANSI codes.

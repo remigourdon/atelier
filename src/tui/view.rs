@@ -245,8 +245,9 @@ pub(super) fn icon(glyph: &'static str, style: Style) -> Option<Span<'static>> {
 }
 
 impl Palette {
-    pub fn new(flavor: catppuccin::Flavor, icons: Icons) -> Self {
-        let colors = flavor.colors;
+    /// Catppuccin Mocha's colours.
+    pub fn new(icons: Icons) -> Self {
+        let colors = catppuccin::PALETTE.mocha.colors;
         Self {
             glyphs: Glyphs::new(icons),
             accent: colors.mauve.into(),
@@ -479,7 +480,7 @@ fn detail(model: &Model, palette: &Palette) -> Vec<(String, Line<'static>)> {
 /// How many lines the main view holds, so scrolling stops at its end. Any palette lays out
 /// the same lines.
 pub fn main_len(model: &Model) -> usize {
-    let palette = Palette::new(catppuccin::PALETTE.mocha, Icons::Unicode);
+    let palette = Palette::new(Icons::Unicode);
     detail(model, &palette).len()
         + model.carnet_hits().map_or(0, |hits| hits.len() + 2)
         + readme(model, &palette).map_or(0, |readme| readme.lines.len() + 2)

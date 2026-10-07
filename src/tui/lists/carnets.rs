@@ -323,7 +323,7 @@ mod tests {
     #[test]
     fn a_row_dims_its_date_and_colours_its_glyph_by_standing() {
         let model = with_carnets(model());
-        let palette = Palette::new(catppuccin::PALETTE.mocha, Icons::Unicode);
+        let palette = Palette::new(Icons::Unicode);
         let tracker = &model.tracker_config;
         let mut work = model.snapshot.carnets[1].clone();
         if let WorkKind::Carnet { summary, .. } = &mut work.kind {

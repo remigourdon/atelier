@@ -26,7 +26,7 @@ use jobs::Context;
 use view::Palette;
 
 pub fn run(config: Config) -> Result<()> {
-    let palette = Palette::new(config.flavor(), config.icons);
+    let palette = Palette::new(config.icons);
     let context = Arc::new(Context::new(config)?);
     tokio::runtime::Runtime::new()?.block_on(event_loop(context, palette))
 }
@@ -172,7 +172,7 @@ mod tests {
 
     fn render_with(model: &Model, width: u16, height: u16, icons: Icons) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        let palette = Palette::new(catppuccin::PALETTE.mocha, icons);
+        let palette = Palette::new(icons);
         terminal
             .draw(|frame| view::render(frame, model, &palette))
             .unwrap();
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn groups_and_issue_keys_are_coloured_apart() {
-        let palette = Palette::new(catppuccin::PALETTE.mocha, Icons::Unicode);
+        let palette = Palette::new(Icons::Unicode);
         assert_ne!(palette.group, palette.issue_key);
         let model = loaded(120, 30);
         let buffer = draw(&model, &palette);
@@ -390,7 +390,7 @@ mod tests {
         };
         update(&mut model, Action::Readme(readme));
         model.schedule.finish_all();
-        let palette = Palette::new(catppuccin::PALETTE.mocha, Icons::Unicode);
+        let palette = Palette::new(Icons::Unicode);
         let colors = catppuccin::PALETTE.mocha.colors;
         let buffer = draw(&model, &palette);
         let label = style_of(&buffer, "README");
@@ -416,7 +416,7 @@ mod tests {
     fn commits_and_counts_of_zero_recede_and_warnings_are_yellow() {
         let mut model = loaded(120, 30);
         model.snapshot.work[1].tree_mut().upstream = Some((2, 0));
-        let palette = Palette::new(catppuccin::PALETTE.mocha, Icons::Unicode);
+        let palette = Palette::new(Icons::Unicode);
         let buffer = draw(&model, &palette);
         assert_eq!(palette.warn, catppuccin::PALETTE.mocha.colors.yellow.into());
         assert_eq!(
@@ -573,7 +573,7 @@ mod tests {
             }),
         });
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-        let palette = Palette::new(catppuccin::PALETTE.mocha, Icons::Unicode);
+        let palette = Palette::new(Icons::Unicode);
         terminal
             .draw(|frame| view::render(frame, &model, &palette))
             .unwrap();

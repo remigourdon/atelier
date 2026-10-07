@@ -36,7 +36,7 @@ impl Layouts {
             Ok(path.to_string_lossy().into_owned())
         };
         let zjstatus = Some(config.zjstatus()).filter(|path| path.exists());
-        let background = config.flavor().colors.mantle.hex.to_string();
+        let background = catppuccin::PALETTE.mocha.colors.mantle.hex.to_string();
         let bar = (zjstatus.as_deref())
             .map(|path| info_bar(path, &background))
             .unwrap_or_default();

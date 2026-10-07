@@ -43,7 +43,6 @@ editor = "hx"                  # else $VISUAL, else $EDITOR, else a plain shell;
 agent_command = "claude"
 browser = "firefox"            # else $BROWSER
 tool = "lazygit"               # what `g` runs in an item's directory; {path} and {branch} are replaced, shell-quoted
-theme = "mocha"                # latte | frappe | macchiato | mocha
 icons = "unicode"              # unicode | nerd
 issue_key_pattern = "[A-Z][A-Z0-9]{1,9}-[1-9][0-9]{0,5}"   # the issue keys found in branches and names
 
