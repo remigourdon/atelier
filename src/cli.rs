@@ -248,8 +248,36 @@ pub fn run() -> Result<()> {
         command => {
             let config = Config::load()?;
             let state = State::open(&state::db_path(), config.default_workspace())?;
-            run_state(command, &config, &state)
+            let edits = edits_items(&command);
+            let ran = run_state(command, &config, &state);
+            // A failed edit may still have changed some items.
+            if edits {
+                name_tabs(&state, &config);
+            }
+            ran
         }
+    }
+}
+
+/// Whether `command` changes what names a tab: an item's links, workspace or tab, or a repo's
+/// name.
+fn edits_items(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Ws(Ws::Rm { .. })
+            | Command::Update { .. }
+            | Command::Rm { .. }
+            | Command::Carnet(Carnet::Set { .. })
+            | Command::Carnet(Carnet::Close { .. })
+            | Command::Carnet(Carnet::Reopen { .. })
+    )
+}
+
+/// Names the open tabs after an edit, which stands whether or not they can be renamed: a tab
+/// whose session is gone gets its name when reopened.
+fn name_tabs(state: &State, config: &Config) {
+    if let Err(err) = items(state, config).and_then(|items| items.name_tabs()) {
+        eprintln!("atelier: could not rename the tabs: {err:#}");
     }
 }
 
@@ -290,16 +318,7 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
                 bail!("provide --alias, --workspace, or both");
             }
             let path = state.repo(&repo)?.path;
-            let items = items(state, config)?;
-            items.update_repo(&path, alias.as_deref(), workspace.as_deref())?;
-            // The alias is saved either way: a tab whose session is gone gets the new name
-            // when reopened.
-            if alias.is_some()
-                && let Err(err) = items.rename_repo_tabs(&path)
-            {
-                eprintln!("atelier: could not rename the tabs: {err:#}");
-            }
-            Ok(())
+            items(state, config)?.update_repo(&path, alias.as_deref(), workspace.as_deref())
         }
         Command::Rm { repo } => {
             let path = state.repo(&repo)?.path;
@@ -414,8 +433,8 @@ fn run_state(command: Command, config: &Config, state: &State) -> Result<()> {
 /// refused.
 fn holding_carnet(state: &State, config: &Config, dir: &Path) -> Result<PathBuf> {
     let located = context::locate(state, config, dir)?;
-    match located.filter(|located| located.item.is_carnet()) {
-        Some(located) => Ok(located.item.path),
+    match located.filter(|located| located.is_carnet()) {
+        Some(located) => Ok(located.path),
         None => bail!("{} is not in a carnet", dir.display()),
     }
 }
@@ -437,6 +456,7 @@ fn run_hook(phase: Phase) -> Result<()> {
     if let (Some(tab), Some(target)) = (tab, std::env::var_os("ATELIER_HOOK_TARGET")) {
         std::fs::write(target, format!("{}\n", tab.session))?;
     }
+    name_tabs(&state, &config);
     Ok(())
 }
 
