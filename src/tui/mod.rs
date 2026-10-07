@@ -621,7 +621,11 @@ mod tests {
             })
             .collect();
         assert_eq!(marks, [(palette.error, true)], "only the detail's");
-        assert_eq!(style_of(buffer, "api:ABC-1-login").fg, Some(palette.error));
+        assert_eq!(
+            style_of(buffer, "api:ABC-1-login").fg,
+            Some(palette.warn),
+            "stale checks colour nothing, so the changes requested do"
+        );
         assert_ne!(style_of(buffer, "api:main").fg, Some(palette.error));
         insta::assert_snapshot!(terminal.backend().to_string());
     }

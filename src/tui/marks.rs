@@ -120,8 +120,8 @@ impl Severity {
         }
     }
 
-    /// A worktree's most severe fact: its status symbols, its checks, its review's decision and
-    /// whether that review conflicts.
+    /// A worktree's most severe fact: its status symbols, its checks unless dimmed, its review's
+    /// decision and whether that review conflicts.
     pub fn of(tree: &Worktree) -> Self {
         let symbols = (tree.symbols.chars().filter_map(lookup)).map(|symbol| match symbol.tone {
             Tone::Broken => Self::Broken,
@@ -129,7 +129,8 @@ impl Severity {
             Tone::Busy | Tone::Neutral | Tone::Quiet => Self::Fine,
         });
         let ci = tree.ci.iter().flat_map(|ci| {
-            let checks = match ci.checks {
+            // Dimmed checks, stale or a draft's, colour no name.
+            let checks = match ci.checks.filter(|_| !ci.checks_dimmed()) {
                 Some(Checks::Failed) => Self::Broken,
                 Some(Checks::Unavailable) => Self::NeedsYou,
                 Some(Checks::Passed | Checks::Running) | None => Self::Fine,
@@ -232,5 +233,13 @@ mod tests {
             ci(Some(Checks::Passed), Some(Decision::Approved), false),
             Severity::Fine
         );
+        assert_eq!(
+            ci(Some(Checks::Failed), Some(Decision::Draft), false),
+            Severity::Fine,
+            "a draft's checks are dimmed, so colour nothing"
+        );
+        let mut stale = with_ci(Some(Checks::Failed), None, false);
+        stale.ci.as_mut().unwrap().stale = true;
+        assert_eq!(Severity::of(&stale), Severity::Fine, "nor do stale ones");
     }
 }

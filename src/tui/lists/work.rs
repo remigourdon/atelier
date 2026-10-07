@@ -577,7 +577,7 @@ pub(crate) fn checks_label(checks: Checks) -> &'static str {
 pub(crate) fn checks_span(ci: &Ci, palette: &Palette) -> Option<Span<'static>> {
     let (glyph, color) = checks_mark(ci.checks?, palette);
     let style = Style::new().fg(color);
-    let style = if ci.stale || ci.draft() {
+    let style = if ci.checks_dimmed() {
         style.add_modifier(Modifier::DIM)
     } else {
         style

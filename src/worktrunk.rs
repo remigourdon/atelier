@@ -358,6 +358,11 @@ impl Ci {
         self.decision() == Some(Decision::Draft)
     }
 
+    /// The checks are of an older commit than local HEAD, or of a draft, so worktrunk dims them.
+    pub fn checks_dimmed(&self) -> bool {
+        self.stale || self.draft()
+    }
+
     pub fn decision(&self) -> Option<Decision> {
         self.review.as_ref()?.decision
     }
