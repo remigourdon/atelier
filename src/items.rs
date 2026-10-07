@@ -97,6 +97,12 @@ impl Work {
         matches!(self.kind, WorkKind::Carnet { closed: true, .. })
     }
 
+    /// Whether the Work panel shows it: every worktree and open carnet, and a closed carnet
+    /// while its tab is open.
+    pub fn in_work_panel(&self) -> bool {
+        !self.closed() || self.tab
+    }
+
     /// A carnet's one-line summary; empty for a worktree.
     pub fn summary(&self) -> &str {
         match &self.kind {
