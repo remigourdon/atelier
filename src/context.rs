@@ -48,8 +48,6 @@ pub struct Context {
     pub carnets: Vec<CarnetInfo>,
     /// The open reviews linking an issue key, most recently updated first.
     pub reviews: Vec<ReviewInfo>,
-    /// The newest open carnet in the group: where notes go.
-    pub carnet: Option<PathBuf>,
 }
 
 /// The item described.
@@ -461,10 +459,6 @@ pub fn describe(
                 CarnetInfo::new(carnet, item.workspace.clone(), session(&item.path))
             })
             .collect(),
-        carnet: (listed.iter())
-            .filter(|(_, carnet)| !carnet.closed && in_group(&carnet.links))
-            .max_by(|(a, _), (b, _)| a.path.cmp(&b.path))
-            .map(|(_, carnet)| carnet.path.clone()),
         worktrees,
         reviews,
         links,
@@ -612,8 +606,7 @@ pub fn render(context: &Context, tracker: &TrackerConfig) -> String {
                 &tags(&carnet.links, tracker),
                 &carnet.summary,
             ]);
-            let here = context.carnet.as_ref() == Some(&carnet.path);
-            let _ = writeln!(out, "  {} {text}", mark(here));
+            let _ = writeln!(out, "    {text}");
         }
     }
     if !context.reviews.is_empty() {
@@ -875,11 +868,6 @@ mod tests {
             "the group's, and one sharing a key; ORD-7's own does not"
         );
         assert!(context.carnets[0].closed);
-        assert_eq!(
-            context.carnet,
-            Some(setup.older.clone()),
-            "the newest open one in the group, never one only sharing a key"
-        );
 
         assert_eq!(numbers(&context), [31], "only those linking ABC-1");
         let review = &context.reviews[0];
@@ -944,7 +932,7 @@ mod tests {
         );
         assert!(
             text.contains(&format!(
-                "carnets\n    {}  closed  LOGIN\n    {}  open  ORD-7, ABC-1  Notes\n  * {}  open  LOGIN\n",
+                "carnets\n    {}  closed  LOGIN\n    {}  open  ORD-7, ABC-1  Notes\n    {}  open  LOGIN\n",
                 setup.closed.display(),
                 setup.notes.display(),
                 setup.older.display()
@@ -995,7 +983,6 @@ mod tests {
             .map(|carnet| carnet.name.as_str())
             .collect();
         assert_eq!(names, ["ORD-7-other", "notes"]);
-        assert_eq!(context.carnet, None, "no group, no carnet to write in");
         assert_eq!(numbers(&context), [32, 31], "most recently updated first");
         let worktrees: Vec<_> = (context.reviews.iter())
             .map(|review| (review.worktree.as_ref(), review.here))
@@ -1038,7 +1025,6 @@ mod tests {
         );
         assert_eq!(context.carnets[0].workspace, "w");
         assert_eq!(context.carnets[1].workspace, "default", "never placed");
-        assert_eq!(context.carnet, Some(setup.older.clone()));
         assert!(context.issues.is_empty() && context.reviews.is_empty());
     }
 
@@ -1062,7 +1048,6 @@ mod tests {
             [&setup.shared]
         );
         assert_eq!(context.carnets.len(), 2);
-        assert_eq!(context.carnet, None);
         assert_eq!(numbers(&context), [32]);
         assert!(!context.reviews[0].here);
 
@@ -1111,7 +1096,7 @@ mod tests {
             json,
             serde_json::json!({
                 "item": null, "workspace": null, "group": null, "issue_keys": [], "issues": [],
-                "worktrees": [], "carnets": [], "reviews": [], "carnet": null,
+                "worktrees": [], "carnets": [], "reviews": [],
             })
         );
         let tracker = &setup.config.tracker;
