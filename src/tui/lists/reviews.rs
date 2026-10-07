@@ -4,15 +4,12 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use super::{ListKind, close_tabs, group_style, key_style, pair, subtle, tab_mark, work_line};
-use std::collections::HashSet;
 
-use crate::links::{Group, IssueKey};
 use crate::reviews::{Review, Role};
 use crate::state::Repo;
-use crate::tui::app::{Cmd, Effect, Feed, Kind, List, Model, Pending, Source, Work};
+use crate::tui::app::{Cmd, Effect, Feed, Kind, List, Model, Pending, Source};
 use crate::tui::update::{join_linked_group, note};
 use crate::tui::view::{Palette, icon};
-use crate::worktrunk;
 
 pub struct Reviews;
 
@@ -52,26 +49,10 @@ impl Model {
         self.reviews(list).get(self.index(list)).copied()
     }
 
-    /// The registered repo whose forge web page is `project_url`.
-    pub fn project_repo(&self, project_url: &str) -> Option<&Repo> {
-        let path = self.snapshot.forges.iter().find_map(|(path, forge)| {
-            worktrunk::same_project(&forge.url, project_url).then_some(path)
-        })?;
-        self.snapshot.repos.iter().find(|repo| repo.path == *path)
-    }
-
     /// The registered repo's name for a review's project, else the project's path.
     pub fn review_project(&self, review: &Review) -> String {
-        self.project_repo(&review.project_url)
+        (self.linked().project_repo(&review.project_url))
             .map_or_else(|| review.project.clone(), Repo::name)
-    }
-
-    /// The open reviews linking the issue `key`, in either role, each once.
-    pub fn issue_reviews(&self, key: &IssueKey) -> Vec<&Review> {
-        let mut seen = HashSet::new();
-        (self.reviews.iter())
-            .filter(|review| review.issue_keys.links(key) && seen.insert(&review.url))
-            .collect()
     }
 
     /// How a review is listed: its repo's name, else its project, and its number.
@@ -81,23 +62,6 @@ impl Model {
             self.review_project(review),
             review.provider.reference(review.number)
         )
-    }
-
-    /// A review's group: its worktree's.
-    pub fn review_group(&self, review: &Review) -> Option<Group> {
-        self.review_work(review)
-            .and_then(|work| work.group().cloned())
-    }
-
-    /// The worktree that has a review's branch checked out, in the registered repo whose forge
-    /// is the review's project.
-    pub fn review_work(&self, review: &Review) -> Option<&Work> {
-        let repo = self.project_repo(&review.project_url)?;
-        self.snapshot.work.iter().find(|work| {
-            work.repo() == Some(&repo.path)
-                && (work.tree()).and_then(|tree| tree.branch.as_deref())
-                    == Some(review.branch.as_str())
-        })
     }
 }
 
@@ -136,12 +100,13 @@ impl ListKind for Reviews {
 
     fn rows<'a>(&self, model: &'a Model, palette: &Palette, list: List) -> Vec<Line<'a>> {
         let dim = Style::new().fg(palette.dim);
+        let linked = model.linked();
         model
             .reviews(list)
             .into_iter()
             .map(|review| {
                 let glyphs = &palette.glyphs;
-                let marker = match model.review_work(review) {
+                let marker = match linked.review_worktree(review) {
                     Some(work) => tab_mark(work.tab, palette),
                     None => Span::raw("  "),
                 };
@@ -156,7 +121,7 @@ impl ListKind for Reviews {
                     spans.push(Span::raw(" "));
                     spans.push(status(review, palette));
                 }
-                if let Some(group) = model.review_group(review) {
+                if let Some(group) = linked.review_group(review) {
                     spans.push(Span::styled(format!(" {group}"), group_style(palette)));
                 }
                 if list == List::ToReview {
@@ -176,7 +141,8 @@ impl ListKind for Reviews {
         let Some(review) = model.review() else {
             return Vec::new();
         };
-        let repo = match model.project_repo(&review.project_url) {
+        let linked = model.linked();
+        let repo = match linked.project_repo(&review.project_url) {
             Some(repo) => repo.name(),
             None => format!("{} (not registered)", review.project),
         };
@@ -205,7 +171,7 @@ impl ListKind for Reviews {
             ),
             pair(
                 "Worktree",
-                model.review_work(review).map_or(
+                linked.review_worktree(review).map_or(
                     subtle("none: Space checks it out", palette).into(),
                     |work| work_line(work, palette),
                 ),
@@ -226,7 +192,7 @@ impl ListKind for Reviews {
         let Some(review) = model.review() else {
             return Vec::new();
         };
-        let Some(repo) = model.project_repo(&review.project_url) else {
+        let Some(repo) = model.linked().project_repo(&review.project_url) else {
             let message = format!(
                 "{} is not registered: add a clone with `atelier add <path>`",
                 review.project
@@ -247,7 +213,7 @@ impl ListKind for Reviews {
         }
         let paths = model
             .review()
-            .and_then(|review| model.review_work(review))
+            .and_then(|review| model.linked().review_worktree(review))
             .filter(|work| work.tab)
             .map(|work| work.path.clone())
             .into_iter()

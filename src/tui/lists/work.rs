@@ -1,7 +1,6 @@
 //! Panel 2's Work list: the selected workspace's worktrees and open carnets, and closed
 //! carnets with their tab open, in groups.
 
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use ratatui::style::{Color, Style};
@@ -50,29 +49,8 @@ impl Model {
         }
     }
 
-    /// Every item in every workspace, closed carnets included; a carnet can be listed twice.
-    fn every_item(&self) -> impl Iterator<Item = &Work> {
-        (self.snapshot.work.iter()).chain(&self.snapshot.carnets)
-    }
-
-    /// Every group of every item in every workspace, carnets included, once each, sorted: what
-    /// a group prompt completes to.
-    pub fn groups(&self) -> Vec<Group> {
-        let groups: BTreeSet<&Group> = self.every_item().filter_map(Work::group).collect();
-        groups.into_iter().cloned().collect()
-    }
-
-    /// Every item in `group`, in every workspace, closed carnets included, once each.
-    fn group_members(&self, group: &Group) -> Vec<PathBuf> {
-        let paths: BTreeSet<&PathBuf> = (self.every_item())
-            .filter(|work| work.group() == Some(group))
-            .map(|work| &work.path)
-            .collect();
-        paths.into_iter().cloned().collect()
-    }
-
-    /// Panel 2's rows: named groups, foldable, then the items in no group. Worktrees come
-    /// before carnets, which are newest first.
+    /// Panel 2's rows: named groups, foldable, then the items in no group, each [`shown`].
+    /// Worktrees come before carnets, which are newest first.
     pub fn work_rows(&self) -> Vec<Row> {
         let Some(workspace) = self.workspace() else {
             return Vec::new();
@@ -83,6 +61,7 @@ impl Model {
             .filter(|&index| {
                 let work = &work[index];
                 work.workspace == workspace
+                    && shown(work)
                     && self.matches(
                         List::Work,
                         &[
@@ -414,8 +393,8 @@ impl ListKind for WorkList {
                 let action = Action::Ask {
                     title: format!("Rename group {group}"),
                     initial: group.to_string(),
-                    then: Submit::Group(model.group_members(&group)),
-                    groups: model.groups(),
+                    then: Submit::Group(paths(&model.linked().members(&group))),
+                    groups: model.linked().groups(),
                 };
                 update(model, action)
             }
@@ -525,6 +504,12 @@ impl ListKind for WorkList {
             Row::Group { .. } => None,
         }
     }
+}
+
+/// Whether the Work list shows an item: every worktree and open carnet, and a closed carnet
+/// while its tab is open.
+pub(crate) fn shown(work: &Work) -> bool {
+    !work.closed() || work.tab
 }
 
 /// A Work item's severity: a finished worktree's row is dimmed instead, and a carnet has none.

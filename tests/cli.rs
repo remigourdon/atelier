@@ -290,7 +290,6 @@ fn carnets_are_folders_under_the_configured_root() {
     assert_eq!(context["workspace"]["name"], "default");
     assert_eq!(context["group"], serde_json::Value::Null);
     assert_eq!(context["issue_keys"], serde_json::json!(["ABC-1"]));
-    assert_eq!(context["carnet"], serde_json::Value::Null, "in no group");
     assert_eq!(
         context["carnets"][0]["path"],
         path.to_string_lossy().as_ref()
@@ -306,7 +305,6 @@ fn carnets_are_folders_under_the_configured_root() {
     let context: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(context["item"], serde_json::Value::Null);
     assert_eq!(context["carnets"].as_array().unwrap().len(), 2);
-    assert_eq!(context["carnet"], serde_json::Value::Null, "no group");
     assert_eq!(
         home.ok(&["context", &home.path("Data").to_string_lossy()]),
         "item       not in an atelier item\n"

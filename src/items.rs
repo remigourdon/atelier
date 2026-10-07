@@ -1,7 +1,7 @@
 //! Items: the worktrees and carnets atelier records, and every operation on them, shared by
 //! the TUI, the CLI and the hooks.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{Result, bail, eyre};
@@ -13,6 +13,7 @@ use crate::finish::Signal;
 use crate::finish::Step;
 use crate::git;
 use crate::hooks::Hints;
+use crate::linked::{self, LinkedWork};
 use crate::links::{Group, IssueKey, IssueKeys, KeyFinder, Links};
 use crate::process::{Logged, Runner};
 use crate::reviews::Review;
@@ -28,12 +29,31 @@ pub struct Snapshot {
     /// The current session first.
     pub workspaces: Vec<String>,
     pub repos: Vec<Repo>,
-    /// Worktrees, open carnets, and closed carnets with their tab open.
+    /// Every item once: the worktrees, then every carnet, closed ones included, newest first;
+    /// no carnet while carnets are disabled.
     pub work: Vec<Work>,
-    /// Every carnet, closed ones included, newest first; none while carnets are disabled.
-    pub carnets: Vec<Work>,
     /// Each repo's forge web page, by repo path.
     pub forges: HashMap<PathBuf, Forge>,
+}
+
+impl Snapshot {
+    /// Its items' linked work, with `reviews` placed on its worktrees.
+    pub fn linked<'a>(&'a self, reviews: &'a [Review]) -> LinkedWork<'a, Work> {
+        LinkedWork::new(&self.work, &self.repos, &self.forges, reviews)
+    }
+
+    /// Its carnets, closed ones included, newest first.
+    pub fn carnets(&self) -> Vec<&Work> {
+        self.work.iter().filter(|work| work.is_carnet()).collect()
+    }
+
+    /// Its carnets, newest first, for tests that change them.
+    #[cfg(test)]
+    pub fn carnets_mut(&mut self) -> Vec<&mut Work> {
+        (self.work.iter_mut())
+            .filter(|work| work.is_carnet())
+            .collect()
+    }
 }
 
 /// A worktree or a carnet, with what atelier records about it.
@@ -89,11 +109,6 @@ impl Work {
         self.links.group.as_ref()
     }
 
-    /// Whether it links the issue `key`.
-    pub fn links_to(&self, key: &IssueKey) -> bool {
-        self.links.links(key)
-    }
-
     /// A worktree's repo.
     pub fn repo(&self) -> Option<&PathBuf> {
         match &self.kind {
@@ -137,6 +152,20 @@ impl Work {
             WorkKind::Worktree { repo_name, .. } => format!("{repo_name}:{}", self.branch()),
             WorkKind::Carnet { .. } => state::dir_name(&self.path),
         }
+    }
+}
+
+impl linked::Item for Work {
+    fn links(&self) -> &Links {
+        &self.links
+    }
+
+    fn repo(&self) -> Option<&Path> {
+        Work::repo(self).map(PathBuf::as_path)
+    }
+
+    fn branch(&self) -> Option<&str> {
+        self.tree()?.branch.as_deref()
     }
 }
 
@@ -226,6 +255,21 @@ impl Recorded {
             RecordedKind::Worktree { repo } => Some(repo),
             RecordedKind::Carnet(_) => None,
         }
+    }
+}
+
+/// Its branch is not recorded.
+impl linked::Item for Recorded {
+    fn links(&self) -> &Links {
+        &self.links
+    }
+
+    fn repo(&self) -> Option<&Path> {
+        Recorded::repo(self)
+    }
+
+    fn branch(&self) -> Option<&str> {
+        None
     }
 }
 
@@ -332,14 +376,8 @@ impl<'a> Items<'a> {
     /// Carnets are read from their folders, so a README edited since the last refresh counts as
     /// it is now.
     pub fn linked_group(&self, keys: &IssueKeys) -> Result<Option<Group>> {
-        let mut groups: BTreeSet<Group> = (read(self.state, &self.carnets)?.into_iter())
-            .filter(|item| item.links.issue_keys.shares(keys))
-            .filter_map(|item| item.links.group)
-            .collect();
-        Ok(match groups.len() {
-            1 => groups.pop_first(),
-            _ => None,
-        })
+        let items = read(self.state, &self.carnets)?;
+        Ok(LinkedWork::over(&items).linked_group(keys))
     }
 
     /// The workspace a new item goes to: `explicit` when it is a workspace, else the current
@@ -699,11 +737,7 @@ impl<'a> Items<'a> {
                 RecordedKind::Worktree { .. } => None,
             })
             .collect();
-        work.extend(
-            (carnets.iter())
-                .filter(|carnet| !carnet.closed() || carnet.tab)
-                .cloned(),
-        );
+        work.extend(carnets);
         let here = self.zellij.here().map(str::to_owned);
         let mut workspaces = self.state.workspaces()?;
         if let Some(here) = &here
@@ -717,7 +751,6 @@ impl<'a> Items<'a> {
             workspaces,
             repos: self.state.repos()?,
             work,
-            carnets,
             forges: synced.forges,
         };
         Ok((snapshot, problems))
@@ -916,7 +949,7 @@ struct Synced {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use rusqlite::Connection;
 
     use super::*;
@@ -925,6 +958,51 @@ mod tests {
     use crate::process::fake::Fake;
     use crate::reviews::{Provider, Role};
     use crate::zellij::layouts;
+
+    /// A worktree of `/src/<repo>`, its main one on `main`, with `links`.
+    pub fn tree_work(repo: &str, branch: &str, links: Links, workspace: &str) -> Work {
+        let main = branch == "main";
+        let path = if main {
+            PathBuf::from(format!("/src/{repo}"))
+        } else {
+            PathBuf::from(format!("/src/{repo}.{branch}"))
+        };
+        Work {
+            path: path.clone(),
+            workspace: workspace.into(),
+            links,
+            tab: false,
+            kind: WorkKind::Worktree {
+                repo: PathBuf::from(format!("/src/{repo}")),
+                repo_name: repo.into(),
+                tree: Box::new(Worktree {
+                    path,
+                    branch: Some(branch.into()),
+                    main,
+                    on_default: main,
+                    default_branch: Some("main".into()),
+                    short_sha: "abc1234".into(),
+                    subject: "Commit".into(),
+                    ..Worktree::default()
+                }),
+            },
+        }
+    }
+
+    /// An open carnet `/data/<name>` with `links`.
+    pub fn carnet_work(name: &str, links: Links, workspace: &str) -> Work {
+        Work {
+            path: PathBuf::from(format!("/data/{name}")),
+            workspace: workspace.into(),
+            links,
+            tab: false,
+            kind: WorkKind::Carnet {
+                closed: false,
+                summary: String::new(),
+                readme: None,
+            },
+        }
+    }
 
     const LISTING: &str = r#"{"repo":{"forge":{"url":"https://forge/r"}},"items":[
         {"branch":"main","worktree":{"path":"/r","main":true}},
@@ -1155,13 +1233,13 @@ mod tests {
         tab(&state, "/data/2026-01-01-gone", "side", 4);
         let fake = Fake::default().always("wt", Some(r#"{"items":[]}"#));
         let (snapshot, _) = items(&state, &fake).snapshot(false).unwrap();
-        assert!(snapshot.work.is_empty() && snapshot.carnets.is_empty());
+        assert!(snapshot.work.is_empty());
         assert!(
             state.item("/data/2026-01-01-gone").unwrap().is_some(),
             "disabled, carnet rows are left alone"
         );
         let (snapshot, _) = with_root(&state, &fake, &root).snapshot(false).unwrap();
-        let listed = |work: &[Work]| -> Vec<(String, String, String, String)> {
+        let listed = |work: Vec<&Work>| -> Vec<(String, String, String, String)> {
             (work.iter())
                 .map(|work| {
                     let keys = work.links.issue_keys.join(",");
@@ -1179,7 +1257,7 @@ mod tests {
             (owned(title), owned(group), owned(keys), owned(workspace))
         };
         assert_eq!(
-            listed(&snapshot.carnets),
+            listed(snapshot.carnets()),
             [
                 row("2026-10-02-G-2-bare", "", "G-3", "default"),
                 row("2026-10-01-ABC-1-notes", "LOGIN", "ABC-1", "side"),
@@ -1188,12 +1266,9 @@ mod tests {
             "newest first; a known carnet keeps its workspace, a new one goes to the default"
         );
         assert_eq!(
-            listed(&snapshot.work),
-            [
-                row("2026-10-02-G-2-bare", "", "G-3", "default"),
-                row("2026-10-01-ABC-1-notes", "LOGIN", "ABC-1", "side"),
-            ],
-            "open carnets only"
+            snapshot.work.len(),
+            3,
+            "every item once: no worktree here, and every carnet"
         );
         for carnet in [&placed, &new, &done] {
             let record = state.require_item(carnet).unwrap().record;
@@ -1254,7 +1329,7 @@ mod tests {
         let fake = Fake::default().always("wt", Some(r#"{"items":[]}"#));
         for root in [dir.path().join("unmounted"), dir.path().to_owned()] {
             let (snapshot, _) = with_root(&state, &fake, &root).snapshot(false).unwrap();
-            assert!(snapshot.carnets.is_empty());
+            assert!(snapshot.work.is_empty());
             let workspace = state.require_item(away).unwrap().workspace;
             assert_eq!(workspace, "side", "{}", root.display());
         }
@@ -1366,13 +1441,10 @@ mod tests {
         assert!(calls.contains(&"zellij --session default action close-tab-by-id 4".into()));
         assert_eq!(state.tab(&path).unwrap(), None);
         let (snapshot, _) = items.snapshot(false).unwrap();
-        assert!(snapshot.work.is_empty() && snapshot.carnets[0].closed());
+        assert!(snapshot.work[0].closed() && !snapshot.work[0].tab);
         tab(&state, &path, "default", 4);
         let (snapshot, _) = items.snapshot(false).unwrap();
-        assert_eq!(
-            snapshot.work, snapshot.carnets,
-            "in Work while its tab is open"
-        );
+        assert!(snapshot.work[0].closed() && snapshot.work[0].tab);
         items
             .set_carnets_closed(std::slice::from_ref(&path), false)
             .unwrap();
@@ -2001,7 +2073,7 @@ mod tests {
             "the reader reads the folder"
         );
         let (snapshot, _) = items.snapshot(false).unwrap();
-        assert_eq!(snapshot.carnets[0].links, links("B", &["B-1"]));
+        assert_eq!(snapshot.carnets()[0].links, links("B", &["B-1"]));
         assert_eq!(renamed(&fake, 0), ["3 B·2026-10-01-notes"]);
     }
 

@@ -14,6 +14,7 @@ use crate::finish::{self, Signal};
 use crate::git;
 use crate::issues::{self, Issue, TrackerConfig};
 use crate::items::{self, Recorded, RecordedKind, canonical};
+use crate::linked::{self, LinkedWork};
 use crate::links::{IssueKey, IssueKeys, Links, group_text};
 use crate::process::Runner;
 use crate::reviews::{self, Provider};
@@ -48,8 +49,6 @@ pub struct Context {
     pub carnets: Vec<CarnetInfo>,
     /// The open reviews linking an issue key, most recently updated first.
     pub reviews: Vec<ReviewInfo>,
-    /// The newest open carnet in the group: where notes go.
-    pub carnet: Option<PathBuf>,
 }
 
 /// The item described.
@@ -341,9 +340,13 @@ impl Listings {
             .ok_or_else(|| "not listed by wt list".to_owned())
     }
 
-    /// Where a listed repo is hosted.
-    fn forge(&self, repo: &Path) -> Option<&Forge> {
-        self.0.get(repo)?.as_ref().ok()?.forge.as_ref()
+    /// Where each listed repo is hosted.
+    fn forges(&self) -> HashMap<PathBuf, Forge> {
+        (self.0.iter())
+            .filter_map(|(repo, listing)| {
+                Some((repo.clone(), listing.as_ref().ok()?.forge.clone()?))
+            })
+            .collect()
     }
 }
 
@@ -375,11 +378,11 @@ pub fn describe(
             None => (None, Links::default()),
         },
     };
-    let group = links.group.as_ref();
-    let in_group = |other: &Links| group.is_some() && other.group.as_ref() == group;
-    let linked = |other: &Links| in_group(other) || other.issue_keys.shares(&links.issue_keys);
-    let trees: Vec<&Recorded> = (items.iter())
-        .filter(|item| !item.is_carnet() && linked(&item.links))
+    // Built twice: over the recorded items to pick the linked ones, then over the linked
+    // worktrees as listed, to place reviews on them.
+    let linked = LinkedWork::over(&items).of_links(&links);
+    let trees: Vec<&Recorded> = (linked.iter().copied())
+        .filter(|item| !item.is_carnet())
         .collect();
     let tree = current
         .filter(|item| !item.is_carnet())
@@ -404,40 +407,39 @@ pub fn describe(
             })
         })
         .collect::<Result<_>>()?;
-    let listed: Vec<(&Recorded, &Carnet)> = (items.iter())
+    let listed: Vec<(&Recorded, &Carnet)> = (linked.iter())
         .filter_map(|item| match &item.kind {
-            RecordedKind::Carnet(carnet) if linked(&item.links) => Some((item, carnet)),
-            _ => None,
+            RecordedKind::Carnet(carnet) => Some((*item, carnet)),
+            RecordedKind::Worktree { .. } => None,
         })
         .collect();
     let repos: HashMap<PathBuf, String> = (state.repos()?.into_iter())
         .map(|repo| (repo.path.clone(), repo.name()))
         .collect();
     let worktrees = worktrees(&repos, &session, &listings, &trees, tree.as_ref());
-    let forge = |repo: &Path| match &tree {
-        Some(current) if current.repo == Some(repo) => {
-            current.statusline.as_ref().ok()?.forge.as_ref()
-        }
-        _ => listings.forge(repo),
-    };
-    let reviews = (reviews::cached(state)?.into_iter())
-        .filter(|review| review.issue_keys.shares(&links.issue_keys))
+    // The current worktree's repo is placed by its statusline, the others by their listing.
+    let mut forges = listings.forges();
+    if let Some(current) = &tree
+        && let Some(repo) = current.repo
+    {
+        forges.remove(repo);
+        let forge = (current.statusline.as_ref().ok()).and_then(|line| line.forge.clone());
+        forges.extend(forge.map(|forge| (repo.to_owned(), forge)));
+    }
+    let cached = reviews::cached(state)?;
+    let placed = LinkedWork::new(&worktrees, &[], &forges, &cached);
+    let reviews = (placed.reviews_linking(&links.issue_keys).into_iter())
         .map(|review| {
-            let worktree = (worktrees.iter()).find(|info| {
-                info.branch.as_deref() == Some(review.branch.as_str())
-                    && forge(&info.repo_path).is_some_and(|forge| {
-                        worktrunk::same_project(&forge.url, &review.project_url)
-                    })
-            });
+            let worktree = placed.review_worktree(review);
             ReviewInfo {
                 provider: review.provider,
                 number: review.number,
-                url: review.url,
-                title: review.title,
-                author: review.author,
-                project: review.project,
-                project_url: review.project_url,
-                issue_keys: review.issue_keys,
+                url: review.url.clone(),
+                title: review.title.clone(),
+                author: review.author.clone(),
+                project: review.project.clone(),
+                project_url: review.project_url.clone(),
+                issue_keys: review.issue_keys.clone(),
                 here: worktree.is_some_and(|info| info.holds),
                 worktree: worktree.map(|info| info.path.clone()),
             }
@@ -461,15 +463,25 @@ pub fn describe(
                 CarnetInfo::new(carnet, item.workspace.clone(), session(&item.path))
             })
             .collect(),
-        carnet: (listed.iter())
-            .filter(|(_, carnet)| !carnet.closed && in_group(&carnet.links))
-            .max_by(|(a, _), (b, _)| a.path.cmp(&b.path))
-            .map(|(_, carnet)| carnet.path.clone()),
         worktrees,
         reviews,
         links,
         issues,
     })
+}
+
+impl linked::Item for WorktreeInfo {
+    fn links(&self) -> &Links {
+        &self.links
+    }
+
+    fn repo(&self) -> Option<&Path> {
+        Some(&self.repo_path)
+    }
+
+    fn branch(&self) -> Option<&str> {
+        self.branch.as_deref()
+    }
 }
 
 /// The worktree holding the directory, as `wt list statusline` reported it.
@@ -612,8 +624,7 @@ pub fn render(context: &Context, tracker: &TrackerConfig) -> String {
                 &tags(&carnet.links, tracker),
                 &carnet.summary,
             ]);
-            let here = context.carnet.as_ref() == Some(&carnet.path);
-            let _ = writeln!(out, "  {} {text}", mark(here));
+            let _ = writeln!(out, "    {text}");
         }
     }
     if !context.reviews.is_empty() {
@@ -875,11 +886,6 @@ mod tests {
             "the group's, and one sharing a key; ORD-7's own does not"
         );
         assert!(context.carnets[0].closed);
-        assert_eq!(
-            context.carnet,
-            Some(setup.older.clone()),
-            "the newest open one in the group, never one only sharing a key"
-        );
 
         assert_eq!(numbers(&context), [31], "only those linking ABC-1");
         let review = &context.reviews[0];
@@ -944,7 +950,7 @@ mod tests {
         );
         assert!(
             text.contains(&format!(
-                "carnets\n    {}  closed  LOGIN\n    {}  open  ORD-7, ABC-1  Notes\n  * {}  open  LOGIN\n",
+                "carnets\n    {}  closed  LOGIN\n    {}  open  ORD-7, ABC-1  Notes\n    {}  open  LOGIN\n",
                 setup.closed.display(),
                 setup.notes.display(),
                 setup.older.display()
@@ -995,7 +1001,6 @@ mod tests {
             .map(|carnet| carnet.name.as_str())
             .collect();
         assert_eq!(names, ["ORD-7-other", "notes"]);
-        assert_eq!(context.carnet, None, "no group, no carnet to write in");
         assert_eq!(numbers(&context), [32, 31], "most recently updated first");
         let worktrees: Vec<_> = (context.reviews.iter())
             .map(|review| (review.worktree.as_ref(), review.here))
@@ -1038,7 +1043,6 @@ mod tests {
         );
         assert_eq!(context.carnets[0].workspace, "w");
         assert_eq!(context.carnets[1].workspace, "default", "never placed");
-        assert_eq!(context.carnet, Some(setup.older.clone()));
         assert!(context.issues.is_empty() && context.reviews.is_empty());
     }
 
@@ -1062,7 +1066,6 @@ mod tests {
             [&setup.shared]
         );
         assert_eq!(context.carnets.len(), 2);
-        assert_eq!(context.carnet, None);
         assert_eq!(numbers(&context), [32]);
         assert!(!context.reviews[0].here);
 
@@ -1111,7 +1114,7 @@ mod tests {
             json,
             serde_json::json!({
                 "item": null, "workspace": null, "group": null, "issue_keys": [], "issues": [],
-                "worktrees": [], "carnets": [], "reviews": [], "carnet": null,
+                "worktrees": [], "carnets": [], "reviews": [],
             })
         );
         let tracker = &setup.config.tracker;

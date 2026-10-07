@@ -116,7 +116,7 @@ fn edit_links(model: &mut Model, work: &Work) -> Vec<Effect> {
         title: format!("Group of {}", work.title()),
         initial: group_text(work.group()).to_owned(),
         then: Submit::Group(vec![work.path.clone()]),
-        groups: model.groups(),
+        groups: model.linked().groups(),
     };
     let issue_keys = Action::ask(
         format!("Issue keys of {}", work.title()),

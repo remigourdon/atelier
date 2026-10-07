@@ -17,6 +17,7 @@ use crate::finish::{Plan, Scope, Step};
 use crate::git::Commit;
 use crate::issues::{self, Issue, TrackerConfig};
 pub use crate::items::{Removal, Snapshot, Work, WorkKind};
+use crate::linked::LinkedWork;
 use crate::links::{Group, IssueKeys, Links};
 use crate::process::Logged;
 use crate::reviews::{Provider, Review};
@@ -225,13 +226,10 @@ impl Pending {
 
     /// Whether its worktree exists already.
     pub fn exists(&self, model: &Model) -> bool {
+        let linked = model.linked();
         match self {
-            Pending::Start { repo, branch, .. } => (model.snapshot.work.iter()).any(|work| {
-                work.repo() == Some(repo)
-                    && (work.tree()).and_then(|tree| tree.branch.as_deref())
-                        == Some(branch.as_str())
-            }),
-            Pending::Checkout { review, .. } => model.review_work(review).is_some(),
+            Pending::Start { repo, branch, .. } => linked.worktree_on(repo, branch).is_some(),
+            Pending::Checkout { review, .. } => linked.review_worktree(review).is_some(),
         }
     }
 
@@ -936,6 +934,11 @@ impl Model {
             size,
             icons: Icons::default(),
         }
+    }
+
+    /// The snapshot's linked work, with the listed reviews.
+    pub fn linked(&self) -> LinkedWork<'_, Work> {
+        self.snapshot.linked(&self.reviews)
     }
 
     /// Whether something on screen moves on each tick.

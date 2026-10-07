@@ -42,7 +42,7 @@ command_atelier_cwd        "{focused_pane_cwd}"
 
 ## Scripts and agents
 
-`atelier context [PATH] [--json]` describes the worktree or carnet holding a directory: its group, its issues as last cached, the worktrees and carnets in its group or sharing its issue keys, the open reviews linking them, and the carnet to write notes in. `atelier context --issue-key ABC-5` describes an issue's linked work and reviews instead. Neither writes or fetches anything.
+`atelier context [PATH] [--json]` describes the worktree or carnet holding a directory: its group, its issues as last cached, the worktrees and carnets in its group or sharing its issue keys, and the open reviews linking them. `atelier context --issue-key ABC-5` describes an issue's linked work and reviews instead. Neither writes or fetches anything.
 
 `atelier carnet new <name> [-g GROUP] [-i ISSUE_KEY]... [-s SUMMARY] [--json]` creates a carnet and prints its path (its record with `--json`). `atelier carnet set [PATH] [-g GROUP] [-i ISSUE_KEY]... [-s SUMMARY]` changes the carnet holding a directory in one commit: only the flags given change, `-i` replaces every key, and `-g ""` ungroups. `atelier carnet close [PATH]` and `atelier carnet reopen [PATH]` close and reopen it.
 

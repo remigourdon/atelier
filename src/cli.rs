@@ -67,8 +67,8 @@ enum Command {
         workspace: String,
     },
     /// Describe a directory's worktree or carnet: its workspace, group, issues and reviews,
-    /// the worktrees and carnets of its group or sharing its issue keys, and the carnet to
-    /// write notes in. Reads atelier's records, the caches and `wt list`; changes nothing.
+    /// and the worktrees and carnets of its group or sharing its issue keys. Reads atelier's
+    /// records, the caches and `wt list`; changes nothing.
     Context {
         /// A directory inside the item to describe.
         #[arg(default_value = ".", conflicts_with = "issue_key")]

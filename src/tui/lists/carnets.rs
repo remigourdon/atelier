@@ -31,7 +31,7 @@ impl Model {
     /// The Carnets rows, newest first: those the search found, matching the filter on their
     /// folder name, group, issue keys and summary.
     pub fn carnet_rows(&self) -> Vec<&Work> {
-        (self.snapshot.carnets.iter())
+        (self.snapshot.carnets().into_iter())
             .filter(|work| {
                 (self.search.as_ref()).is_none_or(|search| search.hits.contains_key(&work.path))
             })
@@ -311,7 +311,7 @@ mod tests {
         let model = with_carnets(model());
         let palette = Palette::new(Icons::Unicode);
         let tracker = &model.tracker_config;
-        let mut work = model.snapshot.carnets[1].clone();
+        let mut work = model.snapshot.carnets()[1].clone();
         if let WorkKind::Carnet { summary, .. } = &mut work.kind {
             *summary = "Login fails".into();
         }
@@ -343,7 +343,7 @@ mod tests {
             "no group under its header"
         );
 
-        let unsummarised = &model.snapshot.carnets[0];
+        let unsummarised = &model.snapshot.carnets()[0];
         let line = row(unsummarised, Vec::new(), None, false, tracker, &palette);
         let name = (line.spans.iter()).find(|span| span.content == " ideas");
         assert!(
@@ -351,7 +351,7 @@ mod tests {
             "the folder name stands in"
         );
 
-        let closed = model.snapshot.carnets.last().unwrap();
+        let closed = model.snapshot.work.last().unwrap();
         let lead = vec![tab_mark(false, &palette)];
         let line = row(closed, lead, Some("vrac"), false, tracker, &palette);
         assert_eq!(
