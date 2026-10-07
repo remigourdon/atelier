@@ -586,7 +586,7 @@ mod tests {
         use crate::worktrunk::{Checks, Ci, CiReview, CiState, Decision};
         let mut model = loaded(120, 30);
         model.snapshot.work[0].tree_mut().ci = Some(Ci {
-            state: CiState::Passed,
+            state: Some(CiState::Passed),
             checks: Some(Checks::Passed),
             conflicts: false,
             stale: false,
@@ -594,7 +594,7 @@ mod tests {
             review: None,
         });
         model.snapshot.work[1].tree_mut().ci = Some(Ci {
-            state: CiState::Failed,
+            state: Some(CiState::Failed),
             checks: Some(Checks::Failed),
             conflicts: false,
             stale: true,

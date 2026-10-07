@@ -1681,7 +1681,7 @@ pub mod tests {
         let tree = model.snapshot.work[0].tree_mut();
         assert_eq!(tree.branch.as_deref(), Some("main"));
         tree.ci = Some(worktrunk::Ci {
-            state: worktrunk::CiState::Running,
+            state: Some(worktrunk::CiState::Running),
             checks: Some(worktrunk::Checks::Running),
             conflicts: false,
             stale: false,
@@ -1779,7 +1779,7 @@ pub mod tests {
     fn fast_refreshes_keep_the_last_full_refreshs_ci() {
         let mut model = model();
         let ci = worktrunk::Ci {
-            state: worktrunk::CiState::Failed,
+            state: Some(worktrunk::CiState::Failed),
             checks: Some(worktrunk::Checks::Failed),
             conflicts: false,
             stale: false,

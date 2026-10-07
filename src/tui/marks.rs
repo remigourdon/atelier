@@ -165,7 +165,7 @@ mod tests {
     fn with_ci(checks: Option<Checks>, decision: Option<Decision>, conflicts: bool) -> Worktree {
         Worktree {
             ci: Some(Ci {
-                state: CiState::Passed,
+                state: Some(CiState::Passed),
                 checks,
                 conflicts,
                 stale: false,

@@ -197,10 +197,12 @@ impl From<&Worktree> for Status {
                 committed_at: tree.committed_at.clone(),
             },
             symbols: tree.symbols.clone(),
-            ci: tree.ci.as_ref().map(|ci| CiStatus {
-                state: ci.state,
-                stale: ci.stale,
-                branch_workflow: ci.branch_workflow,
+            ci: tree.ci.as_ref().and_then(|ci| {
+                Some(CiStatus {
+                    state: ci.state?,
+                    stale: ci.stale,
+                    branch_workflow: ci.branch_workflow,
+                })
             }),
             review: (tree.ci.as_ref().and_then(|ci| ci.review.as_ref())).map(|review| Review {
                 number: review.number,

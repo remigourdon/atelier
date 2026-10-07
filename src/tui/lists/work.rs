@@ -900,7 +900,7 @@ mod tests {
             subject: "Accept bounds".into(),
             committed_at: "2 hours ago".into(),
             ci: Some(Ci {
-                state: CiState::Conflicts,
+                state: Some(CiState::Conflicts),
                 checks: Some(Checks::Passed),
                 conflicts: true,
                 stale: true,
