@@ -12,7 +12,7 @@ use super::app::{
 use super::lists;
 use super::lists::carnets;
 use super::markdown::{self, Markdown};
-use super::marks::{self, Severity, Tone};
+use super::marks::{self, Severity};
 use super::widgets;
 use crate::config::Icons;
 use crate::finish::Signal;
@@ -188,10 +188,17 @@ fn checks(checks: Checks, palette: &Palette) -> Style {
     fg(lists::work::checks_mark(checks, palette).1)
 }
 
-/// A status symbol's colour.
-fn symbol(mark: char, palette: &Palette) -> Style {
-    let tone = marks::lookup(mark).map_or(Tone::Quiet, |symbol| symbol.tone);
-    fg(tone.color(palette))
+/// A status symbol's legend entry, its heading, colour and words from [`marks::SYMBOLS`].
+macro_rules! status {
+    ($mark:literal) => {
+        Legend {
+            section: marks::find($mark).part.section(),
+            mark: |_| marks::find($mark).mark,
+            style: |p| fg(marks::find($mark).tone.color(p)),
+            help: marks::find($mark).help,
+            on: On::Lists(WORK),
+        }
+    };
 }
 
 fn severity(severity: Severity, palette: &Palette) -> Style {
@@ -227,29 +234,29 @@ pub const LEGEND: &[Legend] = &[
     Legend { section: "Groups", mark: |g| g.unfolded, style: |p| lists::group_style(p).bold(), help: "unfolded group", on: On::Lists(WORK) },
     Legend { section: "Groups", mark: |_| "GROUP", style: lists::group_style, help: "group name", on: On::Lists(GROUPED) },
     Legend { section: "Groups", mark: |_| "KEY-1", style: lists::key_style, help: "issue key", on: On::Lists(KEYED) },
-    Legend { section: "Changes", mark: |_| "+", style: |p| symbol('+', p), help: "staged changes", on: On::Lists(WORK) },
-    Legend { section: "Changes", mark: |_| "!", style: |p| symbol('!', p), help: "unstaged changes", on: On::Lists(WORK) },
-    Legend { section: "Changes", mark: |_| "?", style: |p| symbol('?', p), help: "untracked files", on: On::Lists(WORK) },
-    Legend { section: "Checkout", mark: |_| "✘", style: |p| symbol('✘', p), help: "unresolved conflicts in the checkout", on: On::Lists(WORK) },
-    Legend { section: "Checkout", mark: |_| "↻", style: |p| symbol('↻', p), help: "rebase, merge or other operation in progress", on: On::Lists(WORK) },
-    Legend { section: "Checkout", mark: |_| "⊟", style: |p| symbol('⊟', p), help: "prunable: directory or .git missing", on: On::Lists(WORK) },
-    Legend { section: "Checkout", mark: |_| "⊞", style: |p| symbol('⊞', p), help: "locked", on: On::Lists(WORK) },
-    Legend { section: "Checkout", mark: |_| "⊘", style: |p| symbol('⊘', p), help: "detached HEAD", on: On::Lists(WORK) },
-    Legend { section: "Checkout", mark: |_| "⚐", style: |p| symbol('⚐', p), help: "branch checked out elsewhere, or at another path", on: On::Lists(WORK) },
-    Legend { section: "Checkout", mark: |_| "/", style: |p| symbol('/', p), help: "branch with no worktree", on: On::Lists(WORK) },
-    Legend { section: "Default branch", mark: |_| "^", style: |p| symbol('^', p), help: "is the main worktree", on: On::Lists(WORK) },
-    Legend { section: "Default branch", mark: |_| "∅", style: |p| symbol('∅', p), help: "no shared history", on: On::Lists(WORK) },
-    Legend { section: "Default branch", mark: |_| "_", style: |p| symbol('_', p), help: "same commit, clean", on: On::Lists(WORK) },
-    Legend { section: "Default branch", mark: |_| "–", style: |p| symbol('–', p), help: "same commit, uncommitted changes", on: On::Lists(WORK) },
-    Legend { section: "Default branch", mark: |_| "⊂", style: |p| symbol('⊂', p), help: "merged", on: On::Lists(WORK) },
-    Legend { section: "Default branch", mark: |_| "✗", style: |p| symbol('✗', p), help: "would conflict when merged", on: On::Lists(WORK) },
-    Legend { section: "Default branch", mark: |_| "↕", style: |p| symbol('↕', p), help: "ahead and behind", on: On::Lists(WORK) },
-    Legend { section: "Default branch", mark: |_| "↑", style: |p| symbol('↑', p), help: "ahead", on: On::Lists(WORK) },
-    Legend { section: "Default branch", mark: |_| "↓", style: |p| symbol('↓', p), help: "behind", on: On::Lists(WORK) },
-    Legend { section: "Remote", mark: |_| "|", style: |p| symbol('|', p), help: "in sync", on: On::Lists(WORK) },
-    Legend { section: "Remote", mark: |_| "⇡", style: |p| symbol('⇡', p), help: "ahead: unpushed commits", on: On::Lists(WORK) },
-    Legend { section: "Remote", mark: |_| "⇣", style: |p| symbol('⇣', p), help: "behind: commits to pull", on: On::Lists(WORK) },
-    Legend { section: "Remote", mark: |_| "⇅", style: |p| symbol('⇅', p), help: "diverged", on: On::Lists(WORK) },
+    status!("+"),
+    status!("!"),
+    status!("?"),
+    status!("✘"),
+    status!("↻"),
+    status!("⊟"),
+    status!("⊞"),
+    status!("⊘"),
+    status!("⚐"),
+    status!("/"),
+    status!("^"),
+    status!("∅"),
+    status!("_"),
+    status!("–"),
+    status!("⊂"),
+    status!("✗"),
+    status!("↕"),
+    status!("↑"),
+    status!("↓"),
+    status!("|"),
+    status!("⇡"),
+    status!("⇣"),
+    status!("⇅"),
     Legend { section: "Checks", mark: |g| g.passed, style: |p| checks(Checks::Passed, p), help: "passed", on: On::Lists(WORK) },
     Legend { section: "Checks", mark: |g| g.running, style: |p| checks(Checks::Running, p), help: "running", on: On::Lists(WORK) },
     Legend { section: "Checks", mark: |g| g.failed, style: |p| checks(Checks::Failed, p), help: "failed", on: On::Lists(WORK) },

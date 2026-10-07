@@ -546,8 +546,10 @@ pub(crate) fn tint(severity: Severity, palette: &Palette) -> Style {
 pub(crate) fn symbols(tree: &Worktree, palette: &Palette) -> Vec<Span<'static>> {
     (tree.symbols.chars())
         .map(|mark| {
-            let tone = marks::lookup(mark).map_or(Tone::Quiet, |symbol| symbol.tone);
-            Span::styled(mark.to_string(), Style::new().fg(tone.color(palette)))
+            Span::styled(
+                mark.to_string(),
+                Style::new().fg(Tone::of(mark).color(palette)),
+            )
         })
         .collect()
 }
@@ -675,46 +677,48 @@ fn tree_detail(
         tree.diff.0, tree.diff.1
     ))];
     if changes.is_empty() && !tree.dirty {
-        pairs.push(pair("Changes", subtle("clean", palette)));
+        pairs.push(pair(Part::Changes.section(), subtle("clean", palette)));
     } else {
-        section(&mut pairs, "Changes", changes.into_iter().chain([lines]));
+        let lines = changes.into_iter().chain([lines]);
+        section(&mut pairs, Part::Changes.section(), lines);
     }
 
     let symbol =
         |symbol: &Symbol, words: String| fact(symbol.mark, symbol.tone.color(palette), words);
     let checkout = marks::symbols(tree, Part::Checkout).map(|s| symbol(s, s.help.into()));
-    section(&mut pairs, "Checkout", checkout);
+    section(&mut pairs, Part::Checkout.section(), checkout);
 
     let default = marks::symbols(tree, Part::Default).map(|s| {
         let words = match (s.mark, tree.ahead_of_default) {
-            ('↑', Some(n)) => format!("{} by {}", s.help, count(n, "commit")),
-            ('↕', Some(n)) => format!("{}, {} ahead", s.help, count(n, "commit")),
+            ("↑", Some(n)) => format!("{} by {}", s.help, count(n, "commit")),
+            ("↕", Some(n)) => format!("{}, {} ahead", s.help, count(n, "commit")),
             _ => s.help.into(),
         };
         let mut line = symbol(s, words);
         // Named only where the line compares the branch with it.
-        let compares = !matches!(s.mark, '^' | '∅');
+        let compares = !matches!(s.mark, "^" | "∅");
         if let Some(branch) = tree.default_branch.as_ref().filter(|_| compares) {
             line.push(subtle(format!(" ({branch})"), palette));
         }
         line
     });
-    section(&mut pairs, "Default branch", default);
+    section(&mut pairs, Part::Default.section(), default);
 
     let remote = match tree.upstream {
         None => vec![subtle("no upstream", palette)],
         Some((ahead, behind)) => {
-            let (mark, words) = match (ahead, behind) {
-                (0, 0) => ('|', "in sync".to_owned()),
-                (ahead, 0) => ('⇡', format!("ahead: {} unpushed", count(ahead, "commit"))),
-                (0, behind) => ('⇣', format!("behind: {} to pull", count(behind, "commit"))),
-                (ahead, behind) => ('⇅', format!("diverged: {ahead} to push, {behind} to pull")),
+            let (mark, counts) = match (ahead, behind) {
+                (0, 0) => ("|", None),
+                (ahead, 0) => ("⇡", Some(ahead.to_string())),
+                (0, behind) => ("⇣", Some(behind.to_string())),
+                (ahead, behind) => ("⇅", Some(format!("{ahead} to push, {behind} to pull"))),
             };
-            let tone = marks::lookup(mark).map_or(Tone::Quiet, |symbol| symbol.tone);
-            fact(mark, tone.color(palette), words)
+            let s = marks::find(mark);
+            let words = counts.map_or(s.help.into(), |counts| format!("{} ({counts})", s.help));
+            symbol(s, words)
         }
     };
-    pairs.push(pair("Remote", remote));
+    pairs.push(pair(Part::Remote.section(), remote));
 
     let ci = tree.ci.as_ref();
     if let Some((ci, checks)) = ci.and_then(|ci| Some((ci, ci.checks?))) {
@@ -909,7 +913,7 @@ mod tests {
                 "-: +48 −12 lines",
                 "Checkout: ↻ rebase, merge or other operation in progress",
                 "Default branch: ↑ ahead by 3 commits (main)",
-                "Remote: ⇅ diverged: 1 to push, 2 to pull",
+                "Remote: ⇅ diverged (1 to push, 2 to pull)",
                 "Checks: ✔ passed · stale: local commits not pushed",
                 "Review: #464",
                 "Decision: ◇ waiting for approval",

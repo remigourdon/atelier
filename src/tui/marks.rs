@@ -15,6 +15,18 @@ pub enum Part {
     Remote,
 }
 
+impl Part {
+    /// The heading of its section, in the detail and the legend.
+    pub const fn section(self) -> &'static str {
+        match self {
+            Self::Changes => "Changes",
+            Self::Checkout => "Checkout",
+            Self::Default => "Default branch",
+            Self::Remote => "Remote",
+        }
+    }
+}
+
 /// A mark's colour, by what it asks of the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
@@ -31,6 +43,11 @@ pub enum Tone {
 }
 
 impl Tone {
+    /// A status symbol's tone, grey for one worktrunk added since.
+    pub fn of(mark: char) -> Self {
+        lookup(mark).map_or(Self::Quiet, |symbol| symbol.tone)
+    }
+
     pub fn color(self, palette: &Palette) -> Color {
         match self {
             Self::Broken => palette.error,
@@ -45,14 +62,15 @@ impl Tone {
 /// One of worktrunk's status symbols.
 #[derive(Debug)]
 pub struct Symbol {
-    pub mark: char,
+    /// One character.
+    pub mark: &'static str,
     pub part: Part,
     pub tone: Tone,
     /// What it means, in plain words.
     pub help: &'static str,
 }
 
-const fn symbol(mark: char, part: Part, tone: Tone, help: &'static str) -> Symbol {
+const fn symbol(mark: &'static str, part: Part, tone: Tone, help: &'static str) -> Symbol {
     Symbol {
         mark,
         part,
@@ -64,34 +82,62 @@ const fn symbol(mark: char, part: Part, tone: Tone, help: &'static str) -> Symbo
 /// Every status symbol `wt list` draws, each in exactly one part, in the legend's order.
 #[rustfmt::skip]
 pub const SYMBOLS: &[Symbol] = &[
-    symbol('+', Part::Changes, Tone::Neutral, "staged changes"),
-    symbol('!', Part::Changes, Tone::Neutral, "unstaged changes"),
-    symbol('?', Part::Changes, Tone::Neutral, "untracked files"),
-    symbol('✘', Part::Checkout, Tone::Broken, "unresolved conflicts in the checkout"),
-    symbol('↻', Part::Checkout, Tone::Busy, "rebase, merge or other operation in progress"),
-    symbol('⊟', Part::Checkout, Tone::NeedsYou, "prunable: directory or .git missing"),
-    symbol('⊞', Part::Checkout, Tone::NeedsYou, "locked"),
-    symbol('⊘', Part::Checkout, Tone::NeedsYou, "detached HEAD"),
-    symbol('⚐', Part::Checkout, Tone::NeedsYou, "branch checked out elsewhere, or at another path"),
-    symbol('/', Part::Checkout, Tone::Quiet, "branch with no worktree"),
-    symbol('^', Part::Default, Tone::Quiet, "is the main worktree"),
-    symbol('∅', Part::Default, Tone::NeedsYou, "no shared history"),
-    symbol('_', Part::Default, Tone::Quiet, "same commit, clean"),
-    symbol('–', Part::Default, Tone::Quiet, "same commit, uncommitted changes"),
-    symbol('⊂', Part::Default, Tone::Quiet, "merged"),
-    symbol('✗', Part::Default, Tone::Broken, "would conflict when merged"),
-    symbol('↕', Part::Default, Tone::Quiet, "ahead and behind"),
-    symbol('↑', Part::Default, Tone::Quiet, "ahead"),
-    symbol('↓', Part::Default, Tone::Quiet, "behind"),
-    symbol('|', Part::Remote, Tone::Quiet, "in sync"),
-    symbol('⇡', Part::Remote, Tone::Quiet, "ahead: unpushed commits"),
-    symbol('⇣', Part::Remote, Tone::NeedsYou, "behind: commits to pull"),
-    symbol('⇅', Part::Remote, Tone::NeedsYou, "diverged"),
+    symbol("+", Part::Changes, Tone::Neutral, "staged changes"),
+    symbol("!", Part::Changes, Tone::Neutral, "unstaged changes"),
+    symbol("?", Part::Changes, Tone::Neutral, "untracked files"),
+    symbol("✘", Part::Checkout, Tone::Broken, "unresolved conflicts in the checkout"),
+    symbol("↻", Part::Checkout, Tone::Busy, "rebase, merge or other operation in progress"),
+    symbol("⊟", Part::Checkout, Tone::NeedsYou, "prunable: directory or .git missing"),
+    symbol("⊞", Part::Checkout, Tone::NeedsYou, "locked"),
+    symbol("⊘", Part::Checkout, Tone::NeedsYou, "detached HEAD"),
+    symbol("⚐", Part::Checkout, Tone::NeedsYou, "branch checked out elsewhere, or at another path"),
+    symbol("/", Part::Checkout, Tone::Quiet, "branch with no worktree"),
+    symbol("^", Part::Default, Tone::Quiet, "is the main worktree"),
+    symbol("∅", Part::Default, Tone::NeedsYou, "no shared history"),
+    symbol("_", Part::Default, Tone::Quiet, "same commit, clean"),
+    symbol("–", Part::Default, Tone::Quiet, "same commit, uncommitted changes"),
+    symbol("⊂", Part::Default, Tone::Quiet, "merged"),
+    symbol("✗", Part::Default, Tone::Broken, "would conflict when merged"),
+    symbol("↕", Part::Default, Tone::Quiet, "ahead and behind"),
+    symbol("↑", Part::Default, Tone::Quiet, "ahead"),
+    symbol("↓", Part::Default, Tone::Quiet, "behind"),
+    symbol("|", Part::Remote, Tone::Quiet, "in sync"),
+    symbol("⇡", Part::Remote, Tone::Quiet, "ahead: unpushed commits"),
+    symbol("⇣", Part::Remote, Tone::NeedsYou, "behind: commits to pull"),
+    symbol("⇅", Part::Remote, Tone::NeedsYou, "diverged"),
 ];
 
 /// What a status symbol means; `None` for one worktrunk added since.
 pub fn lookup(mark: char) -> Option<&'static Symbol> {
-    SYMBOLS.iter().find(|symbol| symbol.mark == mark)
+    SYMBOLS.iter().find(|symbol| symbol.mark.chars().eq([mark]))
+}
+
+/// The status symbol `mark`, found while compiling: a mark not in [`SYMBOLS`] fails the build.
+pub const fn find(mark: &str) -> &'static Symbol {
+    let mut index = 0;
+    while index < SYMBOLS.len() {
+        if same(SYMBOLS[index].mark, mark) {
+            return &SYMBOLS[index];
+        }
+        index += 1;
+    }
+    panic!("not a status symbol");
+}
+
+/// `a == b`, in a `const fn`.
+const fn same(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < a.len() {
+        if a[index] != b[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
 /// A worktree's status symbols about `part`.
@@ -186,10 +232,11 @@ mod tests {
         let all = "+!?✘↻⊟⊞⊘⚐/^∅_–⊂✗↕↑↓|⇡⇣⇅";
         assert_eq!(SYMBOLS.len(), all.chars().count());
         assert!(all.chars().all(|mark| lookup(mark).is_some()));
-        let parts: Vec<char> = symbols(&tree("!?↑⇡"), Part::Changes)
+        let parts: Vec<&str> = symbols(&tree("!?↑⇡"), Part::Changes)
             .map(|symbol| symbol.mark)
             .collect();
-        assert_eq!(parts, ['!', '?']);
+        assert_eq!(parts, ["!", "?"]);
+        assert_eq!(find("⇅").help, "diverged");
     }
 
     #[test]

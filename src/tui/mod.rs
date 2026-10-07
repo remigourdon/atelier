@@ -425,7 +425,7 @@ mod tests {
         let buffer = draw(&model, &palette);
         assert_eq!(style_of(&buffer, "⇡ ahead").fg, Some(palette.dim));
         assert_eq!(
-            style_of(&buffer, "ahead: 2 commits unpushed").fg,
+            style_of(&buffer, "ahead: unpushed commits (2)").fg,
             Some(palette.text)
         );
         assert_eq!(style_of(&buffer, "abc1234 Add").fg, Some(palette.dim));
