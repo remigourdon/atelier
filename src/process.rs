@@ -8,6 +8,25 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use color_eyre::eyre::{Report, Result, WrapErr, eyre};
 
+/// Raises this process's soft limit on open files, which every command it starts inherits: the
+/// zellij server among them, which panics once its tabs' panes and plugins use the limit up, and
+/// macOS starts shells at 256, about fifteen worktree tabs. 10240 is macOS's `OPEN_MAX`, beyond
+/// which it refuses the call however high the hard limit.
+pub fn raise_open_file_limit() {
+    const WANTED: libc::rlim_t = 10240;
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: both calls only read or write the `rlimit` passed to them.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 && limit.rlim_cur < WANTED {
+            limit.rlim_cur = WANTED.min(limit.rlim_max);
+            libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
+        }
+    }
+}
+
 pub trait Runner {
     /// Runs a command to completion and returns its trimmed stdout, failing on a non-zero exit.
     fn output(&self, program: &str, args: &[&str]) -> Result<String>;

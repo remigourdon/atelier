@@ -108,6 +108,7 @@ dependencies = [
  "crossterm",
  "futures",
  "insta",
+ "libc",
  "ratatui",
  "regex",
  "rusqlite",
