@@ -5,6 +5,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+use crate::issues::TrackerConfig;
 use crate::items::{Removal, Snapshot, Work};
 use crate::links::{Group, IssueKey};
 use crate::worktrunk::Worktree;
@@ -59,8 +60,9 @@ pub enum Scope {
     /// A sweep of a workspace: each of its groups with a finished worktree, and its finished
     /// worktrees in no group. It touches only the workspace's own items.
     Workspace(String),
-    /// An issue's linked work: the whole groups of the items linking `key`, and those in no
-    /// group on their own. `label` is the key as shown, and `state` the issue's, for the title.
+    /// An issue's linked work: each item linking `key`, in any group or none, on its own and
+    /// never with the rest of its group; a closed carnet has nothing left to finish. `label` is
+    /// the key as shown, and `state` the issue's, for the title.
     Issue {
         key: IssueKey,
         label: String,
@@ -93,10 +95,31 @@ impl Scope {
                 let own = (snapshot.work.iter()).filter(|work| self.touches(work));
                 covers(own, |work| work.removable())
             }
-            Scope::Issue { key, .. } => {
-                let linked = (snapshot.work.iter()).filter(|work| work.links_to(key));
-                covers(linked, |_| true)
-            }
+            Scope::Issue { key, .. } => (snapshot.work.iter())
+                .filter(|work| work.links_to(key) && !work.closed())
+                .map(|work| Cover::Item(work.path.clone()))
+                .collect(),
+        }
+    }
+
+    /// What a carnet's close waits on: the issue's linked work, else what `cover` holds.
+    fn unit<'a>(&self, snapshot: &'a Snapshot, cover: &Cover) -> Vec<&'a Work> {
+        match self {
+            Scope::Issue { key, .. } => (snapshot.work.iter())
+                .filter(|work| work.links_to(key))
+                .collect(),
+            _ => members(snapshot, cover),
+        }
+    }
+
+    /// The keys other than the issue's that `work` links, as shown; none outside an issue.
+    fn other_keys(&self, work: &Work, tracker: &TrackerConfig) -> Vec<String> {
+        match self {
+            Scope::Issue { key, .. } => (work.links.issue_keys.iter())
+                .filter(|other| *other != key)
+                .map(|other| other.display(tracker))
+                .collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -258,16 +281,16 @@ struct Part {
     repos: BTreeSet<PathBuf>,
 }
 
-fn part(snapshot: &Snapshot, scope: &Scope, cover: &Cover) -> Part {
+fn part(snapshot: &Snapshot, scope: &Scope, cover: &Cover, tracker: &TrackerConfig) -> Part {
     let own = scope.own_members(snapshot, cover);
     let mut lines = Vec::new();
     let mut repos = BTreeSet::new();
     let mut finished = false;
-    // Whether every worktree of the group that is not a main one, in any workspace, has a
-    // checked remove line.
-    let mut all_removed = (members(snapshot, cover).iter())
+    // Whether every worktree of the group, or linking the issue, that is not a main one, in any
+    // workspace, has a checked remove line.
+    let all_removed = (scope.unit(snapshot, cover).into_iter())
         .filter(|work| work.removable())
-        .all(|work| scope.touches(work));
+        .all(|work| scope.touches(work) && removed(work));
     for work in &own {
         let (Some(tree), Some(repo)) = (work.tree(), work.repo()) else {
             continue;
@@ -277,7 +300,6 @@ fn part(snapshot: &Snapshot, scope: &Scope, cover: &Cover) -> Part {
             continue;
         };
         let Some(signal) = signal(work) else {
-            all_removed = false;
             let upstream = if tree.upstream.is_some() {
                 "upstream present"
             } else {
@@ -291,7 +313,6 @@ fn part(snapshot: &Snapshot, scope: &Scope, cover: &Cover) -> Part {
         };
         finished = true;
         let dirty = removal.force;
-        all_removed &= !dirty;
         let mut notes = vec![signal.label().to_owned()];
         if dirty {
             notes.push("uncommitted changes will be lost".into());
@@ -319,17 +340,22 @@ fn part(snapshot: &Snapshot, scope: &Scope, cover: &Cover) -> Part {
             checked: !dirty,
         });
     }
-    // Every open carnet: in a group, each of its carnets.
+    // Every open carnet: in a group, each of its carnets. One that also links another issue
+    // than the one finished stays open for it.
     for carnet in (own.iter()).filter(|work| work.is_carnet() && !work.closed()) {
+        let others = scope.other_keys(carnet, tracker);
+        let (note, checked) = if !others.is_empty() {
+            (format!("also links {}", others.join(", ")), false)
+        } else if all_removed {
+            (String::new(), true)
+        } else {
+            ("work still in flight".into(), false)
+        };
         lines.push(Line::Step {
             step: Step::CloseCarnet(carnet.path.clone()),
             label: format!("close carnet {}", carnet.title()),
-            note: if all_removed {
-                String::new()
-            } else {
-                "work still in flight".into()
-            },
-            checked: all_removed,
+            note,
+            checked,
         });
     }
     Part {
@@ -338,6 +364,11 @@ fn part(snapshot: &Snapshot, scope: &Scope, cover: &Cover) -> Part {
         finished,
         repos,
     }
+}
+
+/// Whether a removable worktree gets a checked remove line: finished, and clean.
+fn removed(work: &Work) -> bool {
+    Removal::of(work).is_none_or(|removal| signal(work).is_some() && !removal.force)
 }
 
 /// The line pulling a repo's main worktree: checked when it is clean, on the default branch
@@ -370,20 +401,33 @@ fn pull(main: &Work) -> Option<Line> {
 }
 
 /// The plan for `scope` from a snapshot taken after fetching, warning first of each repo,
-/// by name, whose fetch failed.
-pub fn plan(snapshot: &Snapshot, scope: &Scope, failed: &[String]) -> Plan {
+/// by name, whose fetch failed. `tracker` shows the issue keys a note names.
+pub fn plan(
+    snapshot: &Snapshot,
+    scope: &Scope,
+    failed: &[String],
+    tracker: &TrackerConfig,
+) -> Plan {
     let mut lines: Vec<Line> = (failed.iter())
         .map(|repo| Line::Warning(format!("fetch failed in {repo}: showing last known state")))
         .collect();
     let mut parts: Vec<Part> = (scope.covers(snapshot).iter())
-        .map(|cover| part(snapshot, scope, cover))
+        .map(|cover| part(snapshot, scope, cover, tracker))
         .collect();
     // A sweep shows only what is finished, unless nothing is: then every group says why.
     if matches!(scope, Scope::Workspace(_)) && parts.iter().any(|part| part.finished) {
         parts.retain(|part| part.finished);
     }
-    let several = parts.len() > 1;
     let mut repos = BTreeSet::new();
+    // An issue's linked item with nothing to finish, such as a main worktree, only has its repo
+    // pulled.
+    if matches!(scope, Scope::Issue { .. }) {
+        for part in &mut parts {
+            repos.append(&mut part.repos);
+        }
+        parts.retain(|part| !part.lines.is_empty());
+    }
+    let several = parts.len() > 1;
     for part in parts {
         if several {
             lines.push(Line::Heading(part.heading));
@@ -416,6 +460,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::issues::TrackerConfig;
     use crate::items::WorkKind;
     use crate::links::tests::{key, links};
     use crate::worktrunk::Worktree;
@@ -480,6 +525,11 @@ mod tests {
                 readme: None,
             },
         }
+    }
+
+    /// The plan, keys shown with no tracker configured.
+    fn plan(snapshot: &Snapshot, scope: &Scope, failed: &[String]) -> Plan {
+        super::plan(snapshot, scope, failed, &TrackerConfig::default())
     }
 
     fn snapshot(work: Vec<Work>) -> Snapshot {
@@ -718,8 +768,27 @@ mod tests {
         );
     }
 
+    fn issue(text: &str) -> Scope {
+        Scope::Issue {
+            key: key(text),
+            label: text.into(),
+            state: "done".into(),
+        }
+    }
+
+    fn closed(mut carnet: Work) -> Work {
+        if let WorkKind::Carnet { closed, .. } = &mut carnet.kind {
+            *closed = true;
+        }
+        carnet
+    }
+
+    fn issue_plan(snapshot: &Snapshot, key: &str) -> Vec<String> {
+        shown(&plan(snapshot, &issue(key), &[]))
+    }
+
     #[test]
-    fn an_issue_plans_the_whole_groups_of_its_linked_work() {
+    fn an_issue_plans_only_its_linked_work() {
         let snapshot = snapshot(vec![
             integrated(linking("api", "1-login", "LOGIN", &["o/api#1"], "default")),
             integrated(work("web", "form", "LOGIN", "side")),
@@ -740,22 +809,127 @@ mod tests {
             label: "api#1".into(),
             state: "done".into(),
         };
+        assert_eq!(
+            scope.repos(&snapshot),
+            [Path::new("/src/api")],
+            "not web, whose worktree only shares a group"
+        );
         let plan = plan(&snapshot, &scope, &[]);
         assert_eq!(plan.title, "Finish api#1 · issue done");
         assert_eq!(
             shown(&plan),
             [
-                "# LOGIN",
+                "# api:1-login",
                 "[x] remove api:1-login · integrated",
-                "[x] remove web:form · integrated",
-                "[x] close carnet 2026-10-01-login · ",
                 "# api:fix",
                 "[x] remove api:fix · integrated",
                 "# 2026-10-02-notes",
                 "[x] close carnet 2026-10-02-notes · ",
             ],
-            "the group's members linking no key too; ungrouped items linking it alone; \
+            "each linked item on its own, in any group or none; never the rest of its group; \
              no main worktree in the snapshot, no pull line"
+        );
+    }
+
+    #[test]
+    fn a_closed_carnet_adds_nothing_to_an_issues_plan() {
+        let login = || integrated(linking("api", "1-login", "LOGIN", &["ABC-1"], "default"));
+        let unlinked = || work("web", "form", "LOGIN", "side");
+        let mut tabbed = closed(carnet("2026-10-01-login", "LOGIN", &["ABC-1"]));
+        tabbed.tab = true;
+        let untabbed = closed(carnet("2026-10-02-old", "LOGIN", &["ABC-1"]));
+        let with_tab = snapshot(vec![login(), unlinked(), tabbed]);
+        let mut without_tab = snapshot(vec![login(), unlinked()]);
+        without_tab.carnets.push(untabbed.clone());
+        for snapshot in [&with_tab, &without_tab] {
+            assert_eq!(
+                issue_plan(snapshot, "ABC-1"),
+                ["[x] remove api:1-login · integrated"],
+                "no line, no heading, and the group is not widened to"
+            );
+            assert_eq!(issue("ABC-1").repos(snapshot), [Path::new("/src/api")]);
+        }
+        let mut alone = snapshot(Vec::new());
+        alone.carnets.push(untabbed);
+        assert_eq!(issue_plan(&alone, "ABC-1"), ["    nothing to finish · "]);
+    }
+
+    #[test]
+    fn a_carnet_linking_another_issue_stays_open() {
+        let both = snapshot(vec![
+            integrated(linking("api", "a", "", &["ABC-1"], "default")),
+            carnet("2026-10-01-both", "", &["ABC-2", "ABC-1", "ABC-3"]),
+        ]);
+        assert_eq!(
+            issue_plan(&both, "ABC-1")[2..],
+            [
+                "# 2026-10-01-both",
+                "[ ] close carnet 2026-10-01-both · also links ABC-2, ABC-3",
+            ],
+            "even with all the issue's work removed"
+        );
+        let github = snapshot(vec![carnet("2026-10-01-pair", "", &["o/api#1", "o/web#7"])]);
+        assert_eq!(
+            issue_plan(&github, "o/api#1"),
+            ["[ ] close carnet 2026-10-01-pair · also links web#7"],
+            "the other keys shown short"
+        );
+        let mut in_flight = both.clone();
+        in_flight.work[0].tree_mut().integrated = false;
+        assert_eq!(
+            issue_plan(&in_flight, "ABC-1").last().unwrap(),
+            "[ ] close carnet 2026-10-01-both · also links ABC-2, ABC-3",
+            "another issue wins over work still in flight"
+        );
+    }
+
+    #[test]
+    fn an_issues_carnet_closes_only_once_all_the_issues_work_goes() {
+        let all = snapshot(vec![
+            integrated(linking("api", "a", "LOGIN", &["ABC-1"], "default")),
+            gone(linking("web", "b", "OTHER", &["ABC-1"], "side")),
+            work("api", "unlinked", "LOGIN", "default"),
+            carnet("2026-10-01-login", "LOGIN", &["ABC-1"]),
+        ]);
+        assert_eq!(
+            issue_plan(&all, "ABC-1").last().unwrap(),
+            "[x] close carnet 2026-10-01-login · ",
+            "an unlinked worktree of the carnet's group does not hold it open"
+        );
+        let mut in_flight = all.clone();
+        in_flight.work[1].tree_mut().gone = false;
+        assert_eq!(
+            issue_plan(&in_flight, "ABC-1").last().unwrap(),
+            "[ ] close carnet 2026-10-01-login · work still in flight",
+            "linked work in another group and workspace still counts"
+        );
+        let mut kept_dirty = all;
+        kept_dirty.work[0] = dirty(kept_dirty.work[0].clone());
+        assert_eq!(
+            issue_plan(&kept_dirty, "ABC-1").last().unwrap(),
+            "[ ] close carnet 2026-10-01-login · work still in flight"
+        );
+    }
+
+    #[test]
+    fn an_issue_pulls_the_main_worktrees_of_its_linked_worktrees() {
+        let mut api = linking("api", "main", "LOGIN", &["ABC-1"], "default");
+        api.tree_mut().upstream = Some((0, 3));
+        let snapshot = snapshot(vec![
+            api,
+            work("web", "main", "", "side"),
+            integrated(linking("web", "form", "", &["ABC-1"], "side")),
+            work("cli", "main", "", "default"),
+            integrated(work("cli", "unlinked", "LOGIN", "default")),
+        ]);
+        assert_eq!(
+            issue_plan(&snapshot, "ABC-1"),
+            [
+                "[x] remove web:form · integrated",
+                "[x] pull api:main · ↓3",
+                "    pull web:main · up to date",
+            ],
+            "a linked main worktree is only pulled, without a heading; cli only shares a group"
         );
     }
 

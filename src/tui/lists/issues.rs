@@ -336,7 +336,7 @@ impl ListKind for Issues {
         }
     }
 
-    /// The whole groups of the issue's linked work, and its linked items in no group alone.
+    /// The issue's linked work alone, never the rest of its groups.
     fn finish(&self, model: &mut Model, _list: List) -> Vec<Effect> {
         let Some(issue) = model.issue() else {
             return Vec::new();

@@ -477,7 +477,12 @@ mod tests {
     fn finish_plan() {
         let mut model = finished(120, 30);
         let scope = crate::finish::Scope::group("ABC-1");
-        let plan = crate::finish::plan(&model.snapshot, &scope, &["web".into()]);
+        let plan = crate::finish::plan(
+            &model.snapshot,
+            &scope,
+            &["web".into()],
+            &model.tracker_config,
+        );
         update(
             &mut model,
             Action::Planned {
