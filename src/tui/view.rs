@@ -9,8 +9,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use super::app::{
     Cmd, Focus, KEYMAP, Kind, List, Model, On, Panel, Popup, Screen, Source, Work, popup_hints,
 };
-use super::lists::carnets;
-use super::lists::{self, ListRow};
+use super::lists::{self, ListRow, carnets};
 use super::markdown::{self, Markdown};
 use super::marks::{self, Severity};
 use super::widgets;
@@ -546,7 +545,7 @@ fn detail(model: &Model, palette: &Palette, row: Option<&ListRow>) -> Vec<(Strin
 
 /// The selected carnet's search hits, while the Carnets list is active.
 fn hits<'a>(model: &'a Model, item: Option<&Work>) -> Option<&'a Vec<String>> {
-    model.search_hits(model.active(), item?)
+    model.search_hits(item?)
 }
 
 /// How many lines the main view holds, so scrolling stops at its end. Any palette lays out

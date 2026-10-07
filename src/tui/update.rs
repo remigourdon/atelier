@@ -280,16 +280,18 @@ fn select(model: &mut Model, list: List, index: usize) {
 
 /// Moves a list's selection, resetting what depends on it.
 fn select_moved(model: &mut Model, list: List, index: usize) -> Vec<Effect> {
-    let before = model.index(list);
-    select(model, list, index);
-    if model.index(list) == before {
+    let rows = model.rows(list);
+    let index = index.min(rows.len().saturating_sub(1));
+    if index == model.index(list) {
         return Vec::new();
     }
+    let item = (rows.get(index)).and_then(|row| row.target.item().cloned());
+    model.selected.insert(list, index);
     model.scroll = (0, 0);
     if list == List::Workspaces {
         model.selected.insert(List::Work, 0);
     }
-    commits(model)
+    fetch_item(model, item)
 }
 
 /// Drops the commits a refresh made stale: every one on a full refresh, else those of items
@@ -343,7 +345,13 @@ fn selected(model: &Model) -> Option<Work> {
 /// Fetches the selected item's recent commits unless they are loaded, and a carnet's README
 /// unless the one loaded is its current one.
 fn commits(model: &mut Model) -> Vec<Effect> {
-    let Some(work) = selected(model) else {
+    let item = selected(model);
+    fetch_item(model, item)
+}
+
+/// [`commits`] for an item already resolved.
+fn fetch_item(model: &mut Model, item: Option<Work>) -> Vec<Effect> {
+    let Some(work) = item else {
         return Vec::new();
     };
     let path = work.path.clone();
@@ -1086,7 +1094,7 @@ pub mod tests {
         }
 
         pub fn carnet_hits(&self) -> Option<&Vec<String>> {
-            self.search_hits(self.active(), &self.carnet()?)
+            self.search_hits(&self.carnet()?)
         }
     }
 

@@ -46,9 +46,9 @@ impl Model {
             .collect()
     }
 
-    /// A carnet's search hits, when the Carnets list selects it.
-    pub fn search_hits(&self, list: List, work: &Work) -> Option<&Vec<String>> {
-        if list != List::Carnets {
+    /// A carnet's search hits, while the Carnets list is active.
+    pub fn search_hits(&self, work: &Work) -> Option<&Vec<String>> {
+        if self.active() != List::Carnets {
             return None;
         }
         self.search.as_ref()?.hits.get(&work.path)

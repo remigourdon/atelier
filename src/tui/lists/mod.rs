@@ -22,8 +22,7 @@ use super::app::{
 use super::update::{run, workspace_menu};
 use super::view::Palette;
 use crate::finish::Scope;
-use crate::issues::Issue;
-use crate::issues::TrackerConfig;
+use crate::issues::{Issue, TrackerConfig};
 use crate::links::{Group, group_text};
 use crate::reviews::Review;
 use crate::state::Repo;
