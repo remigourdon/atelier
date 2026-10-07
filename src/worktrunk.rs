@@ -204,7 +204,13 @@ pub struct Worktree {
 /// A branch's CI, as worktrunk's CI column reports it: its checks and its review's decision.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ci {
-    pub state: CiState,
+    /// The column's one state, folding the checks, the decision and the conflicts; `None` when
+    /// the column shows nothing, as for a review with no checks and no decision.
+    pub state: Option<CiState>,
+    /// The checks' own status, `None` without checks.
+    pub checks: Option<Checks>,
+    /// The review cannot be merged: it conflicts with its base.
+    pub conflicts: bool,
     /// Local HEAD differs from the remote, so the status is of an older commit.
     pub stale: bool,
     /// The checks are of the branch's own workflow, as for a default branch: it has no review.
@@ -227,16 +233,23 @@ pub enum CiState {
     ApprovalPending,
 }
 
-impl CiState {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Passed => "passed",
-            Self::Running => "running",
-            Self::Failed => "failed",
-            Self::Conflicts => "conflicts",
-            Self::Error => "error",
-            Self::ChangesRequested => Decision::ChangesRequested.label(),
-            Self::ApprovalPending => Decision::Pending.label(),
+/// A branch's checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Checks {
+    Passed,
+    Running,
+    Failed,
+    /// The status could not be fetched.
+    Unavailable,
+}
+
+impl Checks {
+    fn from_status(status: &str) -> Option<Self> {
+        match status {
+            "passed" => Some(Self::Passed),
+            "running" => Some(Self::Running),
+            "failed" => Some(Self::Failed),
+            _ => None,
         }
     }
 }
@@ -271,26 +284,19 @@ impl Decision {
             _ => None,
         }
     }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::ChangesRequested => "changes requested",
-            Self::Pending => "approval pending",
-            Self::Draft => "draft",
-            Self::Approved => "approved",
-        }
-    }
 }
 
 impl Ci {
     /// worktrunk's CI column from an item's `checks` and `pr`, `Some(None)` being `null`:
     /// both `null` is a fetch error, `pr.mergeable` false is conflicts, and changes requested
     /// outranks running checks while a pending approval only recolors a passing or check-less
-    /// branch. `None` when there is nothing to show.
+    /// branch. `None` with neither checks nor a review.
     fn of(checks: Option<Option<raw::Checks>>, pr: Option<Option<raw::Pr>>) -> Option<Self> {
         if let (Some(None), Some(None)) = (&checks, &pr) {
             return Some(Self {
-                state: CiState::Error,
+                state: Some(CiState::Error),
+                checks: Some(Checks::Unavailable),
+                conflicts: false,
                 stale: false,
                 branch_workflow: false,
                 review: None,
@@ -308,23 +314,30 @@ impl Ci {
         });
         let status = checks.as_ref().and_then(|checks| checks.status.as_deref());
         let decision = review.as_ref().and_then(|(review, _)| review.decision);
-        let state = if review.as_ref().is_some_and(|&(_, conflicts)| conflicts) {
-            CiState::Conflicts
-        } else if status == Some("failed") {
-            CiState::Failed
-        } else if decision == Some(Decision::ChangesRequested) {
-            CiState::ChangesRequested
-        } else if status == Some("running") {
-            CiState::Running
-        } else if decision == Some(Decision::Pending) {
-            CiState::ApprovalPending
-        } else if status == Some("passed") {
-            CiState::Passed
-        } else {
+        let conflicts = review.as_ref().is_some_and(|&(_, conflicts)| conflicts);
+        let checks_status = status.and_then(Checks::from_status);
+        if checks_status.is_none() && review.is_none() {
             return None;
+        }
+        let state = if conflicts {
+            Some(CiState::Conflicts)
+        } else if status == Some("failed") {
+            Some(CiState::Failed)
+        } else if decision == Some(Decision::ChangesRequested) {
+            Some(CiState::ChangesRequested)
+        } else if status == Some("running") {
+            Some(CiState::Running)
+        } else if decision == Some(Decision::Pending) {
+            Some(CiState::ApprovalPending)
+        } else if status == Some("passed") {
+            Some(CiState::Passed)
+        } else {
+            None
         };
         Some(Self {
             state,
+            checks: checks_status,
+            conflicts,
             stale: checks.as_ref().is_some_and(|checks| checks.stale),
             branch_workflow: checks.is_some_and(|checks| checks.source == "branch"),
             review: review.map(|(review, _)| review),
@@ -334,6 +347,11 @@ impl Ci {
     /// worktrunk dims the column for a draft.
     pub fn draft(&self) -> bool {
         self.decision() == Some(Decision::Draft)
+    }
+
+    /// The checks are of an older commit than local HEAD, or of a draft, so worktrunk dims them.
+    pub fn checks_dimmed(&self) -> bool {
+        self.stale || self.draft()
     }
 
     pub fn decision(&self) -> Option<Decision> {
@@ -669,10 +687,10 @@ mod tests {
         assert_eq!(feature.diff, (12, 3));
         assert!(!feature.integrated && !feature.on_default && !feature.gone);
         let ci = main.ci.as_ref().unwrap();
-        assert_eq!(ci.state, CiState::Passed);
+        assert_eq!(ci.state, Some(CiState::Passed));
         assert!(ci.branch_workflow && ci.review.is_none());
         let ci = feature.ci.as_ref().unwrap();
-        assert_eq!(ci.state, CiState::ChangesRequested);
+        assert_eq!(ci.state, Some(CiState::ChangesRequested));
         assert!(ci.stale);
         assert_eq!(
             ci.review_url(),
@@ -713,14 +731,24 @@ mod tests {
     }
 
     fn state(fields: &str) -> Option<CiState> {
-        ci(fields).map(|ci| ci.state)
+        ci(fields).and_then(|ci| ci.state)
     }
 
     #[test]
     fn ci_follows_worktrunks_column() {
         assert_eq!(state(""), None, "not collected or never pushed");
         assert_eq!(state(r#","pr":{"number":3}"#), None, "no CI");
+        let review = ci(r#","pr":{"number":3}"#).expect("a review with no checks is kept");
+        assert_eq!(
+            (review.checks, review.review.unwrap().number),
+            (None, Some(3))
+        );
+        assert_eq!(ci(r#","checks":{"status":null,"source":"pr"}"#), None);
         assert_eq!(state(r#","checks":null,"pr":null"#), Some(CiState::Error));
+        assert_eq!(
+            ci(r#","checks":null,"pr":null"#).unwrap().checks,
+            Some(Checks::Unavailable)
+        );
         let checks = |status: &str, pr: &str| {
             state(&format!(
                 r#","checks":{{"status":{status},"source":"pr"}},"pr":{pr}"#
@@ -769,7 +797,18 @@ mod tests {
         assert_eq!(review.review.unwrap().number, Some(27));
         let main = ci(r#","checks":{"status":"failed","source":"branch"}"#).unwrap();
         assert!(main.branch_workflow && main.review.is_none());
-        assert_eq!(main.state, CiState::Failed);
+        assert_eq!(main.state, Some(CiState::Failed));
+    }
+
+    #[test]
+    fn ci_keeps_the_checks_the_decision_and_the_conflicts_apart() {
+        let ci = ci(r#","checks":{"status":"running","source":"pr"},
+            "pr":{"number":3,"mergeable":false,"review":"changes_requested"}"#)
+        .unwrap();
+        assert_eq!(ci.state, Some(CiState::Conflicts), "the column folds them");
+        assert_eq!(ci.checks, Some(Checks::Running));
+        assert_eq!(ci.decision(), Some(Decision::ChangesRequested));
+        assert!(ci.conflicts);
     }
 
     #[test]
@@ -813,7 +852,7 @@ mod tests {
         assert!(tree.dirty && !tree.main && !tree.integrated);
         assert_eq!(tree.upstream, Some((1, 2)));
         let ci = tree.ci.unwrap();
-        assert_eq!(ci.state, CiState::Running);
+        assert_eq!(ci.state, Some(CiState::Running));
         assert_eq!(ci.decision(), Some(Decision::Approved));
         assert_eq!(ci.review.unwrap().number, Some(31));
         let empty = crate::process::fake::Fake::default().always("wt", Some(r#"{"items":[]}"#));

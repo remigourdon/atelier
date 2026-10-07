@@ -36,7 +36,7 @@ impl Layouts {
             Ok(path.to_string_lossy().into_owned())
         };
         let zjstatus = Some(config.zjstatus()).filter(|path| path.exists());
-        let background = config.flavor().colors.mantle.hex.to_string();
+        let background = catppuccin::PALETTE.mocha.colors.mantle.hex.to_string();
         let bar = (zjstatus.as_deref())
             .map(|path| info_bar(path, &background))
             .unwrap_or_default();
@@ -72,7 +72,7 @@ fn kdl_string(value: &str) -> String {
 /// The row under the tab bar: zjstatus running `atelier statusline` in the focused pane's
 /// directory, so it follows the visible tab. Found through `PATH`, which stays current across
 /// updates where the binary's own store path would not. The whole row takes `background`, the
-/// theme's mantle that zellij's catppuccin tab bar is drawn on, so the two read as one header.
+/// Mocha's mantle that zellij's catppuccin tab bar is drawn on, so the two read as one header.
 pub fn info_bar(zjstatus: &Path, background: &str) -> String {
     let location = kdl_string(&format!("file:{}", zjstatus.display()));
     format!(
@@ -362,6 +362,14 @@ impl<'a> Zellij<'a> {
             &[
                 "run",
                 "--floating",
+                "--width",
+                "90%",
+                "--height",
+                "90%",
+                "--x",
+                "5%",
+                "--y",
+                "5%",
                 "--close-on-exit",
                 "--cwd",
                 &path,
@@ -780,7 +788,7 @@ mod tests {
         assert_eq!(
             fake.calls(),
             [
-                "zellij run --floating --close-on-exit --cwd /r/a -- sh -c tig 'feat'",
+                "zellij run --floating --width 90% --height 90% --x 5% --y 5% --close-on-exit --cwd /r/a -- sh -c tig 'feat'",
                 "sh -c cd '/r/a b' && lazygit",
             ]
         );

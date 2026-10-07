@@ -1,18 +1,19 @@
 ---
 source: src/tui/mod.rs
+assertion_line: 220
 expression: "render_with(&model, 120, 16, Icons::Nerd)"
 ---
 "[1] Workspaces │ Repos──────────────────╭ Main ────────────────────────────────────────────────────────────────────────╮"
 "╭[2] Work · default────────────────────╮│Repo        api                                                               │"
 "│ ABC-1 2 · 1 open                    ││Branch      ABC-1-login                                                       │"
-"│  ◐  api:ABC-1-login !               ││Path        /src/api.ABC-1-login                                              │"
+"│  ◐  api:ABC-1-login                 ││Path        /src/api.ABC-1-login                                              │"
 "│    web:ABC-1-form                  ││Workspace   default                                                           │"
-"│  api:main ↓3                       ││Group       ABC-1                                                             │"
+"│  api:main                          ││Group       ABC-1                                                             │"
 "│                                      ││Issue keys  ABC-1                                                             │"
-"│                                      ││Tab          open                                                            │"
-"│                                      ││Status      ! dirty +0 -0                                                     │"
-"│                                      ││Upstream    none                                                              │"
-"│                                      ││Commit      abc1234 Commit ()                                                 │"
+"│                                      ││Tab         ◐ pulling                                                         │"
+"│                                      ││Changes     ! unstaged changes                                                │"
+"│                                      ││            +0 −0 lines                                                       │"
+"│                                      ││Remote      no upstream                                                       │"
 "│                                      ││                                                                              │"
 "╰──────────────────────────────────────╯│Recent commits                                                                │"
 "[3] To review │ Mine────────────────────│abc1234 Add login (2 hours ago, R)                                            │"

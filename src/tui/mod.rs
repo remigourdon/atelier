@@ -4,6 +4,7 @@ mod app;
 mod jobs;
 mod lists;
 mod markdown;
+mod marks;
 mod schedule;
 pub mod statusline;
 mod update;
@@ -26,7 +27,7 @@ use jobs::Context;
 use view::Palette;
 
 pub fn run(config: Config) -> Result<()> {
-    let palette = Palette::new(config.flavor(), config.icons);
+    let palette = Palette::new(config.icons);
     let context = Arc::new(Context::new(config)?);
     tokio::runtime::Runtime::new()?.block_on(event_loop(context, palette))
 }
@@ -172,7 +173,7 @@ mod tests {
 
     fn render_with(model: &Model, width: u16, height: u16, icons: Icons) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        let palette = Palette::new(catppuccin::PALETTE.mocha, icons);
+        let palette = Palette::new(icons);
         terminal
             .draw(|frame| view::render(frame, model, &palette))
             .unwrap();
@@ -286,8 +287,8 @@ mod tests {
         for key in [key('>'), key('k')] {
             update(&mut model, Action::Key(key));
         }
-        let text =
-            "+++\nsummary = \"hidden\"\n+++\n# 2026-10-02-ideas\n\nWhat I found **so far**.\n";
+        let text = "+++\nsummary = \"hidden\"\n+++\n# 2026-10-02-ideas\n\nWhat I found **so far**, \
+            in a paragraph long enough to wrap at the width of the main view, as glow wraps it.\n";
         let readme = app::Readme {
             path: "/data/2026-10-02-ideas".into(),
             stamp: None,
@@ -295,6 +296,10 @@ mod tests {
         };
         update(&mut model, Action::Readme(readme));
         model.schedule.finish_all();
+        let unwrapped = view::main_len(&model);
+        model.size = (200, 30);
+        assert_eq!(view::main_len(&model), unwrapped - 1, "the paragraph fits");
+        model.size = (120, 30);
         insta::assert_snapshot!(render(&model, 120, 30));
     }
 
@@ -335,7 +340,7 @@ mod tests {
 
     #[test]
     fn groups_and_issue_keys_are_coloured_apart() {
-        let palette = Palette::new(catppuccin::PALETTE.mocha, Icons::Unicode);
+        let palette = Palette::new(Icons::Unicode);
         assert_ne!(palette.group, palette.issue_key);
         let model = loaded(120, 30);
         let buffer = draw(&model, &palette);
@@ -356,8 +361,8 @@ mod tests {
         let linked = "ABC-1 Issue ABC-1";
         assert_eq!(
             style_in(&buffer, linked, -2).fg,
-            Some(palette.issue_key),
-            "the linked-work marker"
+            Some(palette.ok),
+            "the linked-work marker, as any tab dot"
         );
         assert_eq!(
             style_in(&buffer, linked, 0).fg,
@@ -390,7 +395,7 @@ mod tests {
         };
         update(&mut model, Action::Readme(readme));
         model.schedule.finish_all();
-        let palette = Palette::new(catppuccin::PALETTE.mocha, Icons::Unicode);
+        let palette = Palette::new(Icons::Unicode);
         let colors = catppuccin::PALETTE.mocha.colors;
         let buffer = draw(&model, &palette);
         let label = style_of(&buffer, "README");
@@ -413,19 +418,16 @@ mod tests {
     }
 
     #[test]
-    fn commits_and_counts_of_zero_recede_and_warnings_are_yellow() {
+    fn commits_recede_and_the_remote_is_spelled_out() {
         let mut model = loaded(120, 30);
         model.snapshot.work[1].tree_mut().upstream = Some((2, 0));
-        let palette = Palette::new(catppuccin::PALETTE.mocha, Icons::Unicode);
+        let palette = Palette::new(Icons::Unicode);
         let buffer = draw(&model, &palette);
-        assert_eq!(palette.warn, catppuccin::PALETTE.mocha.colors.yellow.into());
+        assert_eq!(style_of(&buffer, "⇡ ahead").fg, Some(palette.dim));
         assert_eq!(
-            style_of(&buffer, "↓3").fg,
-            Some(palette.warn),
-            "main is behind"
+            style_of(&buffer, "ahead: unpushed commits (2)").fg,
+            Some(palette.text)
         );
-        assert_eq!(style_of(&buffer, "↑2").fg, Some(palette.text));
-        assert_eq!(style_of(&buffer, "↓0").fg, Some(palette.dim));
         assert_eq!(style_of(&buffer, "abc1234 Add").fg, Some(palette.dim));
         assert_eq!(style_of(&buffer, "Add login").fg, Some(palette.text));
         assert_eq!(style_of(&buffer, "(2 hours ago, R)").fg, Some(palette.dim));
@@ -514,6 +516,9 @@ mod tests {
         let mut model = loaded(100, 30);
         model.icons = Icons::Nerd;
         update(&mut model, Action::Key(key('?')));
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        update(&mut model, Action::Key(tab));
         update(&mut model, Action::Key(key('>')));
         insta::assert_snapshot!(render_with(&model, 100, 30, Icons::Nerd));
     }
@@ -540,30 +545,37 @@ mod tests {
             unfolded,
             integrated,
             gone,
-            ci,
-            ci_error,
+            done,
+            broken,
+            pending,
+            unknown,
+            changes,
             spinner,
         } = glyphs;
         for glyph in [
             workspace, repo, worktree, carnet, review, reviewed, issue, open, closed, folded,
-            unfolded, integrated, gone, ci, ci_error, spinner[0],
+            unfolded, integrated, gone, done, broken, pending, unknown, changes, spinner[0],
         ] {
             assert!(marks.contains(&glyph), "{glyph} is not in the legend");
         }
     }
 
     #[test]
-    fn ci_marks_rows_and_carries_its_colour_to_the_detail() {
-        use crate::worktrunk::{Ci, CiReview, CiState, Decision};
+    fn severity_tints_the_name_and_the_detail_spells_out_ci() {
+        use crate::worktrunk::{Checks, Ci, CiReview, CiState, Decision};
         let mut model = loaded(120, 30);
         model.snapshot.work[0].tree_mut().ci = Some(Ci {
-            state: CiState::Passed,
+            state: Some(CiState::Passed),
+            checks: Some(Checks::Passed),
+            conflicts: false,
             stale: false,
             branch_workflow: true,
             review: None,
         });
         model.snapshot.work[1].tree_mut().ci = Some(Ci {
-            state: CiState::Failed,
+            state: Some(CiState::Failed),
+            checks: Some(Checks::Failed),
+            conflicts: false,
             stale: true,
             branch_workflow: false,
             review: Some(CiReview {
@@ -573,13 +585,13 @@ mod tests {
             }),
         });
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-        let palette = Palette::new(catppuccin::PALETTE.mocha, Icons::Unicode);
+        let palette = Palette::new(Icons::Unicode);
         terminal
             .draw(|frame| view::render(frame, &model, &palette))
             .unwrap();
         let buffer = terminal.backend().buffer();
         let marks: Vec<_> = (buffer.content.iter())
-            .filter(|cell| cell.symbol() == "◆")
+            .filter(|cell| cell.symbol() == "✗")
             .map(|cell| {
                 (
                     cell.fg,
@@ -587,15 +599,13 @@ mod tests {
                 )
             })
             .collect();
+        assert_eq!(marks, [(palette.error, true)], "only the detail's");
         assert_eq!(
-            marks,
-            [
-                (palette.error, true),
-                (palette.ok, false),
-                (palette.error, true)
-            ],
-            "the grouped stale row and its detail, then main's row"
+            style_of(buffer, "api:ABC-1-login").fg,
+            Some(palette.warn),
+            "stale checks colour nothing, so the changes requested do"
         );
+        assert_ne!(style_of(buffer, "api:main").fg, Some(palette.error));
         insta::assert_snapshot!(terminal.backend().to_string());
     }
 }

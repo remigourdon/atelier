@@ -199,6 +199,23 @@ pub fn key_style(palette: &Palette) -> Style {
     Style::new().fg(palette.issue_key)
 }
 
+/// Dims a finished or closed item's row after its `lead` spans: its tab dot or spinner keeps its
+/// colour.
+fn dim_after(spans: &mut [Span], lead: usize, palette: &Palette) {
+    let dim = Style::new().fg(palette.dim);
+    spans[lead..].iter_mut().for_each(|span| span.style = dim);
+}
+
+/// A workspace's name, wherever an item shows the one it is in.
+pub fn workspace_style(palette: &Palette) -> Style {
+    Style::new().fg(palette.workspace)
+}
+
+/// A workspace's name, in its colour.
+fn workspace_span(workspace: &str, palette: &Palette) -> Span<'static> {
+    Span::styled(workspace.to_owned(), workspace_style(palette))
+}
+
 /// An optional group, as the detail shows it.
 fn group_span(group: Option<&Group>, palette: &Palette) -> Span<'static> {
     Span::styled(group_text(group).to_owned(), group_style(palette))
@@ -240,7 +257,9 @@ fn tab_word(open: bool, palette: &Palette) -> Span<'static> {
 fn work_line(work: &Work, palette: &Palette) -> Line<'static> {
     Line::from(vec![
         tab_mark(work.tab, palette),
-        Span::raw(format!("{} · {} · tab ", work.title(), work.workspace)),
+        Span::raw(format!("{} · ", work.title())),
+        workspace_span(&work.workspace, palette),
+        Span::raw(" · tab "),
         tab_word(work.tab, palette),
     ])
 }

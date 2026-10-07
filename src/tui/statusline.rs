@@ -7,10 +7,9 @@ use color_eyre::eyre::Result;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 
-use super::lists::work::{
-    behind, ci_mark, decision_style, finished_mark, review_reference, symbols,
-};
+use super::lists::work::{colored_symbols, finished_mark, review_reference};
 use super::lists::{group_style, key_style};
+use super::marks::{self, Mark};
 use super::view::Palette;
 use crate::config::Config;
 use crate::context;
@@ -74,7 +73,7 @@ pub fn line(state: &State, config: &Config, runner: &dyn Runner, dir: &Path) -> 
         keys,
         ..subject
     };
-    let palette = Palette::new(config.flavor(), config.icons);
+    let palette = Palette::new(config.icons);
     Ok(ansi(&spans(&subject, &palette)))
 }
 
@@ -107,49 +106,57 @@ pub fn spans(subject: &Subject, palette: &Palette) -> Vec<Span<'static>> {
     }
     let mut words = Vec::new();
     if subject.closed {
-        words.push(Span::styled("closed", Style::new().fg(palette.dim)));
+        words.push(vec![Span::styled("closed", Style::new().fg(palette.dim))]);
     }
     if let Some(Statusline { tree, forge }) = &subject.tree {
         words.extend(cells(tree, forge.as_ref(), palette));
     }
     if !subject.main {
         let keys = subject.keys.iter();
-        words.extend(keys.map(|key| Span::styled(key.clone(), key_style(palette))));
+        words.extend(keys.map(|key| vec![Span::styled(key.clone(), key_style(palette))]));
     }
     if !subject.summary.is_empty() {
-        words.push(Span::styled(
+        words.push(vec![Span::styled(
             subject.summary.clone(),
             Style::new().fg(palette.text),
-        ));
+        )]);
     }
-    for span in words {
+    for word in words {
         parts.push(Span::raw(" "));
-        parts.push(span);
+        parts.extend(word);
     }
     parts
 }
 
-/// A worktree's cells, as its Work row draws them: dirty and ahead, behind, CI, review and
-/// finished. Absent cells take no space.
-fn cells(tree: &Worktree, forge: Option<&Forge>, palette: &Palette) -> Vec<Span<'static>> {
+/// A worktree's cells, as its detail marks them: its status symbols, its checks, its review
+/// with its decision and conflicts, and finished. Absent cells take no space.
+/// Each cell is its spans, drawn with no space between them.
+fn cells(tree: &Worktree, forge: Option<&Forge>, palette: &Palette) -> Vec<Vec<Span<'static>>> {
     let mut cells = Vec::new();
     if !tree.symbols.is_empty() {
-        cells.push(symbols(tree, palette));
+        cells.push(colored_symbols(tree, palette));
     }
-    cells.extend(behind(tree, palette));
     if let Some(ci) = &tree.ci {
-        cells.push(ci_mark(ci, palette));
+        cells.extend(marks::checks_span(ci, palette).map(|span| vec![span]));
         if let Some(review) = &ci.review {
             let reference = review_reference(review, forge);
-            cells.push(Span::styled(reference, Style::new().fg(palette.text)));
-            if let Some(decision) = review.decision {
-                let style = decision_style(ci, decision, palette);
-                cells.push(Span::styled(decision.label(), style));
-            }
+            let mut review_cell = vec![Span::styled(reference, Style::new().fg(palette.text))];
+            let decision = review.decision.and_then(marks::decision);
+            let conflicts = ci.conflicts.then_some(marks::CONFLICTS);
+            review_cell.extend(
+                [decision, conflicts]
+                    .into_iter()
+                    .flatten()
+                    .map(|mark: Mark| {
+                        let glyph = (mark.glyph)(&palette.glyphs);
+                        Span::styled(format!(" {glyph}"), mark.style(palette))
+                    }),
+            );
+            cells.push(review_cell);
         }
     }
     if let Some(signal) = finish::tree_signal(tree) {
-        cells.push(finished_mark(signal, palette));
+        cells.push(vec![finished_mark(signal, palette)]);
     }
     cells
 }
@@ -190,7 +197,7 @@ mod tests {
     use crate::worktrunk::Listing;
 
     fn palette(icons: Icons) -> Palette {
-        Palette::new(PALETTE.mocha, icons)
+        Palette::new(icons)
     }
 
     /// The text without its ANSI codes.
@@ -246,11 +253,11 @@ mod tests {
     fn a_worktree_shows_its_group_and_repo_then_cells_then_every_key() {
         assert_eq!(
             text(&worktree("login"), Icons::Unicode),
-            "LOGIN · api !?↕ ↓2 ◆ #31 approved ABC-1 web#3"
+            "LOGIN · api !?↕ ◷ #31 ✓ ABC-1 web#3"
         );
         assert_eq!(
             text(&worktree(""), Icons::Unicode),
-            "api !?↕ ↓2 ◆ #31 approved ABC-1 web#3",
+            "api !?↕ ◷ #31 ✓ ABC-1 web#3",
             "without a group, it starts at the repo"
         );
         let palette = palette(Icons::Unicode);
@@ -258,10 +265,10 @@ mod tests {
         let blue = PALETTE.mocha.colors.blue.rgb;
         assert!(
             line.contains(&format!(
-                "\x1b[38;2;{};{};{}m◆\x1b[22;39m",
+                "\x1b[38;2;{};{};{}m◷\x1b[22;39m",
                 blue.r, blue.g, blue.b
             )),
-            "running CI in the Work row's colour: {line:?}"
+            "running checks in the detail's colour: {line:?}"
         );
         assert!(
             line.contains(&format!("{}LOGIN\x1b[", fg(palette.group))),
@@ -373,7 +380,7 @@ mod tests {
         let line = line(&state, &config, &fake, &tree).unwrap();
         assert_eq!(
             plain(&line),
-            "LOGIN · api !?↕ ↓2 ◆ #31 approved ABC-1 web#3",
+            "LOGIN · api !?↕ ◷ #31 ✓ ABC-1 web#3",
             "its group, repo alias, cells and keys shown short"
         );
         let wt = (fake.calls().into_iter())

@@ -10,13 +10,14 @@ use super::app::{
     Cmd, Focus, KEYMAP, Kind, List, Model, On, Panel, Popup, Screen, Source, Work, popup_hints,
 };
 use super::lists;
-use super::lists::carnets::Standing;
-use super::markdown::Markdown;
+use super::lists::carnets;
+use super::markdown::{self, Markdown};
+use super::marks::{self, Severity};
 use super::widgets;
 use crate::config::Icons;
 use crate::finish::Signal;
 use crate::git::Commit;
-use crate::worktrunk::CiState;
+use crate::worktrunk::{Checks, Decision};
 
 /// Below this width the main view is hidden until `+`.
 pub const NARROW: u16 = 100;
@@ -35,8 +36,6 @@ pub struct Palette {
     pub error: Color,
     pub warn: Color,
     pub info: Color,
-    /// A review's reviewers requested changes.
-    pub changes_requested: Color,
     /// A review's required approval is not given yet.
     pub approval_pending: Color,
     /// A list's filter, as it is typed and once applied.
@@ -45,6 +44,8 @@ pub struct Palette {
     pub group: Color,
     /// An issue key, set apart from groups.
     pub issue_key: Color,
+    /// The name of the workspace an item is in.
+    pub workspace: Color,
     /// How a carnet's README is drawn.
     pub markdown: Markdown,
     pub glyphs: Glyphs,
@@ -69,9 +70,15 @@ pub struct Glyphs {
     /// A finished worktree's mark: integrated, or its upstream gone.
     pub integrated: &'static str,
     pub gone: &'static str,
-    /// A branch's CI mark, its colour the status, and the mark when it could not be fetched.
-    pub ci: &'static str,
-    pub ci_error: &'static str,
+    /// Checks, review decisions, merge conflicts and the command log, by meaning:
+    /// done (passed, approved, succeeded), broken (failed, conflicts),
+    /// pending (running, waiting for approval), unknown (checks unavailable)
+    /// and changes requested.
+    pub done: &'static str,
+    pub broken: &'static str,
+    pub pending: &'static str,
+    pub unknown: &'static str,
+    pub changes: &'static str,
     pub spinner: [&'static str; 4],
 }
 
@@ -88,19 +95,22 @@ impl Glyphs {
                 review: "",
                 reviewed: "⑂",
                 issue: "",
-                open: "●",
+                open: "◉",
                 closed: "○",
                 folded: "▸",
                 unfolded: "▾",
                 integrated: "⊂",
                 gone: "⊗",
-                ci: "◆",
-                ci_error: "⚠",
+                done: "✓",
+                broken: "✗",
+                pending: "◷",
+                unknown: "?",
+                changes: "±",
                 spinner,
             },
             // Nerd Fonts: fa-desktop, oct-repo, dev-git_branch, fa-home, fa-book, oct-git_pull_request,
-            // oct-issue_opened, fa-circle, fa-circle_o, fa-folder, fa-folder_open, oct-git_merge,
-            // fa-chain_broken, fa-diamond, fa-warning.
+            // oct-issue_opened, fa-dot_circle_o, fa-circle_o, fa-folder, fa-folder_open,
+            // oct-git_merge, fa-chain_broken, oct-check, oct-x, oct-clock, oct-question, oct-diff.
             Icons::Nerd => Self {
                 workspace: "\u{f108}",
                 repo: "\u{f401}",
@@ -110,14 +120,17 @@ impl Glyphs {
                 review: "\u{f407}",
                 reviewed: "\u{f407}",
                 issue: "\u{f41b}",
-                open: "\u{f111}",
+                open: "\u{f192}",
                 closed: "\u{f10c}",
                 folded: "\u{f07b}",
                 unfolded: "\u{f07c}",
                 integrated: "\u{f419}",
                 gone: "\u{f127}",
-                ci: "\u{f219}",
-                ci_error: "\u{f071}",
+                done: "\u{f42e}",
+                broken: "\u{f467}",
+                pending: "\u{f43a}",
+                unknown: "\u{f420}",
+                changes: "\u{f440}",
                 spinner,
             },
         }
@@ -137,6 +150,8 @@ impl Glyphs {
 /// What a mark on screen means, as the `?` menu's legend lists it.
 #[derive(Debug)]
 pub struct Legend {
+    /// The heading it goes under, as the detail's sections are named.
+    pub section: &'static str,
     /// A glyph, or a sample of text in its colour; left out when empty.
     pub mark: fn(&Glyphs) -> &'static str,
     pub style: fn(&Palette) -> Style,
@@ -149,81 +164,112 @@ const WORK: &[Kind] = &[Kind::Work];
 const ITEMS: &[Kind] = &[Kind::Work, Kind::Carnets];
 const GROUPED: &[Kind] = &[Kind::Work, Kind::Carnets, Kind::Reviews];
 const KEYED: &[Kind] = &[Kind::Work, Kind::Carnets, Kind::Reviews, Kind::Issues];
+const CARNETS: &[Kind] = &[Kind::Carnets];
+const REVIEWS: &[Kind] = &[Kind::Reviews];
+const ISSUES: &[Kind] = &[Kind::Issues];
 
 fn dim(palette: &Palette) -> Style {
     Style::new().fg(palette.dim)
 }
 
-fn warn(palette: &Palette) -> Style {
-    Style::new().fg(palette.warn)
+fn fg(color: Color) -> Style {
+    Style::new().fg(color)
 }
 
-fn ci(state: CiState, palette: &Palette) -> Style {
-    Style::new().fg(lists::work::ci_color(state, palette))
+/// A Work legend entry for a fact's [`marks::Mark`], under `section`.
+macro_rules! fact {
+    ($section:literal, $mark:expr) => {
+        Legend {
+            section: $section,
+            mark: |g| ($mark.glyph)(g),
+            style: |p| $mark.style(p),
+            help: $mark.words,
+            on: On::Lists(WORK),
+        }
+    };
 }
 
-/// The legend: every mark the lists, the main view and the command log draw, in the order `?`
-/// lists them. The `status:` marks are worktrunk's, from `wt list`'s Status column.
+/// A status symbol's legend entry, its heading, colour and words from [`marks::SYMBOLS`].
+macro_rules! status {
+    ($mark:literal) => {
+        Legend {
+            section: marks::find($mark).part.section(),
+            mark: |_| marks::find($mark).mark,
+            style: |p| fg(marks::find($mark).tone.color(p)),
+            help: marks::find($mark).help,
+            on: On::Lists(WORK),
+        }
+    };
+}
+
+/// The legend: every mark the lists, the main view and the command log draw, one a line, under
+/// headings in the order `?` lists them. The status symbols are worktrunk's, from `wt list`.
 #[rustfmt::skip]
 pub const LEGEND: &[Legend] = &[
-    Legend { mark: |g| g.workspace, style: dim, help: "workspace", on: On::Lists(&[Kind::Workspaces]) },
-    Legend { mark: |g| g.repo, style: dim, help: "repo", on: On::Lists(&[Kind::Repos]) },
-    Legend { mark: |g| g.worktree, style: dim, help: "worktree", on: On::Lists(WORK) },
-    Legend { mark: |g| g.carnet, style: |p| Standing::Open.style(p), help: "carnet, open", on: On::Lists(ITEMS) },
-    Legend { mark: |g| g.carnet, style: |p| Standing::Elsewhere.style(p), help: "carnet, open in another workspace", on: On::Lists(&[Kind::Carnets]) },
-    Legend { mark: |g| g.carnet, style: |p| Standing::Closed.style(p), help: "carnet, closed, the row dimmed", on: On::Lists(ITEMS) },
-    Legend { mark: |g| g.review, style: dim, help: "review", on: On::Lists(&[Kind::Reviews]) },
-    Legend { mark: |g| g.issue, style: dim, help: "issue", on: On::Lists(&[Kind::Issues]) },
-    Legend { mark: |g| g.open, style: |p| lists::tab(true, p).1, help: "tab open", on: On::Lists(ITEMS) },
-    Legend { mark: |g| g.closed, style: |p| lists::tab(false, p).1, help: "tab closed", on: On::Lists(ITEMS) },
-    Legend { mark: |g| g.open, style: |p| lists::tab(true, p).1, help: "checked out, its tab open", on: On::Lists(&[Kind::Reviews]) },
-    Legend { mark: |g| g.closed, style: |p| lists::tab(false, p).1, help: "checked out, its tab closed", on: On::Lists(&[Kind::Reviews]) },
-    Legend { mark: |g| g.open, style: lists::key_style, help: "linked work, a tab open", on: On::Lists(&[Kind::Issues]) },
-    Legend { mark: |g| g.closed, style: lists::key_style, help: "linked work, no tab open", on: On::Lists(&[Kind::Issues]) },
-    Legend { mark: |g| g.reviewed, style: lists::review_style, help: "an open review links it", on: On::Lists(&[Kind::Issues]) },
-    Legend { mark: |g| g.spinner[0], style: |p| Style::new().fg(p.info), help: "pulling", on: On::Lists(WORK) },
-    Legend { mark: |g| g.folded, style: |p| lists::group_style(p).bold(), help: "folded group", on: On::Lists(WORK) },
-    Legend { mark: |g| g.unfolded, style: |p| lists::group_style(p).bold(), help: "unfolded group", on: On::Lists(WORK) },
-    Legend { mark: |_| "group", style: lists::group_style, help: "a group", on: On::Lists(GROUPED) },
-    Legend { mark: |_| "KEY-1", style: lists::key_style, help: "an issue key", on: On::Lists(KEYED) },
-    Legend { mark: |g| g.ci, style: |p| ci(CiState::Passed, p), help: "CI passed", on: On::Lists(WORK) },
-    Legend { mark: |g| g.ci, style: |p| ci(CiState::Running, p), help: "CI running", on: On::Lists(WORK) },
-    Legend { mark: |g| g.ci, style: |p| ci(CiState::Failed, p), help: "CI failed", on: On::Lists(WORK) },
-    Legend { mark: |g| g.ci, style: |p| ci(CiState::Conflicts, p), help: "merge conflicts", on: On::Lists(WORK) },
-    Legend { mark: |g| g.ci, style: |p| ci(CiState::ChangesRequested, p), help: "changes requested", on: On::Lists(WORK) },
-    Legend { mark: |g| g.ci, style: |p| ci(CiState::ApprovalPending, p), help: "approval pending", on: On::Lists(WORK) },
-    Legend { mark: |g| g.ci, style: |p| ci(CiState::Passed, p).add_modifier(Modifier::DIM), help: "CI dimmed: stale, or a draft review", on: On::Lists(WORK) },
-    Legend { mark: |g| g.ci_error, style: |p| ci(CiState::Error, p), help: "CI status could not be fetched", on: On::Lists(WORK) },
-    Legend { mark: |_| "+!?", style: warn, help: "status in yellow: the tree is dirty", on: On::Lists(WORK) },
-    Legend { mark: |_| "+", style: dim, help: "status: staged files", on: On::Lists(WORK) },
-    Legend { mark: |_| "!", style: dim, help: "status: modified files", on: On::Lists(WORK) },
-    Legend { mark: |_| "?", style: dim, help: "status: untracked files", on: On::Lists(WORK) },
-    Legend { mark: |_| "✘", style: dim, help: "status: merge conflicts", on: On::Lists(WORK) },
-    Legend { mark: |_| "↻", style: dim, help: "status: rebase, merge or other git operation in progress", on: On::Lists(WORK) },
-    Legend { mark: |_| "⊟", style: dim, help: "status: prunable, its directory or .git gone", on: On::Lists(WORK) },
-    Legend { mark: |_| "⊞", style: dim, help: "status: locked worktree", on: On::Lists(WORK) },
-    Legend { mark: |_| "⊘", style: dim, help: "status: detached HEAD", on: On::Lists(WORK) },
-    Legend { mark: |_| "⚐", style: dim, help: "status: branch in several worktrees, or not its path", on: On::Lists(WORK) },
-    Legend { mark: |_| "/", style: dim, help: "status: branch without a worktree", on: On::Lists(WORK) },
-    Legend { mark: |_| "^", style: dim, help: "status: the main worktree", on: On::Lists(WORK) },
-    Legend { mark: |_| "∅", style: dim, help: "status: no common ancestor with the default branch", on: On::Lists(WORK) },
-    Legend { mark: |_| "_", style: dim, help: "status: same commit as the default branch, clean", on: On::Lists(WORK) },
-    Legend { mark: |_| "–", style: dim, help: "status: same commit as the default branch, dirty", on: On::Lists(WORK) },
-    Legend { mark: |_| "⊂", style: dim, help: "status: integrated into the default branch", on: On::Lists(WORK) },
-    Legend { mark: |_| "✗", style: dim, help: "status: merging into the default branch would conflict", on: On::Lists(WORK) },
-    Legend { mark: |_| "↕", style: dim, help: "status: ahead of and behind the default branch", on: On::Lists(WORK) },
-    Legend { mark: |_| "↑", style: dim, help: "status: ahead of the default branch", on: On::Lists(WORK) },
-    Legend { mark: |_| "↓", style: dim, help: "status: behind the default branch", on: On::Lists(WORK) },
-    Legend { mark: |_| "|", style: dim, help: "status: in sync with the remote", on: On::Lists(WORK) },
-    Legend { mark: |_| "⇡", style: dim, help: "status: ahead of the remote", on: On::Lists(WORK) },
-    Legend { mark: |_| "⇣", style: dim, help: "status: behind the remote", on: On::Lists(WORK) },
-    Legend { mark: |_| "⇅", style: dim, help: "status: diverged from the remote", on: On::Lists(WORK) },
-    Legend { mark: |_| "↓N", style: warn, help: "behind its upstream by N commits", on: On::Lists(WORK) },
-    Legend { mark: |g| g.integrated, style: dim, help: "finished, the row dimmed: integrated into the default branch", on: On::Lists(WORK) },
-    Legend { mark: |g| g.gone, style: dim, help: "finished, the row dimmed: its upstream branch is gone", on: On::Lists(WORK) },
-    Legend { mark: |_| "✓", style: |p| Style::new().fg(p.ok), help: "command log: the command succeeded", on: On::Global },
-    Legend { mark: |_| "✗", style: |p| Style::new().fg(p.error), help: "command log: the command failed", on: On::Global },
-    Legend { mark: |_| "⟳", style: |p| Style::new().fg(p.info), help: "hint bar: loading", on: On::Global },
+    Legend { section: "Row colour", mark: |_| "name", style: |p| Severity::Broken.style(p), help: "broken", on: On::Lists(WORK) },
+    Legend { section: "Row colour", mark: |_| "name", style: |p| Severity::NeedsYou.style(p), help: "needs you", on: On::Lists(WORK) },
+    Legend { section: "Row colour", mark: |_| "name", style: |p| Severity::Waiting.style(p), help: "waiting for approval", on: On::Lists(WORK) },
+    Legend { section: "Row colour", mark: |_| "name", style: dim, help: "closed or finished", on: On::Lists(WORK) },
+    Legend { section: "Row colour", mark: |_| "name", style: dim, help: "closed", on: On::Lists(CARNETS) },
+    Legend { section: "Rows", mark: |g| g.workspace, style: dim, help: "workspace", on: On::Lists(&[Kind::Workspaces]) },
+    Legend { section: "Rows", mark: |g| g.repo, style: dim, help: "repo", on: On::Lists(&[Kind::Repos]) },
+    Legend { section: "Rows", mark: |g| g.worktree, style: dim, help: "worktree", on: On::Lists(WORK) },
+    Legend { section: "Rows", mark: |g| g.carnet, style: |p| carnets::glyph_style(false, p), help: "carnet, open", on: On::Lists(ITEMS) },
+    Legend { section: "Rows", mark: |g| g.carnet, style: |p| carnets::glyph_style(true, p), help: "carnet, closed: row dimmed", on: On::Lists(ITEMS) },
+    Legend { section: "Rows", mark: |_| "vrac", style: lists::workspace_style, help: "another workspace, by name", on: On::Lists(CARNETS) },
+    Legend { section: "Rows", mark: |g| g.review, style: dim, help: "review", on: On::Lists(REVIEWS) },
+    Legend { section: "Rows", mark: |_| "draft", style: |p| fg(p.warn), help: "a draft review", on: On::Lists(REVIEWS) },
+    Legend { section: "Rows", mark: |g| g.issue, style: dim, help: "issue", on: On::Lists(ISSUES) },
+    Legend { section: "Tab", mark: |g| g.open, style: |p| lists::tab(true, p).1, help: "tab open", on: On::Lists(ITEMS) },
+    Legend { section: "Tab", mark: |g| g.closed, style: |p| lists::tab(false, p).1, help: "no tab open", on: On::Lists(ITEMS) },
+    Legend { section: "Tab", mark: |g| g.open, style: |p| lists::tab(true, p).1, help: "checked out, tab open", on: On::Lists(REVIEWS) },
+    Legend { section: "Tab", mark: |g| g.closed, style: |p| lists::tab(false, p).1, help: "checked out, no tab open", on: On::Lists(REVIEWS) },
+    Legend { section: "Tab", mark: |g| g.open, style: |p| lists::tab(true, p).1, help: "linked work, a tab open", on: On::Lists(ISSUES) },
+    Legend { section: "Tab", mark: |g| g.closed, style: |p| lists::tab(false, p).1, help: "linked work, no tab open", on: On::Lists(ISSUES) },
+    Legend { section: "Tab", mark: |g| g.spinner[0], style: |p| fg(p.info), help: "pulling", on: On::Lists(WORK) },
+    Legend { section: "Groups", mark: |g| g.folded, style: |p| lists::group_style(p).bold(), help: "folded group", on: On::Lists(WORK) },
+    Legend { section: "Groups", mark: |g| g.unfolded, style: |p| lists::group_style(p).bold(), help: "unfolded group", on: On::Lists(WORK) },
+    Legend { section: "Groups", mark: |_| "GROUP", style: lists::group_style, help: "group name", on: On::Lists(GROUPED) },
+    Legend { section: "Groups", mark: |_| "KEY-1", style: lists::key_style, help: "issue key", on: On::Lists(KEYED) },
+    status!("+"),
+    status!("!"),
+    status!("?"),
+    status!("✘"),
+    status!("↻"),
+    status!("⊟"),
+    status!("⊞"),
+    status!("⊘"),
+    status!("⚐"),
+    status!("/"),
+    status!("^"),
+    status!("∅"),
+    status!("_"),
+    status!("–"),
+    status!("⊂"),
+    status!("✗"),
+    status!("↕"),
+    status!("↑"),
+    status!("↓"),
+    status!("|"),
+    status!("⇡"),
+    status!("⇣"),
+    status!("⇅"),
+    fact!("Checks", marks::checks(Checks::Passed)),
+    fact!("Checks", marks::checks(Checks::Running)),
+    fact!("Checks", marks::checks(Checks::Failed)),
+    fact!("Checks", marks::checks(Checks::Unavailable)),
+    Legend { section: "Checks", mark: |g| g.done, style: |p| marks::checks(Checks::Passed).style(p).add_modifier(Modifier::DIM), help: "dimmed: stale, or a draft", on: On::Lists(WORK) },
+    Legend { section: "Review", mark: |_| "draft", style: dim, help: "a draft review, its checks dimmed", on: On::Lists(WORK) },
+    Legend { section: "Review", mark: |g| g.reviewed, style: lists::review_style, help: "an open review links it", on: On::Lists(ISSUES) },
+    fact!("Decision", marks::decision(Decision::Pending).unwrap()),
+    fact!("Decision", marks::decision(Decision::ChangesRequested).unwrap()),
+    fact!("Decision", marks::decision(Decision::Approved).unwrap()),
+    Legend { section: "Merge", mark: |g| (marks::CONFLICTS.glyph)(g), style: |p| marks::CONFLICTS.style(p), help: "the review conflicts with its base", on: On::Lists(WORK) },
+    Legend { section: "Finished", mark: |g| g.integrated, style: dim, help: "merged into the default branch, row dimmed", on: On::Lists(WORK) },
+    Legend { section: "Finished", mark: |g| g.gone, style: dim, help: "its remote branch was deleted, row dimmed", on: On::Lists(WORK) },
+    Legend { section: "Command log", mark: |g| g.done, style: dim, help: "succeeded", on: On::Global },
+    Legend { section: "Command log", mark: |g| g.broken, style: |p| fg(p.error), help: "failed", on: On::Global },
+    Legend { section: "Hint bar", mark: |_| "⟳", style: dim, help: "loading", on: On::Global },
 ];
 
 impl Legend {
@@ -237,6 +283,14 @@ impl Legend {
             .filter(|legend| !(legend.mark)(glyphs).is_empty())
             .collect()
     }
+
+    /// How many lines a legend takes: its marks and a heading for each section.
+    pub fn lines(legend: &[&Legend]) -> usize {
+        let headings = (legend.iter().enumerate())
+            .filter(|&(index, entry)| index == 0 || legend[index - 1].section != entry.section)
+            .count();
+        legend.len() + headings
+    }
 }
 
 /// A glyph and its separating space, or nothing for an empty glyph.
@@ -245,8 +299,9 @@ pub(super) fn icon(glyph: &'static str, style: Style) -> Option<Span<'static>> {
 }
 
 impl Palette {
-    pub fn new(flavor: catppuccin::Flavor, icons: Icons) -> Self {
-        let colors = flavor.colors;
+    /// Catppuccin Mocha's colours.
+    pub fn new(icons: Icons) -> Self {
+        let colors = catppuccin::PALETTE.mocha.colors;
         Self {
             glyphs: Glyphs::new(icons),
             accent: colors.mauve.into(),
@@ -258,11 +313,11 @@ impl Palette {
             error: colors.red.into(),
             warn: colors.yellow.into(),
             info: colors.blue.into(),
-            changes_requested: colors.pink.into(),
-            approval_pending: colors.teal.into(),
+            approval_pending: colors.pink.into(),
             filter: colors.yellow.into(),
             group: colors.lavender.into(),
             issue_key: colors.peach.into(),
+            workspace: colors.teal.into(),
             markdown: Markdown::new(&colors),
         }
     }
@@ -455,15 +510,15 @@ fn selected(model: &Model) -> Option<&Work> {
     lists::of(list).item(model, list)
 }
 
-/// The selected carnet's README, rendered once read.
-fn readme<'a>(model: &'a Model, palette: &Palette) -> Option<Text<'a>> {
+/// The selected carnet's README, rendered once read and wrapped at the main view's width,
+/// capped at [`markdown::MAX_WIDTH`].
+fn readme(model: &Model, palette: &Palette) -> Option<Vec<Line<'static>>> {
     let path = selected(model)?.path();
     let readme = (model.readme.as_ref()).filter(|readme| readme.path == *path)?;
-    Some(
-        palette
-            .markdown
-            .render(crate::carnet::body(readme.text.as_deref()?)),
-    )
+    let text = (palette.markdown).render(crate::carnet::body(readme.text.as_deref()?));
+    let main = areas(model, Rect::new(0, 0, model.size.0, model.size.1)).main?;
+    let width = main.width.saturating_sub(2).min(markdown::MAX_WIDTH);
+    Some(markdown::wrap(text, width))
 }
 
 /// The selected worktree's recent commits, once loaded.
@@ -479,10 +534,10 @@ fn detail(model: &Model, palette: &Palette) -> Vec<(String, Line<'static>)> {
 /// How many lines the main view holds, so scrolling stops at its end. Any palette lays out
 /// the same lines.
 pub fn main_len(model: &Model) -> usize {
-    let palette = Palette::new(catppuccin::PALETTE.mocha, Icons::Unicode);
+    let palette = Palette::new(Icons::Unicode);
     detail(model, &palette).len()
         + model.carnet_hits().map_or(0, |hits| hits.len() + 2)
-        + readme(model, &palette).map_or(0, |readme| readme.lines.len() + 2)
+        + readme(model, &palette).map_or(0, |readme| readme.len() + 2)
         + commits(model).map_or(0, |commits| commits.len() + 2)
 }
 
@@ -511,7 +566,7 @@ fn render_main(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect) 
     }
     if let Some(readme) = readme(model, palette) {
         section(&mut lines, "README");
-        lines.extend(readme.lines);
+        lines.extend(readme);
     }
     if let Some(commits) = commits(model) {
         section(&mut lines, "Recent commits");
@@ -537,11 +592,17 @@ fn render_log(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect) {
         .iter()
         .map(|entry| match &entry.error {
             None => Line::from(vec![
-                Span::styled("✓ ", Style::new().fg(palette.ok)),
+                Span::styled(
+                    format!("{} ", palette.glyphs.done),
+                    Style::new().fg(palette.dim),
+                ),
                 Span::styled(entry.command.as_str(), Style::new().fg(palette.dim)),
             ]),
             Some(error) => Line::from(vec![
-                Span::styled("✗ ", Style::new().fg(palette.error)),
+                Span::styled(
+                    format!("{} ", palette.glyphs.broken),
+                    Style::new().fg(palette.error),
+                ),
                 Span::raw(entry.command.as_str()),
                 Span::styled(format!(": {error}"), Style::new().fg(palette.error)),
             ]),
@@ -590,7 +651,7 @@ fn render_hints(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect)
         frame.render_widget(
             Paragraph::new(Span::styled(
                 format!("⟳ {}", loading.join(" ")),
-                Style::new().fg(palette.info),
+                Style::new().fg(palette.dim),
             )),
             right,
         );
