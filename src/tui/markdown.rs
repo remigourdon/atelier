@@ -65,41 +65,66 @@ impl Markdown {
     }
 }
 
+/// One character of a line and its style, as [`wrap`] lays a line out.
+#[derive(Clone, Copy)]
+struct Cell {
+    c: char,
+    style: Style,
+}
+
+impl Cell {
+    fn is_space(self) -> bool {
+        self.c == ' '
+    }
+
+    /// The columns it takes.
+    fn width(self) -> usize {
+        self.c.width().unwrap_or(0)
+    }
+}
+
 /// `text`'s lines wrapped at `width` columns as glow wraps them: between words, a word wider
 /// than a line broken where it reaches the edge, code blocks included. A blank line stays.
 pub fn wrap<'a>(text: Text<'a>, width: u16) -> Vec<Line<'static>> {
     let width = usize::from(width.max(1));
     let mut lines = Vec::new();
     for line in text.lines {
-        let cells: Vec<(char, Style)> = (line.spans.iter())
-            .flat_map(|span| span.content.chars().map(move |c| (c, span.style)))
+        let cells: Vec<Cell> = (line.spans.iter())
+            .flat_map(|span| {
+                (span.content.chars()).map(move |c| Cell {
+                    c,
+                    style: span.style,
+                })
+            })
             .collect();
-        let mut wrapped: Vec<Vec<(char, Style)>> = Vec::new();
-        let mut current: Vec<(char, Style)> = Vec::new();
+        let mut wrapped: Vec<Vec<Cell>> = Vec::new();
+        let mut current: Vec<Cell> = Vec::new();
         let mut used = 0;
         let mut rest = &cells[..];
         while !rest.is_empty() {
             // A word, then the spaces after it.
-            let body = rest.iter().take_while(|(c, _)| *c != ' ').count();
-            let spaces = rest[body..].iter().take_while(|(c, _)| *c == ' ').count();
+            let body = rest.iter().take_while(|cell| !cell.is_space()).count();
+            let spaces = rest[body..]
+                .iter()
+                .take_while(|cell| cell.is_space())
+                .count();
             let (word, after) = (&rest[..body], &rest[body..body + spaces]);
-            let word_width: usize = word.iter().map(|(c, _)| c.width().unwrap_or(0)).sum();
+            let word_width: usize = word.iter().map(|cell| cell.width()).sum();
             if used > 0 && used + word_width > width {
                 trim_end(&mut current);
                 wrapped.push(std::mem::take(&mut current));
                 used = 0;
             }
             for &cell in word.iter().chain(after) {
-                let cell_width = cell.0.width().unwrap_or(0);
-                if used + cell_width > width {
-                    if cell.0 == ' ' {
+                if used + cell.width() > width {
+                    if cell.is_space() {
                         continue;
                     }
                     wrapped.push(std::mem::take(&mut current));
                     used = 0;
                 }
                 current.push(cell);
-                used += cell_width;
+                used += cell.width();
             }
             rest = &rest[body + spaces..];
         }
@@ -113,16 +138,16 @@ pub fn wrap<'a>(text: Text<'a>, width: u16) -> Vec<Line<'static>> {
     lines
 }
 
-fn trim_end(cells: &mut Vec<(char, Style)>) {
-    while cells.last().is_some_and(|(c, _)| *c == ' ') {
+fn trim_end(cells: &mut Vec<Cell>) {
+    while cells.last().is_some_and(|cell| cell.is_space()) {
         cells.pop();
     }
 }
 
 /// Cells back into spans, one per run of a style.
-fn spans(cells: Vec<(char, Style)>) -> Vec<Span<'static>> {
+fn spans(cells: Vec<Cell>) -> Vec<Span<'static>> {
     let mut spans: Vec<(String, Style)> = Vec::new();
-    for (c, style) in cells {
+    for Cell { c, style } in cells {
         match spans.last_mut() {
             Some((text, last)) if *last == style => text.push(c),
             _ => spans.push((c.to_string(), style)),
