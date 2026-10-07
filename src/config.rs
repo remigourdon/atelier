@@ -231,10 +231,9 @@ mod tests {
         assert_eq!(config.anchor_pane(), "editor");
         assert_eq!(config.agent_command(), "claude");
         assert_eq!(config.icons, Icons::Unicode);
-        let config = Config::parse(
-            "default_workspace = \"vrac\"\ntheme = \"latte\"\n[zellij]\nanchor_pane = \"main\"\n",
-        )
-        .unwrap();
+        let config =
+            Config::parse("default_workspace = \"vrac\"\n[zellij]\nanchor_pane = \"main\"\n")
+                .unwrap();
         assert_eq!(config.default_workspace(), "vrac");
         assert_eq!(config.anchor_pane(), "main");
         let config = Config::parse("browser = \"firefox\"\n").unwrap();
@@ -244,6 +243,10 @@ mod tests {
             Icons::Nerd
         );
         assert!(Config::parse("icons = \"emoji\"").is_err());
+        assert!(
+            Config::parse("theme = \"latte\"").is_ok(),
+            "a theme from before Mocha was the only one is ignored"
+        );
     }
 
     #[test]

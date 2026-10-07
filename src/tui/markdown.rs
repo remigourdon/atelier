@@ -1,4 +1,4 @@
-//! A carnet's README drawn in the flavor's colours, after Catppuccin's theme for glamour, the
+//! A carnet's README drawn in Catppuccin Mocha's colours, after Catppuccin's theme for glamour, the
 //! Markdown renderer of glow.
 
 use ratatui::style::{Color, Style};
@@ -9,10 +9,10 @@ use unicode_width::UnicodeWidthChar;
 /// The widest a README is drawn, however wide its pane.
 pub const MAX_WIDTH: u16 = 120;
 
-/// tui-markdown's styles in a Catppuccin flavor.
+/// tui-markdown's styles in Catppuccin Mocha.
 #[derive(Clone, Debug)]
 pub struct Markdown {
-    /// H1 to H6: the flavor's rainbow.
+    /// H1 to H6: Mocha's rainbow.
     headings: [Color; 6],
     code: Color,
     code_background: Color,
