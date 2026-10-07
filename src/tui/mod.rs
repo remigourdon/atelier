@@ -552,6 +552,7 @@ mod tests {
             conflicts,
             changes_requested,
             approval,
+            approved,
             spinner,
         } = glyphs;
         for glyph in [
@@ -575,6 +576,7 @@ mod tests {
             conflicts,
             changes_requested,
             approval,
+            approved,
             spinner[0],
         ] {
             assert!(marks.contains(&glyph), "{glyph} is not in the legend");

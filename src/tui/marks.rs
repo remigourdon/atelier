@@ -206,7 +206,7 @@ pub const fn decision(decision: Decision) -> Option<Mark> {
             words: "waiting for approval",
         }),
         Decision::Approved => Some(Mark {
-            glyph: |g| g.passed,
+            glyph: |g| g.approved,
             tone: Tone::Done,
             words: "approved",
         }),
@@ -330,6 +330,18 @@ mod tests {
             .collect();
         assert_eq!(parts, ["!", "?"]);
         assert_eq!(find("⇅").help, "diverged");
+    }
+
+    #[test]
+    fn passed_checks_and_an_approval_never_share_a_glyph() {
+        for icons in [crate::config::Icons::Unicode, crate::config::Icons::Nerd] {
+            let glyphs = Glyphs::new(icons);
+            let approved = decision(Decision::Approved).unwrap();
+            assert_ne!(
+                (checks(Checks::Passed).glyph)(&glyphs),
+                (approved.glyph)(&glyphs)
+            );
+        }
     }
 
     #[test]

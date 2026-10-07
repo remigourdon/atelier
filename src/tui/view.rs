@@ -77,9 +77,10 @@ pub struct Glyphs {
     pub unavailable: &'static str,
     /// A review's merge conflicts.
     pub conflicts: &'static str,
-    /// A review's decision, short of approval.
+    /// A review's decision.
     pub changes_requested: &'static str,
     pub approval: &'static str,
+    pub approved: &'static str,
     pub spinner: [&'static str; 4],
 }
 
@@ -102,19 +103,20 @@ impl Glyphs {
                 unfolded: "▾",
                 integrated: "⊂",
                 gone: "⊗",
-                passed: "✔",
+                passed: "◆",
                 running: "◔",
                 failed: "✖",
                 unavailable: "⚠",
                 conflicts: "✗",
                 changes_requested: "±",
                 approval: "◇",
+                approved: "✔",
                 spinner,
             },
             // Nerd Fonts: fa-desktop, oct-repo, dev-git_branch, fa-home, fa-book, oct-git_pull_request,
             // oct-issue_opened, fa-dot_circle_o, fa-circle_o, fa-folder, fa-folder_open,
-            // oct-git_merge, fa-chain_broken, oct-check_circle, oct-clock, oct-x_circle, fa-warning,
-            // oct-file_diff, oct-eye.
+            // oct-git_merge, fa-chain_broken, fa-diamond, oct-clock, oct-x_circle, fa-warning,
+            // oct-file_diff, oct-eye, oct-check_circle.
             Icons::Nerd => Self {
                 workspace: "\u{f108}",
                 repo: "\u{f401}",
@@ -130,13 +132,14 @@ impl Glyphs {
                 unfolded: "\u{f07c}",
                 integrated: "\u{f419}",
                 gone: "\u{f127}",
-                passed: "\u{f49e}",
+                passed: "\u{f219}",
                 running: "\u{f43a}",
                 failed: "\u{f52f}",
                 unavailable: "\u{f071}",
                 conflicts: "✗",
                 changes_requested: "\u{f4d2}",
                 approval: "\u{f441}",
+                approved: "\u{f49e}",
                 spinner,
             },
         }
