@@ -2,8 +2,12 @@
 //! Markdown renderer of glow.
 
 use ratatui::style::{Color, Style};
-use ratatui::text::Text;
+use ratatui::text::{Line, Span, Text};
 use tui_markdown::{AlertKind, Options, StyleSheet};
+use unicode_width::UnicodeWidthChar;
+
+/// The widest a README is drawn, however wide its pane.
+pub const MAX_WIDTH: u16 = 120;
 
 /// tui-markdown's styles in a Catppuccin flavor.
 #[derive(Clone, Debug)]
@@ -61,6 +65,74 @@ impl Markdown {
     }
 }
 
+/// `text`'s lines wrapped at `width` columns as glow wraps them: between words, a word wider
+/// than a line broken where it reaches the edge, code blocks included. A blank line stays.
+pub fn wrap<'a>(text: Text<'a>, width: u16) -> Vec<Line<'static>> {
+    let width = usize::from(width.max(1));
+    let mut lines = Vec::new();
+    for line in text.lines {
+        let cells: Vec<(char, Style)> = (line.spans.iter())
+            .flat_map(|span| span.content.chars().map(move |c| (c, span.style)))
+            .collect();
+        let mut wrapped: Vec<Vec<(char, Style)>> = Vec::new();
+        let mut current: Vec<(char, Style)> = Vec::new();
+        let mut used = 0;
+        let mut rest = &cells[..];
+        while !rest.is_empty() {
+            // A word, then the spaces after it.
+            let body = rest.iter().take_while(|(c, _)| *c != ' ').count();
+            let spaces = rest[body..].iter().take_while(|(c, _)| *c == ' ').count();
+            let (word, after) = (&rest[..body], &rest[body..body + spaces]);
+            let word_width: usize = word.iter().map(|(c, _)| c.width().unwrap_or(0)).sum();
+            if used > 0 && used + word_width > width {
+                trim_end(&mut current);
+                wrapped.push(std::mem::take(&mut current));
+                used = 0;
+            }
+            for &cell in word.iter().chain(after) {
+                let cell_width = cell.0.width().unwrap_or(0);
+                if used + cell_width > width {
+                    if cell.0 == ' ' {
+                        continue;
+                    }
+                    wrapped.push(std::mem::take(&mut current));
+                    used = 0;
+                }
+                current.push(cell);
+                used += cell_width;
+            }
+            rest = &rest[body + spaces..];
+        }
+        wrapped.push(current);
+        lines.extend(wrapped.into_iter().map(|cells| {
+            let mut wrapped = Line::from(spans(cells)).style(line.style);
+            wrapped.alignment = line.alignment;
+            wrapped
+        }));
+    }
+    lines
+}
+
+fn trim_end(cells: &mut Vec<(char, Style)>) {
+    while cells.last().is_some_and(|(c, _)| *c == ' ') {
+        cells.pop();
+    }
+}
+
+/// Cells back into spans, one per run of a style.
+fn spans(cells: Vec<(char, Style)>) -> Vec<Span<'static>> {
+    let mut spans: Vec<(String, Style)> = Vec::new();
+    for (c, style) in cells {
+        match spans.last_mut() {
+            Some((text, last)) if *last == style => text.push(c),
+            _ => spans.push((c.to_string(), style)),
+        }
+    }
+    (spans.into_iter())
+        .map(|(text, style)| Span::styled(text, style))
+        .collect()
+}
+
 impl StyleSheet for Markdown {
     /// The top two levels bold, as glamour's.
     fn heading(&self, level: u8) -> Style {
@@ -113,5 +185,39 @@ impl StyleSheet for Markdown {
 
     fn list_marker(&self) -> Style {
         Style::new().fg(self.list_marker)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plain(lines: &[Line]) -> Vec<String> {
+        lines.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn wraps_between_words_and_breaks_a_word_too_wide() {
+        let text = Text::from(vec![
+            Line::from("one two three four"),
+            Line::from(""),
+            Line::from(vec![
+                Span::raw("ab"),
+                Span::styled("cdefgh", Style::new().bold()),
+            ]),
+        ]);
+        let lines = wrap(text, 9);
+        assert_eq!(plain(&lines), ["one two", "three", "four", "", "abcdefgh"]);
+        assert_eq!(
+            plain(&wrap(Text::from("abcdefghij"), 4)),
+            ["abcd", "efgh", "ij"]
+        );
+        assert_eq!(lines[4].spans[1].style, Style::new().bold(), "styles kept");
+    }
+
+    #[test]
+    fn code_keeps_its_indent_on_its_first_line() {
+        let lines = wrap(Text::from("    let x = 1;"), 10);
+        assert_eq!(plain(&lines), ["    let x", "= 1;"]);
     }
 }

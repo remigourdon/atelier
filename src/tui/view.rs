@@ -11,7 +11,7 @@ use super::app::{
 };
 use super::lists;
 use super::lists::carnets::Standing;
-use super::markdown::Markdown;
+use super::markdown::{self, Markdown};
 use super::widgets;
 use crate::config::Icons;
 use crate::finish::Signal;
@@ -456,15 +456,15 @@ fn selected(model: &Model) -> Option<&Work> {
     lists::of(list).item(model, list)
 }
 
-/// The selected carnet's README, rendered once read.
-fn readme<'a>(model: &'a Model, palette: &Palette) -> Option<Text<'a>> {
+/// The selected carnet's README, rendered once read and wrapped at the main view's width,
+/// capped at [`markdown::MAX_WIDTH`].
+fn readme(model: &Model, palette: &Palette) -> Option<Vec<Line<'static>>> {
     let path = selected(model)?.path();
     let readme = (model.readme.as_ref()).filter(|readme| readme.path == *path)?;
-    Some(
-        palette
-            .markdown
-            .render(crate::carnet::body(readme.text.as_deref()?)),
-    )
+    let text = (palette.markdown).render(crate::carnet::body(readme.text.as_deref()?));
+    let main = areas(model, Rect::new(0, 0, model.size.0, model.size.1)).main?;
+    let width = main.width.saturating_sub(2).min(markdown::MAX_WIDTH);
+    Some(markdown::wrap(text, width))
 }
 
 /// The selected worktree's recent commits, once loaded.
@@ -483,7 +483,7 @@ pub fn main_len(model: &Model) -> usize {
     let palette = Palette::new(Icons::Unicode);
     detail(model, &palette).len()
         + model.carnet_hits().map_or(0, |hits| hits.len() + 2)
-        + readme(model, &palette).map_or(0, |readme| readme.lines.len() + 2)
+        + readme(model, &palette).map_or(0, |readme| readme.len() + 2)
         + commits(model).map_or(0, |commits| commits.len() + 2)
 }
 
@@ -512,7 +512,7 @@ fn render_main(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect) 
     }
     if let Some(readme) = readme(model, palette) {
         section(&mut lines, "README");
-        lines.extend(readme.lines);
+        lines.extend(readme);
     }
     if let Some(commits) = commits(model) {
         section(&mut lines, "Recent commits");

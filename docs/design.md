@@ -119,7 +119,7 @@ Lazygit model: numbered side panels on the left, the main view on the right show
 | 3 | To review │ Mine | Reviews |
 | 4 | one per section | Issues; when the sections do not fit the title, only the active one shows, with its position |
 
-The main view is a structured key/value detail for each kind, plus recent commits. A worktree or a carnet shows its group and issue keys; a carnet leads with its summary, then its path (subtle), and, under a `README` label, its rendered README without the front matter, read like the commits only for the selected carnet; an issue shows its linked work. Errors go to the command log, not toasts.
+The main view is a structured key/value detail for each kind, plus recent commits. A worktree or a carnet shows its group and issue keys; a carnet leads with its summary, then its path (subtle), and, under a `README` label, its rendered README without the front matter, wrapped as glow wraps it at the pane width capped at 120 columns, code blocks included, read like the commits only for the selected carnet; an issue shows its linked work. Errors go to the command log, not toasts.
 
 The command log retains up to 500 entries in memory. `E` captures those entries and writes a new
 `command-log-<timestamp>-<pid>.log` under `$XDG_STATE_HOME/atelier/logs`, defaulting to

@@ -286,8 +286,8 @@ mod tests {
         for key in [key('>'), key('k')] {
             update(&mut model, Action::Key(key));
         }
-        let text =
-            "+++\nsummary = \"hidden\"\n+++\n# 2026-10-02-ideas\n\nWhat I found **so far**.\n";
+        let text = "+++\nsummary = \"hidden\"\n+++\n# 2026-10-02-ideas\n\nWhat I found **so far**, \
+            in a paragraph long enough to wrap at the width of the main view, as glow wraps it.\n";
         let readme = app::Readme {
             path: "/data/2026-10-02-ideas".into(),
             stamp: None,
@@ -295,6 +295,10 @@ mod tests {
         };
         update(&mut model, Action::Readme(readme));
         model.schedule.finish_all();
+        let unwrapped = view::main_len(&model);
+        model.size = (200, 30);
+        assert_eq!(view::main_len(&model), unwrapped - 1, "the paragraph fits");
+        model.size = (120, 30);
         insta::assert_snapshot!(render(&model, 120, 30));
     }
 
