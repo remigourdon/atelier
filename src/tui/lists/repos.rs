@@ -3,7 +3,7 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, pair};
+use super::{ListKind, pair, workspace_span};
 use crate::state::Repo;
 use crate::tui::app::{Action, Effect, Job, Kind, List, Model, Submit};
 use crate::tui::update::{confirm, note, update, workspace_menu};
@@ -61,7 +61,7 @@ impl ListKind for Repos {
     fn detail(
         &self,
         model: &Model,
-        _palette: &Palette,
+        palette: &Palette,
         _list: List,
     ) -> Vec<(String, Line<'static>)> {
         let Some(repo) = model.repo() else {
@@ -77,7 +77,10 @@ impl ListKind for Repos {
             pair("Repo", repo.name()),
             pair("Alias", repo.alias.clone().unwrap_or_default()),
             pair("Path", repo.path.display().to_string()),
-            pair("Workspace", repo.default_workspace.clone()),
+            pair(
+                "Workspace",
+                workspace_span(&repo.default_workspace, palette),
+            ),
             pair("Worktrees", count.to_string()),
             pair(
                 "Forge",
