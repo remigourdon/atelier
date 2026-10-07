@@ -34,15 +34,10 @@ impl Layouts {
             }
             Ok(path.to_string_lossy().into_owned())
         };
-        let zjstatus = Some(config.zjstatus()).filter(|path| path.exists());
-        let background = catppuccin::PALETTE.mocha.colors.mantle.hex.to_string();
-        let bar = (zjstatus.as_deref())
-            .map(|path| info_bar(path, &background))
-            .unwrap_or_default();
         Ok(Self {
             session: match &config.zellij.session_layout {
                 Some(layout) => expand(layout),
-                None => built_in("session.kdl", session_layout(&bar))?,
+                None => built_in("session.kdl", session_layout())?,
             },
             worktree: match &config.zellij.worktree_layout {
                 Some(layout) => expand(layout),
@@ -52,7 +47,6 @@ impl Layouts {
                         config.anchor_pane(),
                         config.editor().as_deref(),
                         config.agent_command(),
-                        &bar,
                     ),
                 )?,
             },
@@ -68,36 +62,14 @@ fn kdl_string(value: &str) -> String {
     serde_json::to_string(value).expect("strings serialise")
 }
 
-/// The row under the tab bar: zjstatus running `atelier statusline` in the focused pane's
-/// directory, so it follows the visible tab. Found through `PATH`, which stays current across
-/// updates where the binary's own store path would not. The whole row takes `background`, the
-/// Mocha's mantle that zellij's catppuccin tab bar is drawn on, so the two read as one header.
-pub fn info_bar(zjstatus: &Path, background: &str) -> String {
-    let location = kdl_string(&format!("file:{}", zjstatus.display()));
-    format!(
-        r##"
-        pane size=1 borderless=true {{
-            plugin location={location} {{
-                format_left "#[bg={background}]{{command_atelier}}"
-                format_space "#[bg={background}]"
-                command_atelier_command "atelier statusline"
-                command_atelier_format "{{stdout}}"
-                command_atelier_interval "10"
-                command_atelier_rendermode "raw"
-                command_atelier_cwd "{{focused_pane_cwd}}"
-            }}
-        }}"##
-    )
-}
-
-/// The session: an `atelier` tab running the TUI. `bar` is the `info_bar`, or empty.
-pub fn session_layout(bar: &str) -> String {
+/// The session: an `atelier` tab running the TUI.
+pub fn session_layout() -> String {
     format!(
         r#"layout {{
     default_tab_template {{
         pane size=1 borderless=true {{
             plugin location="zellij:tab-bar"
-        }}{bar}
+        }}
         children
         pane size=2 borderless=true {{
             plugin location="zellij:status-bar"
@@ -113,14 +85,8 @@ pub fn session_layout(bar: &str) -> String {
     )
 }
 
-/// The worktree tab: the anchor pane running the editor, a shell, and a suspended agent. `bar`
-/// is the `info_bar`, or empty.
-pub fn worktree_layout(
-    anchor: &str,
-    editor: Option<&str>,
-    agent_command: &str,
-    bar: &str,
-) -> String {
+/// The worktree tab: the anchor pane running the editor, a shell, and a suspended agent.
+pub fn worktree_layout(anchor: &str, editor: Option<&str>, agent_command: &str) -> String {
     let anchor = kdl_string(anchor);
     let editor = match editor {
         Some(editor) => format!(
@@ -133,7 +99,7 @@ pub fn worktree_layout(
         r#"layout {{
     pane size=1 borderless=true {{
         plugin location="zellij:tab-bar"
-    }}{bar}
+    }}
     pane split_direction="vertical" {{
         {editor}
         pane stacked=true {{
@@ -149,7 +115,6 @@ pub fn worktree_layout(
 }}
 "#,
         agent = kdl_string(agent_command),
-        bar = bar.replace("\n    ", "\n")
     )
 }
 
@@ -713,38 +678,17 @@ mod tests {
 
     #[test]
     fn layouts_name_the_anchor_pane_and_quote_commands() {
-        let layout = worktree_layout("editor", Some("hx --vsplit"), "claude \"x\"", "");
+        let layout = worktree_layout("editor", Some("hx --vsplit"), "claude \"x\"");
         assert!(layout.contains(r#"name="editor""#));
         assert!(layout.contains(r#"args "-c" "exec hx --vsplit""#));
         assert!(layout.contains(r#"args "-lc" "claude \"x\"""#));
-        assert!(
-            worktree_layout("editor", None, "claude", "").contains(r#"name="editor" focus=true"#)
-        );
-        assert!(!worktree_layout("editor", None, "claude", "").contains("nvim"));
-        assert!(worktree_layout("main", None, "claude", "").contains(r#"name="main" focus=true"#));
-        assert!(session_layout("").contains(
+        assert!(worktree_layout("editor", None, "claude").contains(r#"name="editor" focus=true"#));
+        assert!(!worktree_layout("editor", None, "claude").contains("nvim"));
+        assert!(worktree_layout("main", None, "claude").contains(r#"name="main" focus=true"#));
+        assert!(session_layout().contains(
             r#"pane name="atelier" command="atelier" {
             args "tui"#
         ));
-    }
-
-    #[test]
-    fn the_info_bar_sits_under_the_tab_bar_only_when_given() {
-        let bar = info_bar(Path::new("/p/zjstatus.wasm"), "#181825");
-        assert!(bar.contains(r##"format_space "#[bg=#181825]""##));
-        assert!(bar.contains(r#"plugin location="file:/p/zjstatus.wasm""#));
-        assert!(bar.contains(r#"command_atelier_cwd "{focused_pane_cwd}""#));
-        for layout in [
-            session_layout(&bar),
-            worktree_layout("editor", None, "claude", &bar),
-        ] {
-            let tabs = layout.find("zellij:tab-bar").unwrap();
-            let row = layout.find("zjstatus.wasm").unwrap();
-            let status = layout.find("zellij:status-bar").unwrap();
-            assert!(tabs < row && row < status, "{layout}");
-        }
-        assert!(!session_layout("").contains("zjstatus"));
-        assert!(!worktree_layout("editor", None, "claude", "").contains("zjstatus"));
     }
 
     fn state() -> State {

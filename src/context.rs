@@ -293,7 +293,7 @@ pub fn locate(state: &State, config: &Config, dir: &Path) -> Result<Option<Recor
 /// The worktree item holding a directory, from `wt list statusline`, its CI included, and
 /// whether its upstream is gone; or why there is none. worktrunk's CI lookup is the one
 /// network call, cached for a short while in the repo's `.git/wt/`.
-pub fn current_tree(runner: &dyn Runner, item: &Recorded) -> Result<Statusline, String> {
+fn current_tree(runner: &dyn Runner, item: &Recorded) -> Result<Statusline, String> {
     let mut statusline =
         worktrunk::statusline(runner, &item.path).map_err(|err| format!("{err:#}"))?;
     let tree = &mut statusline.tree;

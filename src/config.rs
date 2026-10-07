@@ -42,7 +42,6 @@ pub struct Zellij {
     pub session_layout: Option<String>,
     pub worktree_layout: Option<String>,
     pub anchor_pane: Option<String>,
-    pub zjstatus: Option<String>,
 }
 
 /// Absent: carnets are disabled.
@@ -79,14 +78,6 @@ impl Config {
 
     pub fn anchor_pane(&self) -> &str {
         self.zellij.anchor_pane.as_deref().unwrap_or("editor")
-    }
-
-    /// Where the zjstatus plugin is looked for: the built-in layouts add its row when it exists.
-    pub fn zjstatus(&self) -> PathBuf {
-        match &self.zellij.zjstatus {
-            Some(path) => expand(path),
-            None => config_home().join("zellij/plugins/zjstatus.wasm"),
-        }
     }
 
     /// Where carnets live, or `None` when they are disabled.
