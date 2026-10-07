@@ -899,9 +899,17 @@ mod tests {
         let mut in_flight = all.clone();
         in_flight.work[1].tree_mut().gone = false;
         assert_eq!(
-            issue_plan(&in_flight, "ABC-1").last().unwrap(),
-            "[ ] close carnet 2026-10-01-login · work still in flight",
-            "linked work in another group and workspace still counts"
+            issue_plan(&in_flight, "ABC-1"),
+            [
+                "# api:a",
+                "[x] remove api:a · integrated",
+                "# web:b",
+                "    web:b · not integrated, no upstream",
+                "# 2026-10-01-login",
+                "[ ] close carnet 2026-10-01-login · work still in flight",
+            ],
+            "linked work in another group and workspace still counts, but only for the carnet: \
+             a finished worktree's remove line stays checked"
         );
         let mut kept_dirty = all;
         kept_dirty.work[0] = dirty(kept_dirty.work[0].clone());
