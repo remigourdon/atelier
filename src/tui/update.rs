@@ -3363,6 +3363,7 @@ pub mod tests {
     #[test]
     fn starting_an_issue_joins_its_one_linked_group_else_asks_for_one() {
         let mut model = with_issues(model());
+        // api:ABC-1-login, in ABC-1.
         model.snapshot.work[1].links.issue_keys = keys(&["api#1"]);
         press(&mut model, "4]n1");
         assert_eq!(
@@ -3371,6 +3372,7 @@ pub mod tests {
             "one linked group: joined without asking"
         );
         assert!(model.modal.is_none());
+        // web:main, in no group until now.
         let other = &mut model.snapshot.work[3].links;
         other.group = Group::parse("other");
         other.issue_keys = keys(&["api#1"]);
