@@ -1,6 +1,8 @@
 //! `atelier statusline`: one ANSI line for the item holding a directory, for zjstatus.
 
 use std::fmt::Write;
+use std::fs::File;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 
 use color_eyre::eyre::Result;
@@ -36,6 +38,36 @@ pub struct Subject {
     pub keys: Vec<String>,
     /// A carnet's summary: last, so the first cut when space is short.
     pub summary: String,
+}
+
+/// The line for `dir`, computed by one run at a time: zjstatus starts a run on every redraw
+/// while its last result is overdue, and the zellij server holds pipes for each until it exits,
+/// so a slow `wt` piled runs up past the server's open file limit. A run that finds another in
+/// flight for `dir` prints the last line computed for it instead, or nothing.
+pub fn single_flight(dir: &Path, compute: impl FnOnce() -> Result<String>) -> Result<String> {
+    let mut hasher = DefaultHasher::new();
+    dir.hash(&mut hasher);
+    let base = crate::config::cache_home()
+        .join("atelier/statusline")
+        .join(format!("{:016x}", hasher.finish()));
+    let last = base.with_extension("line");
+    let lock = std::fs::create_dir_all(base.parent().unwrap())
+        .and_then(|()| File::create(base.with_extension("lock")));
+    // The lock is the open file's: it goes when this process exits, however it exits.
+    let held = match &lock {
+        Ok(file) => file.try_lock(),
+        // Without a cache, run unguarded rather than draw nothing.
+        Err(_) => return compute(),
+    };
+    if held.is_err() {
+        return Ok(std::fs::read_to_string(&last).unwrap_or_default());
+    }
+    let line = compute()?;
+    let fresh = base.with_extension(format!("line.{}", std::process::id()));
+    if std::fs::write(&fresh, &line).is_ok() {
+        let _ = std::fs::rename(&fresh, &last);
+    }
+    Ok(line)
 }
 
 /// The line for `dir`: empty outside a recorded worktree or carnet. Reads the database, the

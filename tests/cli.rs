@@ -229,6 +229,76 @@ fn statusline_is_empty_outside_an_item_and_never_creates_the_database() {
 }
 
 #[test]
+fn statusline_runs_one_wt_at_a_time_per_directory() {
+    // zjstatus starts a run on every redraw while its last result is overdue, and the zellij
+    // server holds pipes for each until it exits: slow runs piled up past its open file limit.
+    let home = Home::new();
+    let repo = home.git_repo("repo");
+    home.ok(&["add", &repo]);
+    let db = rusqlite::Connection::open(home.path("state/atelier/atelier.db")).unwrap();
+    db.execute(
+        "INSERT INTO items(path, kind, repo, workspace) VALUES (?1, 'worktree', ?1, 'default')",
+        [&repo],
+    )
+    .unwrap();
+    let bin = home.path("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let calls = home.path("wt-calls");
+    let wt = bin.join("wt");
+    std::fs::write(
+        &wt,
+        format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nsleep 2\ncat '{}'\n",
+            calls.display(),
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/wt-statusline.json")
+                .display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wt, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let statusline = || {
+        let mut command = home.command(&["statusline"]);
+        command.current_dir(&repo).env("PATH", &path);
+        command
+    };
+    let quick = |cached: &str| {
+        let start = std::time::Instant::now();
+        let output = statusline().output().unwrap();
+        assert!(output.status.success());
+        assert!(
+            start.elapsed().as_secs_f64() < 1.0,
+            "waited on the run in flight"
+        );
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), cached);
+    };
+    let wt_calls = || {
+        std::fs::read_to_string(&calls)
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+
+    let first = statusline()
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    quick("");
+    quick("");
+    let line = String::from_utf8(first.wait_with_output().unwrap().stdout).unwrap();
+    assert!(line.contains("repo"), "{line:?}");
+    assert_eq!(wt_calls(), 1);
+
+    let second = statusline().spawn().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    quick(&line);
+    assert!(second.wait_with_output().unwrap().status.success());
+    assert_eq!(wt_calls(), 2, "a run with none in flight lists afresh");
+}
+
+#[test]
 fn zellij_inherits_a_raised_open_file_limit() {
     // macOS starts shells at a soft limit of 256 open files; the zellij server inherits it
     // and panics on accept once its tabs' panes and plugins use them up.

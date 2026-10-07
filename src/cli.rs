@@ -232,7 +232,9 @@ pub fn run() -> Result<()> {
             // Read-only, as for `context`: drawing a status bar must not create the database.
             let state = State::read(&state::db_path(), config.default_workspace())?;
             let dir = std::env::current_dir()?;
-            let line = crate::tui::statusline::line(&state, &config, &System, &dir)?;
+            let line = crate::tui::statusline::single_flight(&dir, || {
+                crate::tui::statusline::line(&state, &config, &System, &dir)
+            })?;
             if !line.is_empty() {
                 println!("{line}");
             }
