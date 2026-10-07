@@ -558,16 +558,20 @@ mod tests {
 
     #[test]
     fn ci_marks_rows_and_carries_its_colour_to_the_detail() {
-        use crate::worktrunk::{Ci, CiReview, CiState, Decision};
+        use crate::worktrunk::{Checks, Ci, CiReview, CiState, Decision};
         let mut model = loaded(120, 30);
         model.snapshot.work[0].tree_mut().ci = Some(Ci {
             state: CiState::Passed,
+            checks: Some(Checks::Passed),
+            conflicts: false,
             stale: false,
             branch_workflow: true,
             review: None,
         });
         model.snapshot.work[1].tree_mut().ci = Some(Ci {
             state: CiState::Failed,
+            checks: Some(Checks::Failed),
+            conflicts: false,
             stale: true,
             branch_workflow: false,
             review: Some(CiReview {

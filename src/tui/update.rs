@@ -1670,6 +1670,8 @@ pub mod tests {
         assert_eq!(tree.branch.as_deref(), Some("main"));
         tree.ci = Some(worktrunk::Ci {
             state: worktrunk::CiState::Running,
+            checks: Some(worktrunk::Checks::Running),
+            conflicts: false,
             stale: false,
             branch_workflow: false,
             review: Some(worktrunk::CiReview {
@@ -1766,6 +1768,8 @@ pub mod tests {
         let mut model = model();
         let ci = worktrunk::Ci {
             state: worktrunk::CiState::Failed,
+            checks: Some(worktrunk::Checks::Failed),
+            conflicts: false,
             stale: false,
             branch_workflow: false,
             review: None,

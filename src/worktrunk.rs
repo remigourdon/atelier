@@ -204,7 +204,12 @@ pub struct Worktree {
 /// A branch's CI, as worktrunk's CI column reports it: its checks and its review's decision.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ci {
+    /// The column's one state, folding the checks, the decision and the conflicts.
     pub state: CiState,
+    /// The checks' own status, `None` without checks.
+    pub checks: Option<Checks>,
+    /// The review cannot be merged: it conflicts with its base.
+    pub conflicts: bool,
     /// Local HEAD differs from the remote, so the status is of an older commit.
     pub stale: bool,
     /// The checks are of the branch's own workflow, as for a default branch: it has no review.
@@ -237,6 +242,27 @@ impl CiState {
             Self::Error => "error",
             Self::ChangesRequested => Decision::ChangesRequested.label(),
             Self::ApprovalPending => Decision::Pending.label(),
+        }
+    }
+}
+
+/// A branch's checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Checks {
+    Passed,
+    Running,
+    Failed,
+    /// The status could not be fetched.
+    Unavailable,
+}
+
+impl Checks {
+    fn from_status(status: &str) -> Option<Self> {
+        match status {
+            "passed" => Some(Self::Passed),
+            "running" => Some(Self::Running),
+            "failed" => Some(Self::Failed),
+            _ => None,
         }
     }
 }
@@ -291,6 +317,8 @@ impl Ci {
         if let (Some(None), Some(None)) = (&checks, &pr) {
             return Some(Self {
                 state: CiState::Error,
+                checks: Some(Checks::Unavailable),
+                conflicts: false,
                 stale: false,
                 branch_workflow: false,
                 review: None,
@@ -308,7 +336,8 @@ impl Ci {
         });
         let status = checks.as_ref().and_then(|checks| checks.status.as_deref());
         let decision = review.as_ref().and_then(|(review, _)| review.decision);
-        let state = if review.as_ref().is_some_and(|&(_, conflicts)| conflicts) {
+        let conflicts = review.as_ref().is_some_and(|&(_, conflicts)| conflicts);
+        let state = if conflicts {
             CiState::Conflicts
         } else if status == Some("failed") {
             CiState::Failed
@@ -325,6 +354,8 @@ impl Ci {
         };
         Some(Self {
             state,
+            checks: status.and_then(Checks::from_status),
+            conflicts,
             stale: checks.as_ref().is_some_and(|checks| checks.stale),
             branch_workflow: checks.is_some_and(|checks| checks.source == "branch"),
             review: review.map(|(review, _)| review),
@@ -721,6 +752,10 @@ mod tests {
         assert_eq!(state(""), None, "not collected or never pushed");
         assert_eq!(state(r#","pr":{"number":3}"#), None, "no CI");
         assert_eq!(state(r#","checks":null,"pr":null"#), Some(CiState::Error));
+        assert_eq!(
+            ci(r#","checks":null,"pr":null"#).unwrap().checks,
+            Some(Checks::Unavailable)
+        );
         let checks = |status: &str, pr: &str| {
             state(&format!(
                 r#","checks":{{"status":{status},"source":"pr"}},"pr":{pr}"#
@@ -770,6 +805,17 @@ mod tests {
         let main = ci(r#","checks":{"status":"failed","source":"branch"}"#).unwrap();
         assert!(main.branch_workflow && main.review.is_none());
         assert_eq!(main.state, CiState::Failed);
+    }
+
+    #[test]
+    fn ci_keeps_the_checks_the_decision_and_the_conflicts_apart() {
+        let ci = ci(r#","checks":{"status":"running","source":"pr"},
+            "pr":{"number":3,"mergeable":false,"review":"changes_requested"}"#)
+        .unwrap();
+        assert_eq!(ci.state, CiState::Conflicts, "the column folds them");
+        assert_eq!(ci.checks, Some(Checks::Running));
+        assert_eq!(ci.decision(), Some(Decision::ChangesRequested));
+        assert!(ci.conflicts);
     }
 
     #[test]
