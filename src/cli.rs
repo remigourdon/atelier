@@ -249,22 +249,24 @@ pub fn run() -> Result<()> {
             let config = Config::load()?;
             let state = State::open(&state::db_path(), config.default_workspace())?;
             let edits = edits_items(&command);
-            run_state(command, &config, &state)?;
+            let ran = run_state(command, &config, &state);
+            // A failed edit may still have changed some items.
             if edits {
                 name_tabs(&state, &config);
             }
-            Ok(())
+            ran
         }
     }
 }
 
-/// Whether `command` changes what names a tab: an item's links or tab, or a repo's name.
+/// Whether `command` changes what names a tab: an item's links, workspace or tab, or a repo's
+/// name.
 fn edits_items(command: &Command) -> bool {
     matches!(
         command,
-        Command::Update { .. }
+        Command::Ws(Ws::Rm { .. })
+            | Command::Update { .. }
             | Command::Rm { .. }
-            | Command::Carnet(Carnet::New { .. })
             | Command::Carnet(Carnet::Set { .. })
             | Command::Carnet(Carnet::Close { .. })
             | Command::Carnet(Carnet::Reopen { .. })

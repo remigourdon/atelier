@@ -212,6 +212,7 @@ impl Recorded {
         matches!(self.kind, RecordedKind::Carnet(_))
     }
 
+    /// Its `items.kind`.
     pub fn item_kind(&self) -> ItemKind {
         match self.kind {
             RecordedKind::Worktree { .. } => ItemKind::Worktree,
@@ -220,7 +221,7 @@ impl Recorded {
     }
 
     /// A worktree's repo.
-    pub fn repo(&self) -> Option<&PathBuf> {
+    pub fn repo(&self) -> Option<&Path> {
         match &self.kind {
             RecordedKind::Worktree { repo } => Some(repo),
             RecordedKind::Carnet(_) => None,
@@ -652,8 +653,13 @@ impl<'a> Items<'a> {
         let branches: HashMap<&Path, Option<String>> = (synced.worktrees.iter())
             .map(|(_, _, tree)| (tree.path.as_path(), tree.branch.clone()))
             .collect();
-        // As with reconcile, zellij not running should not hide the worktrees.
-        let _ = self.rename_tabs(&recorded, |path| branches.get(path).cloned().flatten());
+        // A worktree whose repo could not be listed asks git for its branch. As with reconcile,
+        // zellij not running should not hide the worktrees.
+        let branch = |path: &Path| match branches.get(path) {
+            Some(branch) => branch.clone(),
+            None => git::branch(self.runner, path),
+        };
+        let _ = self.rename_tabs(&recorded, branch);
         let tabs: HashSet<PathBuf> = (self.state.tabs()?.into_iter())
             .map(|tab| tab.path)
             .collect();
@@ -842,7 +848,10 @@ impl<'a> Items<'a> {
                 group: item.links.group.clone(),
                 repo: item.repo().map(|repo| {
                     let name = repos.get(repo).cloned();
-                    (repo.clone(), name.unwrap_or_else(|| state::dir_name(repo)))
+                    (
+                        repo.to_owned(),
+                        name.unwrap_or_else(|| state::dir_name(repo)),
+                    )
                 }),
             })
             .collect())

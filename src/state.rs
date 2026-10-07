@@ -437,6 +437,7 @@ impl State {
         self.add_item(path.as_ref(), &Record::Carnet, workspace)
     }
 
+    /// Records an item with `record` unless it already exists. Returns whether it was new.
     fn add_item(&self, path: &Path, record: &Record, workspace: &str) -> Result<bool> {
         self.require_workspace(workspace)?;
         let (kind, repo, links) = match record {

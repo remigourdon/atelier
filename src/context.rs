@@ -323,7 +323,7 @@ impl Listings {
                         listing
                     })
                     .map_err(|err| format!("{err:#}"));
-                listings.insert(repo.clone(), listing);
+                listings.insert(repo.to_owned(), listing);
             }
         }
         Self(listings)
@@ -385,7 +385,7 @@ pub fn describe(
         .filter(|item| !item.is_carnet())
         .map(|item| Current {
             path: &item.path,
-            repo: item.repo().map(PathBuf::as_path),
+            repo: item.repo(),
             statusline: current_tree(runner, item),
         });
     let listings = Listings::of(
@@ -447,7 +447,7 @@ pub fn describe(
         item: current.map(|item| ItemInfo {
             path: item.path.clone(),
             kind: item.item_kind(),
-            repo: item.repo().cloned(),
+            repo: item.repo().map(Path::to_owned),
             branch: (tree.as_ref())
                 .and_then(|current| current.statusline.as_ref().ok()?.tree.branch.clone()),
         }),
@@ -490,7 +490,7 @@ fn worktrees(
 ) -> Vec<WorktreeInfo> {
     (linked.iter())
         .map(|item| {
-            let repo_path = item.repo().cloned().unwrap_or_default();
+            let repo_path = item.repo().map(Path::to_owned).unwrap_or_default();
             let holding = current.filter(|current| current.path == item.path);
             let tree = match holding {
                 Some(current) => (current.statusline.as_ref())
