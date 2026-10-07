@@ -70,17 +70,15 @@ pub struct Glyphs {
     /// A finished worktree's mark: integrated, or its upstream gone.
     pub integrated: &'static str,
     pub gone: &'static str,
-    /// A branch's checks.
-    pub passed: &'static str,
-    pub running: &'static str,
-    pub failed: &'static str,
-    pub unavailable: &'static str,
-    /// A review's merge conflicts.
-    pub conflicts: &'static str,
-    /// A review's decision.
-    pub changes_requested: &'static str,
-    pub approval: &'static str,
-    pub approved: &'static str,
+    /// Checks, review decisions, merge conflicts and the command log, by meaning:
+    /// done (passed, approved, succeeded), broken (failed, conflicts),
+    /// pending (running, waiting for approval), unknown (checks unavailable)
+    /// and changes requested.
+    pub done: &'static str,
+    pub broken: &'static str,
+    pub pending: &'static str,
+    pub unknown: &'static str,
+    pub changes: &'static str,
     pub spinner: [&'static str; 4],
 }
 
@@ -103,20 +101,16 @@ impl Glyphs {
                 unfolded: "▾",
                 integrated: "⊂",
                 gone: "⊗",
-                passed: "◆",
-                running: "◔",
-                failed: "✖",
-                unavailable: "⚠",
-                conflicts: "✗",
-                changes_requested: "±",
-                approval: "◇",
-                approved: "✔",
+                done: "✓",
+                broken: "✗",
+                pending: "◷",
+                unknown: "?",
+                changes: "±",
                 spinner,
             },
             // Nerd Fonts: fa-desktop, oct-repo, dev-git_branch, fa-home, fa-book, oct-git_pull_request,
             // oct-issue_opened, fa-dot_circle_o, fa-circle_o, fa-folder, fa-folder_open,
-            // oct-git_merge, fa-chain_broken, fa-diamond, oct-clock, oct-x_circle, fa-warning,
-            // oct-file_diff, oct-eye, oct-check_circle.
+            // oct-git_merge, fa-chain_broken, oct-check, oct-x, oct-clock, oct-question, oct-diff.
             Icons::Nerd => Self {
                 workspace: "\u{f108}",
                 repo: "\u{f401}",
@@ -132,14 +126,11 @@ impl Glyphs {
                 unfolded: "\u{f07c}",
                 integrated: "\u{f419}",
                 gone: "\u{f127}",
-                passed: "\u{f219}",
-                running: "\u{f43a}",
-                failed: "\u{f52f}",
-                unavailable: "\u{f071}",
-                conflicts: "✗",
-                changes_requested: "\u{f4d2}",
-                approval: "\u{f441}",
-                approved: "\u{f49e}",
+                done: "\u{f42e}",
+                broken: "\u{f467}",
+                pending: "\u{f43a}",
+                unknown: "\u{f420}",
+                changes: "\u{f440}",
                 spinner,
             },
         }
@@ -267,7 +258,7 @@ pub const LEGEND: &[Legend] = &[
     fact!("Checks", marks::checks(Checks::Running)),
     fact!("Checks", marks::checks(Checks::Failed)),
     fact!("Checks", marks::checks(Checks::Unavailable)),
-    Legend { section: "Checks", mark: |g| g.passed, style: |p| marks::checks(Checks::Passed).style(p).add_modifier(Modifier::DIM), help: "dimmed: stale, or a draft", on: On::Lists(WORK) },
+    Legend { section: "Checks", mark: |g| g.done, style: |p| marks::checks(Checks::Passed).style(p).add_modifier(Modifier::DIM), help: "dimmed: stale, or a draft", on: On::Lists(WORK) },
     Legend { section: "Review", mark: |_| "draft", style: dim, help: "a draft review, its checks dimmed", on: On::Lists(WORK) },
     Legend { section: "Review", mark: |g| g.reviewed, style: lists::review_style, help: "an open review links it", on: On::Lists(ISSUES) },
     fact!("Decision", marks::decision(Decision::Pending).unwrap()),
@@ -276,8 +267,8 @@ pub const LEGEND: &[Legend] = &[
     Legend { section: "Merge", mark: |g| (marks::CONFLICTS.glyph)(g), style: |p| marks::CONFLICTS.style(p), help: "the review conflicts with its base", on: On::Lists(WORK) },
     Legend { section: "Finished", mark: |g| g.integrated, style: dim, help: "merged into the default branch, row dimmed", on: On::Lists(WORK) },
     Legend { section: "Finished", mark: |g| g.gone, style: dim, help: "its remote branch was deleted, row dimmed", on: On::Lists(WORK) },
-    Legend { section: "Command log", mark: |_| "✓", style: dim, help: "succeeded", on: On::Global },
-    Legend { section: "Command log", mark: |_| "✗", style: |p| fg(p.error), help: "failed", on: On::Global },
+    Legend { section: "Command log", mark: |g| g.done, style: dim, help: "succeeded", on: On::Global },
+    Legend { section: "Command log", mark: |g| g.broken, style: |p| fg(p.error), help: "failed", on: On::Global },
     Legend { section: "Hint bar", mark: |_| "⟳", style: dim, help: "loading", on: On::Global },
 ];
 
@@ -601,11 +592,17 @@ fn render_log(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect) {
         .iter()
         .map(|entry| match &entry.error {
             None => Line::from(vec![
-                Span::styled("✓ ", Style::new().fg(palette.dim)),
+                Span::styled(
+                    format!("{} ", palette.glyphs.done),
+                    Style::new().fg(palette.dim),
+                ),
                 Span::styled(entry.command.as_str(), Style::new().fg(palette.dim)),
             ]),
             Some(error) => Line::from(vec![
-                Span::styled("✗ ", Style::new().fg(palette.error)),
+                Span::styled(
+                    format!("{} ", palette.glyphs.broken),
+                    Style::new().fg(palette.error),
+                ),
                 Span::raw(entry.command.as_str()),
                 Span::styled(format!(": {error}"), Style::new().fg(palette.error)),
             ]),

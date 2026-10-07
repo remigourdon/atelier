@@ -170,22 +170,22 @@ impl Mark {
 pub const fn checks(checks: Checks) -> Mark {
     match checks {
         Checks::Passed => Mark {
-            glyph: |g| g.passed,
+            glyph: |g| g.done,
             tone: Tone::Done,
             words: "passed",
         },
         Checks::Running => Mark {
-            glyph: |g| g.running,
+            glyph: |g| g.pending,
             tone: Tone::Busy,
             words: "running",
         },
         Checks::Failed => Mark {
-            glyph: |g| g.failed,
+            glyph: |g| g.broken,
             tone: Tone::Broken,
             words: "failed",
         },
         Checks::Unavailable => Mark {
-            glyph: |g| g.unavailable,
+            glyph: |g| g.unknown,
             tone: Tone::NeedsYou,
             words: "unavailable",
         },
@@ -196,17 +196,17 @@ pub const fn checks(checks: Checks) -> Mark {
 pub const fn decision(decision: Decision) -> Option<Mark> {
     match decision {
         Decision::ChangesRequested => Some(Mark {
-            glyph: |g| g.changes_requested,
+            glyph: |g| g.changes,
             tone: Tone::NeedsYou,
             words: "changes requested",
         }),
         Decision::Pending => Some(Mark {
-            glyph: |g| g.approval,
+            glyph: |g| g.pending,
             tone: Tone::Waiting,
             words: "waiting for approval",
         }),
         Decision::Approved => Some(Mark {
-            glyph: |g| g.approved,
+            glyph: |g| g.done,
             tone: Tone::Done,
             words: "approved",
         }),
@@ -216,7 +216,7 @@ pub const fn decision(decision: Decision) -> Option<Mark> {
 
 /// A review that conflicts with its base.
 pub const CONFLICTS: Mark = Mark {
-    glyph: |g| g.conflicts,
+    glyph: |g| g.broken,
     tone: Tone::Broken,
     words: "conflicts",
 };
@@ -333,14 +333,14 @@ mod tests {
     }
 
     #[test]
-    fn passed_checks_and_an_approval_never_share_a_glyph() {
+    fn checks_and_decisions_share_a_glyph_where_the_meaning_matches() {
         for icons in [crate::config::Icons::Unicode, crate::config::Icons::Nerd] {
             let glyphs = Glyphs::new(icons);
-            let approved = decision(Decision::Approved).unwrap();
-            assert_ne!(
-                (checks(Checks::Passed).glyph)(&glyphs),
-                (approved.glyph)(&glyphs)
-            );
+            let glyph = |mark: Mark| (mark.glyph)(&glyphs);
+            let decision = |state| glyph(decision(state).unwrap());
+            assert_eq!(glyph(checks(Checks::Passed)), decision(Decision::Approved));
+            assert_eq!(glyph(checks(Checks::Failed)), glyph(CONFLICTS));
+            assert_eq!(glyph(checks(Checks::Running)), decision(Decision::Pending));
         }
     }
 

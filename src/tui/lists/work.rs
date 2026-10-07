@@ -886,9 +886,9 @@ mod tests {
                 "Checkout: ↻ rebase, merge or other operation in progress",
                 "Default branch: ↑ ahead by 3 commits (main)",
                 "Remote: ⇅ diverged (1 to push, 2 to pull)",
-                "Checks: ◆ passed · stale: local commits not pushed",
+                "Checks: ✓ passed · stale: local commits not pushed",
                 "Review: #464",
-                "Decision: ◇ waiting for approval",
+                "Decision: ◷ waiting for approval",
                 "Merge: ✗ conflicts with main",
             ]
         );

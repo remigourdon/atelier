@@ -1,6 +1,6 @@
 ---
 source: src/tui/mod.rs
-assertion_line: 626
+assertion_line: 609
 expression: terminal.backend().to_string()
 ---
 "╭[1] Workspaces │ Repos────────────────╮╭ Main ────────────────────────────────────────────────────────────────────────╮"
@@ -14,7 +14,7 @@ expression: terminal.backend().to_string()
 "│  ◉ api:ABC-1-login                   ││Changes     ! unstaged changes                                                │"
 "│  ○ web:ABC-1-form                    ││            +0 −0 lines                                                       │"
 "│○ api:main                            ││Remote      no upstream                                                       │"
-"│                                      ││Checks      ✖ failed · stale: local commits not pushed                        │"
+"│                                      ││Checks      ✗ failed · stale: local commits not pushed                        │"
 "│                                      ││Review      #27                                                               │"
 "│                                      ││Decision    ± changes requested                                               │"
 "│                                      ││Merge       mergeable                                                         │"

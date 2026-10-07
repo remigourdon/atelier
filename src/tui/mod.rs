@@ -545,39 +545,16 @@ mod tests {
             unfolded,
             integrated,
             gone,
-            passed,
-            running,
-            failed,
-            unavailable,
-            conflicts,
-            changes_requested,
-            approval,
-            approved,
+            done,
+            broken,
+            pending,
+            unknown,
+            changes,
             spinner,
         } = glyphs;
         for glyph in [
-            workspace,
-            repo,
-            worktree,
-            carnet,
-            review,
-            reviewed,
-            issue,
-            open,
-            closed,
-            folded,
-            unfolded,
-            integrated,
-            gone,
-            passed,
-            running,
-            failed,
-            unavailable,
-            conflicts,
-            changes_requested,
-            approval,
-            approved,
-            spinner[0],
+            workspace, repo, worktree, carnet, review, reviewed, issue, open, closed, folded,
+            unfolded, integrated, gone, done, broken, pending, unknown, changes, spinner[0],
         ] {
             assert!(marks.contains(&glyph), "{glyph} is not in the legend");
         }
@@ -614,7 +591,7 @@ mod tests {
             .unwrap();
         let buffer = terminal.backend().buffer();
         let marks: Vec<_> = (buffer.content.iter())
-            .filter(|cell| cell.symbol() == "✖")
+            .filter(|cell| cell.symbol() == "✗")
             .map(|cell| {
                 (
                     cell.fg,

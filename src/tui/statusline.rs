@@ -253,11 +253,11 @@ mod tests {
     fn a_worktree_shows_its_group_and_repo_then_cells_then_every_key() {
         assert_eq!(
             text(&worktree("login"), Icons::Unicode),
-            "LOGIN · api !?↕ ◔ #31 ✔ ABC-1 web#3"
+            "LOGIN · api !?↕ ◷ #31 ✓ ABC-1 web#3"
         );
         assert_eq!(
             text(&worktree(""), Icons::Unicode),
-            "api !?↕ ◔ #31 ✔ ABC-1 web#3",
+            "api !?↕ ◷ #31 ✓ ABC-1 web#3",
             "without a group, it starts at the repo"
         );
         let palette = palette(Icons::Unicode);
@@ -265,7 +265,7 @@ mod tests {
         let blue = PALETTE.mocha.colors.blue.rgb;
         assert!(
             line.contains(&format!(
-                "\x1b[38;2;{};{};{}m◔\x1b[22;39m",
+                "\x1b[38;2;{};{};{}m◷\x1b[22;39m",
                 blue.r, blue.g, blue.b
             )),
             "running checks in the detail's colour: {line:?}"
@@ -380,7 +380,7 @@ mod tests {
         let line = line(&state, &config, &fake, &tree).unwrap();
         assert_eq!(
             plain(&line),
-            "LOGIN · api !?↕ ◔ #31 ✔ ABC-1 web#3",
+            "LOGIN · api !?↕ ◷ #31 ✓ ABC-1 web#3",
             "its group, repo alias, cells and keys shown short"
         );
         let wt = (fake.calls().into_iter())
