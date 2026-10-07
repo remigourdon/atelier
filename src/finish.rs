@@ -93,9 +93,8 @@ impl Scope {
                 .chain(items.iter().cloned().map(Cover::Item))
                 .collect(),
             Scope::Workspace(_) => {
-                // A closed carnet counts only while its tab is open, as the Work panel shows it.
                 let own = (snapshot.work.iter())
-                    .filter(|work| self.touches(work) && (!work.closed() || work.tab));
+                    .filter(|work| self.touches(work) && work.in_work_panel());
                 covers(own, |work| work.removable())
             }
             Scope::Issue { key, .. } => {

@@ -280,18 +280,27 @@ fn select(model: &mut Model, list: List, index: usize) {
 
 /// Moves a list's selection, resetting what depends on it.
 fn select_moved(model: &mut Model, list: List, index: usize) -> Vec<Effect> {
+    match move_selection(model, list, index) {
+        (true, item) => fetch_item(model, item),
+        (false, _) => Vec::new(),
+    }
+}
+
+/// Moves a list's selection, resetting what depends on it when it moved: returns whether it
+/// moved, and the item of the row now selected.
+fn move_selection(model: &mut Model, list: List, index: usize) -> (bool, Option<Work>) {
     let rows = model.rows(list);
     let index = index.min(rows.len().saturating_sub(1));
-    if index == model.index(list) {
-        return Vec::new();
-    }
     let item = (rows.get(index)).and_then(|row| row.target.item().cloned());
-    model.selected.insert(list, index);
-    model.scroll = (0, 0);
-    if list == List::Workspaces {
-        model.selected.insert(List::Work, 0);
+    let moved = index != model.index(list);
+    if moved {
+        model.selected.insert(list, index);
+        model.scroll = (0, 0);
+        if list == List::Workspaces {
+            model.selected.insert(List::Work, 0);
+        }
     }
-    fetch_item(model, item)
+    (moved, item)
 }
 
 /// Drops the commits a refresh made stale: every one on a full refresh, else those of items
@@ -407,8 +416,9 @@ fn filter_key(model: &mut Model, list: List, key: KeyEvent) -> Vec<Effect> {
                 .handle_event(&Event::Key(key));
         }
     }
-    select_moved(model, list, 0);
-    commits(model)
+    // The first row may hold another item without the selection moving.
+    let (_, item) = move_selection(model, list, 0);
+    fetch_item(model, item)
 }
 
 fn modal_key(model: &mut Model, modal: Modal, key: KeyEvent) -> Vec<Effect> {
@@ -1074,17 +1084,11 @@ pub mod tests {
         }
 
         pub fn review(&self) -> Option<crate::reviews::Review> {
-            match self.target()? {
-                Target::Review(review) => Some(review.into_owned()),
-                _ => None,
-            }
+            self.target()?.into_review()
         }
 
         pub fn issue(&self) -> Option<crate::issues::Issue> {
-            match self.target()? {
-                Target::Issue(issue) => Some(issue.into_owned()),
-                _ => None,
-            }
+            self.target()?.into_issue()
         }
 
         pub fn targets(&self) -> Vec<Work> {
@@ -1326,6 +1330,21 @@ pub mod tests {
             [Effect::Run(Job::Commits("/src/web.ABC-1-form".into()))]
         );
         assert!(press(&mut model, "k").is_empty(), "already loaded");
+    }
+
+    #[test]
+    fn a_filter_fetches_the_item_it_leaves_on_the_first_row() {
+        let mut model = with_carnets(model());
+        press(&mut model, ">");
+        let first = PathBuf::from("/data/2026-09-20-old");
+        assert_eq!(model.carnet().map(|work| work.path), Some(first));
+        // The index stays 0 while the filter puts another carnet there.
+        let effects = press(&mut model, "/ideas");
+        let ideas = PathBuf::from("/data/2026-10-02-ideas");
+        assert!(
+            effects.contains(&Effect::Run(Job::Commits(ideas))),
+            "{effects:?}"
+        );
     }
 
     #[test]

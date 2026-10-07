@@ -62,7 +62,7 @@ impl Model {
             .filter(|&index| {
                 let work = &work[index];
                 work.workspace == workspace
-                    && shown(work)
+                    && work.in_work_panel()
                     && self.matches(
                         List::Work,
                         &[
@@ -475,12 +475,6 @@ fn url(model: &Model, work: &Work) -> Option<String> {
         Some(branch) => forge.branch_url(branch),
         None => forge.url.clone(),
     })
-}
-
-/// Whether the Work list shows an item: every worktree and open carnet, and a closed carnet
-/// while its tab is open.
-pub(crate) fn shown(work: &Work) -> bool {
-    !work.closed() || work.tab
 }
 
 /// A Work item's severity: a finished worktree's row is dimmed instead, and a carnet has none.

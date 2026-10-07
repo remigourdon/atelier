@@ -451,12 +451,17 @@ fn run_hook(phase: Phase) -> Result<()> {
         serde_json::from_str(&input).wrap_err("reading the worktrunk hook context")?;
     let config = Config::load()?;
     let state = State::open(&state::db_path(), config.default_workspace())?;
-    let items = items(&state, &config)?;
-    let tab = hooks::handle(&items, &System, phase, &payload, &hooks::Hints::from_env())?;
+    let ran = items(&state, &config).and_then(|items| hook(&items, phase, &payload));
+    // A failed hook may still have recorded the worktree or opened its tab.
+    name_tabs(&state, &config);
+    ran
+}
+
+fn hook(items: &Items, phase: Phase, payload: &hooks::Payload) -> Result<()> {
+    let tab = hooks::handle(items, &System, phase, payload, &hooks::Hints::from_env())?;
     if let (Some(tab), Some(target)) = (tab, std::env::var_os("ATELIER_HOOK_TARGET")) {
         std::fs::write(target, format!("{}\n", tab.session))?;
     }
-    name_tabs(&state, &config);
     Ok(())
 }
 

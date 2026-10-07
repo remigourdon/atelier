@@ -80,6 +80,41 @@ impl Target<'_> {
         }
     }
 
+    pub fn into_workspace(self) -> Option<String> {
+        match self {
+            Target::Workspace(name) => Some(name.into_owned()),
+            _ => None,
+        }
+    }
+
+    pub fn into_repo(self) -> Option<Repo> {
+        match self {
+            Target::Repo(repo) => Some(repo.into_owned()),
+            _ => None,
+        }
+    }
+
+    pub fn into_review(self) -> Option<Review> {
+        match self {
+            Target::Review(review) => Some(review.into_owned()),
+            _ => None,
+        }
+    }
+
+    pub fn into_issue(self) -> Option<Issue> {
+        match self {
+            Target::Issue(issue) => Some(issue.into_owned()),
+            _ => None,
+        }
+    }
+
+    pub fn into_item(self) -> Option<Work> {
+        match self {
+            Target::Item(work) => Some(work.into_owned()),
+            _ => None,
+        }
+    }
+
     /// The item whose README and commits the main view shows.
     pub fn item(&self) -> Option<&Work> {
         match self {

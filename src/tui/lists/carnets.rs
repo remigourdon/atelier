@@ -192,7 +192,7 @@ impl ListKind for Carnets {
 
     /// Edits the carnet's group or issue keys.
     fn edit(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
-        match carnet(selected) {
+        match selected.and_then(Target::into_item) {
             Some(work) => edit_links(model, &work),
             None => Vec::new(),
         }
@@ -200,7 +200,7 @@ impl ListKind for Carnets {
 
     /// Moves the carnet, closed or not, to another workspace.
     fn move_to(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
-        let Some(work) = carnet(selected) else {
+        let Some(work) = selected.and_then(Target::into_item) else {
             return Vec::new();
         };
         let (title, paths) = (format!("Move {} to", work.title()), [work.path.clone()]);
@@ -210,7 +210,7 @@ impl ListKind for Carnets {
 
     /// Opens the carnet's tab; a closed carnet stays closed.
     fn activate(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
-        match carnet(selected) {
+        match selected.and_then(Target::into_item) {
             Some(work) => {
                 let job = Job::Open(vec![work.path.clone()]);
                 vec![run(model, job)]
@@ -228,7 +228,8 @@ impl ListKind for Carnets {
     ) -> Vec<Effect> {
         match cmd {
             Cmd::Close => {
-                let paths = carnet(selected)
+                let paths = selected
+                    .and_then(Target::into_item)
                     .filter(|work| work.tab)
                     .map(|work| work.path.clone())
                     .into_iter()
@@ -236,7 +237,7 @@ impl ListKind for Carnets {
                 close_tabs(model, paths)
             }
             Cmd::ToggleCarnet => {
-                let Some(work) = carnet(selected) else {
+                let Some(work) = selected.and_then(Target::into_item) else {
                     return Vec::new();
                 };
                 let paths = vec![work.path.clone()];
@@ -261,14 +262,6 @@ impl ListKind for Carnets {
     /// Clears the search.
     fn back(&self, model: &mut Model) -> bool {
         model.search.take().is_some()
-    }
-}
-
-/// The selected carnet.
-fn carnet(selected: Option<Target>) -> Option<Work> {
-    match selected? {
-        Target::Item(work) => Some(work.into_owned()),
-        _ => None,
     }
 }
 
