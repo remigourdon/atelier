@@ -1,14 +1,15 @@
 //! Panel 2's Work list: the selected workspace's worktrees and open carnets, and closed
 //! carnets with their tab open, in groups.
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 use super::{
-    ListKind, carnets, dim_after, edit_links, group_span, group_style, issue_keys, kind, move_menu,
-    pair, paths, plan, subtle, tab_detail, tab_mark, workspace_span,
+    ListKind, ListRow, Target, carnets, dim_after, edit_links, group_span, group_style, issue_keys,
+    kind, move_menu, pair, paths, plan, subtle, tab_detail, tab_mark, workspace_span,
 };
 use crate::finish::{self, Scope, Signal};
 use crate::links::{Group, group_text};
@@ -132,22 +133,6 @@ impl Model {
         }
         lines
     }
-
-    pub fn work_row(&self) -> Option<Row> {
-        self.work_rows().into_iter().nth(self.index(List::Work))
-    }
-
-    /// The selected worktree, or every worktree of the selected group.
-    pub fn targets(&self) -> Vec<&Work> {
-        match self.work_row() {
-            Some(Row::Item(index)) => vec![&self.snapshot.work[index]],
-            Some(Row::Group { members, .. }) => members
-                .iter()
-                .map(|&index| &self.snapshot.work[index])
-                .collect(),
-            None => Vec::new(),
-        }
-    }
 }
 
 impl ListKind for WorkList {
@@ -159,36 +144,21 @@ impl ListKind for WorkList {
         "Work"
     }
 
-    fn len(&self, model: &Model, _list: List) -> usize {
-        model.work_rows().len()
-    }
-
-    /// A group's key, which holds a NUL no path does, or an item's path.
-    fn ids(&self, model: &Model, _list: List) -> Vec<String> {
-        (model.work_rows().into_iter())
-            .map(|row| match row {
-                Row::Group { key, .. } => key,
-                Row::Item(index) => model.snapshot.work[index].path().display().to_string(),
-            })
-            .collect()
-    }
-
-    fn rows<'a>(&self, model: &'a Model, palette: &Palette, _list: List) -> Vec<Line<'a>> {
+    /// A group's identity is its key, which holds a NUL no path does, an item's its path.
+    fn rows<'a>(&self, model: &'a Model, palette: &Palette, _list: List) -> Vec<ListRow<'a>> {
         let dim = Style::new().fg(palette.dim);
+        let work = &model.snapshot.work;
         model
             .work_rows()
             .into_iter()
-            .map(|line| match line {
+            .map(|row| match row {
                 Row::Group {
+                    key,
                     group,
                     members,
                     folded,
-                    ..
                 } => {
-                    let open = members
-                        .iter()
-                        .filter(|&&index| model.snapshot.work[index].tab)
-                        .count();
+                    let open = members.iter().filter(|&&index| work[index].tab).count();
                     let glyph = if folded {
                         palette.glyphs.folded
                     } else {
@@ -196,38 +166,40 @@ impl ListKind for WorkList {
                     };
                     // Folded, its name takes its members' worst tint.
                     let worst = (members.iter().filter(|_| folded))
-                        .map(|&index| severity(&model.snapshot.work[index]))
+                        .map(|&index| severity(&work[index]))
                         .max()
                         .and_then(|severity| severity.color(palette));
                     let name = worst.map_or(group_style(palette), |color| Style::new().fg(color));
-                    Line::from(vec![
+                    let line = Line::from(vec![
                         Span::styled(format!("{glyph} "), group_style(palette).bold()),
                         Span::styled(group.to_string(), name.bold()),
                         Span::styled(format!(" {} · {open} open", members.len()), dim),
-                    ])
+                    ]);
+                    ListRow {
+                        id: key.clone(),
+                        line,
+                        path: Some(group.to_string()),
+                        branch: None,
+                        url: None,
+                        target: Target::Group {
+                            key,
+                            group,
+                            members: (members.into_iter())
+                                .map(|index| Cow::Borrowed(&work[index]))
+                                .collect(),
+                        },
+                    }
                 }
                 Row::Item(index) => {
-                    let work = &model.snapshot.work[index];
-                    let glyphs = &palette.glyphs;
-                    let indent = if work.group().is_none() { "" } else { "  " };
-                    let marker = if model.schedule.is_pulling(work.path()) {
-                        let frame = glyphs.spinner[model.frame % glyphs.spinner.len()];
-                        Span::styled(format!("{frame} "), Style::new().fg(palette.info))
-                    } else {
-                        tab_mark(work.tab, palette)
-                    };
-                    let mut spans = vec![Span::raw(indent), marker];
-                    if work.is_carnet() {
-                        let tracker = &model.tracker_config;
-                        return carnets::row(work, spans, None, true, tracker, palette);
+                    let work = &work[index];
+                    ListRow {
+                        id: work.path().display().to_string(),
+                        line: item_line(model, work, palette),
+                        target: Target::Item(Cow::Borrowed(work)),
+                        path: Some(work.path().display().to_string()),
+                        branch: work.tree().and_then(|tree| tree.branch.clone()),
+                        url: url(model, work),
                     }
-                    let lead = spans.len();
-                    spans.extend(icon(glyphs.worktree, dim));
-                    spans.push(Span::styled(work.title(), severity(work).style(palette)));
-                    if finish::signal(work).is_some() {
-                        dim_after(&mut spans, lead, palette);
-                    }
-                    Line::from(spans)
                 }
             })
             .collect()
@@ -237,19 +209,15 @@ impl ListKind for WorkList {
         &self,
         model: &Model,
         palette: &Palette,
-        _list: List,
+        target: &Target,
     ) -> Vec<(String, Line<'static>)> {
-        match model.work_row() {
-            Some(Row::Group { group, members, .. }) => {
-                let mut pairs = vec![pair("Group", group_span(Some(&group), palette))];
-                pairs.extend(members.iter().map(|&index| {
-                    let work = &model.snapshot.work[index];
-                    pair(kind(work), work.title())
-                }));
+        match target {
+            Target::Group { group, members, .. } => {
+                let mut pairs = vec![pair("Group", group_span(Some(group), palette))];
+                pairs.extend(members.iter().map(|work| pair(kind(work), work.title())));
                 pairs
             }
-            Some(Row::Item(index)) => {
-                let work = &model.snapshot.work[index];
+            Target::Item(work) => {
                 let (repo, repo_name, tree) = match &work.kind {
                     WorkKind::Worktree {
                         repo,
@@ -276,40 +244,32 @@ impl ListKind for WorkList {
                 pairs.extend(tree_detail(tree, work.tab, pulling, forge, palette));
                 pairs
             }
-            None => Vec::new(),
+            _ => Vec::new(),
         }
     }
 
-    /// The item on the selected row.
-    fn item<'a>(&self, model: &'a Model, _list: List) -> Option<&'a Work> {
-        match model.work_row()? {
-            Row::Item(index) => Some(&model.snapshot.work[index]),
-            Row::Group { .. } => None,
-        }
-    }
-
-    fn activate(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        let paths = paths(&model.targets());
+    fn activate(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
+        let paths = paths(&targets(&selected));
         run_on(model, paths, Job::Open)
     }
 
     /// Folds or unfolds a group. Not the row's `folded`: a filter shows every group unfolded.
-    fn enter(&self, model: &mut Model, _list: List) -> bool {
-        let Some(Row::Group { key, .. }) = model.work_row() else {
+    fn enter(&self, model: &mut Model, selected: Option<Target<'static>>) -> bool {
+        let Some(Target::Group { key, .. }) = selected else {
             return false;
         };
         model.set_folded(&key, !model.is_folded(&key));
         true
     }
 
-    fn create(&self, model: &mut Model, _list: List) -> Vec<Effect> {
+    fn create(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
         let Some(workspace) = model.workspace().map(str::to_owned) else {
             return Vec::new();
         };
-        let group = match model.work_row() {
-            Some(Row::Group { group, .. }) => Some(group),
-            Some(Row::Item(index)) => model.snapshot.work[index].group().cloned(),
-            None => None,
+        let group = match &selected {
+            Some(Target::Group { group, .. }) => Some(group.clone()),
+            Some(Target::Item(work)) => work.group().cloned(),
+            _ => None,
         };
         let ask = |repo: PathBuf, name: String| {
             Action::ask(
@@ -323,7 +283,7 @@ impl ListKind for WorkList {
             )
         };
         // The selected worktree's repo, else every repo.
-        let selected = (model.targets().first()).and_then(|work| match &work.kind {
+        let selected = (targets(&selected).first()).and_then(|work| match &work.kind {
             WorkKind::Worktree {
                 repo, repo_name, ..
             } => Some((repo.clone(), repo_name.clone())),
@@ -383,13 +343,10 @@ impl ListKind for WorkList {
 
     /// Edits the selected item's group or issue keys, or renames the selected group in every
     /// workspace.
-    fn edit(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        match model.work_row() {
-            Some(Row::Item(index)) => {
-                let work = model.snapshot.work[index].clone();
-                edit_links(model, &work)
-            }
-            Some(Row::Group { group, .. }) => {
+    fn edit(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
+        match selected {
+            Some(Target::Item(work)) => edit_links(model, &work),
+            Some(Target::Group { group, .. }) => {
                 let action = Action::Ask {
                     title: format!("Rename group {group}"),
                     initial: group.to_string(),
@@ -398,12 +355,12 @@ impl ListKind for WorkList {
                 };
                 update(model, action)
             }
-            None => Vec::new(),
+            _ => Vec::new(),
         }
     }
 
-    fn move_to(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        let targets = model.targets();
+    fn move_to(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
+        let targets = targets(&selected);
         let Some(first) = targets.first() else {
             return Vec::new();
         };
@@ -413,8 +370,8 @@ impl ListKind for WorkList {
         move_menu(model, title, &paths, &current)
     }
 
-    fn remove(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        let targets = model.targets();
+    fn remove(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
+        let targets = targets(&selected);
         let removable: Vec<(&Work, Removal)> = (targets.into_iter())
             .filter_map(|work| Some((work, Removal::of(work)?)))
             .collect();
@@ -435,8 +392,8 @@ impl ListKind for WorkList {
     }
 
     /// The selection's whole groups, and its items in no group on their own.
-    fn finish(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        let targets = model.targets();
+    fn finish(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
+        let targets = targets(&selected);
         if targets.is_empty() {
             return Vec::new();
         }
@@ -453,8 +410,13 @@ impl ListKind for WorkList {
     }
 
     /// `x` closes the selection's open tabs, `c` its carnets, `p` pulls its worktrees.
-    fn command(&self, model: &mut Model, _list: List, cmd: Cmd) -> Vec<Effect> {
-        let targets = model.targets().into_iter();
+    fn command(
+        &self,
+        model: &mut Model,
+        selected: Option<Target<'static>>,
+        cmd: Cmd,
+    ) -> Vec<Effect> {
+        let targets = targets(&selected).into_iter();
         let (targets, job): (Vec<_>, fn(_) -> _) = match cmd {
             Cmd::Close => (targets.filter(|work| work.tab).collect(), Job::Close),
             Cmd::ToggleCarnet => (
@@ -470,40 +432,49 @@ impl ListKind for WorkList {
         let paths = paths(&targets);
         run_on(model, paths, job)
     }
+}
 
-    /// The item's path, or the group's name.
-    fn copy_path(&self, model: &Model, _list: List) -> Option<String> {
-        match model.work_row()? {
-            Row::Item(index) => Some(model.snapshot.work[index].path().display().to_string()),
-            Row::Group { group, .. } => Some(group.to_string()),
-        }
-    }
+/// The selected worktree, or every worktree of the selected group.
+fn targets<'a>(selected: &'a Option<Target>) -> Vec<&'a Work> {
+    selected.as_ref().map(Target::items).unwrap_or_default()
+}
 
-    fn branch(&self, model: &Model, _list: List) -> Option<String> {
-        match model.work_row()? {
-            Row::Item(index) => (model.snapshot.work[index].tree())?.branch.clone(),
-            Row::Group { .. } => None,
-        }
+/// An item's row: its tab mark, or a spinner while it pulls, then a carnet's row or a
+/// worktree's name, tinted by its severity, or dimmed once finished.
+fn item_line(model: &Model, work: &Work, palette: &Palette) -> Line<'static> {
+    let glyphs = &palette.glyphs;
+    let indent = if work.group().is_none() { "" } else { "  " };
+    let marker = if model.schedule.is_pulling(work.path()) {
+        let frame = glyphs.spinner[model.frame % glyphs.spinner.len()];
+        Span::styled(format!("{frame} "), Style::new().fg(palette.info))
+    } else {
+        tab_mark(work.tab, palette)
+    };
+    let mut spans = vec![Span::raw(indent), marker];
+    if work.is_carnet() {
+        let tracker = &model.tracker_config;
+        return carnets::row(work, spans, None, true, tracker, palette);
     }
+    let lead = spans.len();
+    spans.extend(icon(glyphs.worktree, Style::new().fg(palette.dim)));
+    spans.push(Span::styled(work.title(), severity(work).style(palette)));
+    if finish::signal(work).is_some() {
+        dim_after(&mut spans, lead, palette);
+    }
+    Line::from(spans)
+}
 
-    /// The forge page of the worktree's review, else of its branch.
-    fn url(&self, model: &Model, _list: List) -> Option<String> {
-        match model.work_row()? {
-            Row::Item(index) => {
-                let work = &model.snapshot.work[index];
-                let tree = work.tree()?;
-                if let Some(url) = tree.ci.as_ref().and_then(Ci::review_url) {
-                    return Some(url.to_owned());
-                }
-                let forge = model.snapshot.forges.get(work.repo()?)?;
-                Some(match &tree.branch {
-                    Some(branch) => forge.branch_url(branch),
-                    None => forge.url.clone(),
-                })
-            }
-            Row::Group { .. } => None,
-        }
+/// The forge page of a worktree's review, else of its branch.
+fn url(model: &Model, work: &Work) -> Option<String> {
+    let tree = work.tree()?;
+    if let Some(url) = tree.ci.as_ref().and_then(Ci::review_url) {
+        return Some(url.to_owned());
     }
+    let forge = model.snapshot.forges.get(work.repo()?)?;
+    Some(match &tree.branch {
+        Some(branch) => forge.branch_url(branch),
+        None => forge.url.clone(),
+    })
 }
 
 /// Whether the Work list shows an item: every worktree and open carnet, and a closed carnet

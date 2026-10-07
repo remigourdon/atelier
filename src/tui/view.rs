@@ -9,8 +9,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use super::app::{
     Cmd, Focus, KEYMAP, Kind, List, Model, On, Panel, Popup, Screen, Source, Work, popup_hints,
 };
-use super::lists;
-use super::lists::carnets;
+use super::lists::{self, ListRow, carnets};
 use super::markdown::{self, Markdown};
 use super::marks::{self, Severity};
 use super::widgets;
@@ -390,11 +389,21 @@ pub fn offset(selected: usize, height: u16) -> usize {
 
 pub fn render(frame: &mut Frame, model: &Model, palette: &Palette) {
     let areas = areas(model, frame.area());
+    // The active list's rows, resolved once for its panel and the main view.
+    let active = model.active();
+    let rows = lists::of(active).rows(model, palette, active);
     for &(panel, rect) in &areas.panels {
-        render_panel(frame, model, palette, panel, rect);
+        if panel == model.panel {
+            render_panel(frame, model, palette, panel, rect, &rows);
+        } else {
+            let list = model.list(panel);
+            let rows = lists::of(list).rows(model, palette, list);
+            render_panel(frame, model, palette, panel, rect, &rows);
+        }
     }
     if let Some(rect) = areas.main {
-        render_main(frame, model, palette, rect);
+        let selected = lists::selected(model, active, &rows);
+        render_main(frame, model, palette, rect, selected);
     }
     if let Some(rect) = areas.log {
         render_log(frame, model, palette, rect);
@@ -413,7 +422,14 @@ fn block<'a>(title: Line<'a>, focused: bool, palette: &Palette) -> Block<'a> {
         .title(title)
 }
 
-fn render_panel(frame: &mut Frame, model: &Model, palette: &Palette, panel: Panel, rect: Rect) {
+fn render_panel(
+    frame: &mut Frame,
+    model: &Model,
+    palette: &Palette,
+    panel: Panel,
+    rect: Rect,
+    rows: &[ListRow],
+) {
     let focused = model.focus == Focus::Panel(panel);
     let list = model.list(panel);
     let tab = |label: &str, active: bool| {
@@ -471,9 +487,8 @@ fn render_panel(frame: &mut Frame, model: &Model, palette: &Palette, panel: Pane
     let block = block(Line::from(title), focused, palette);
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
-    let rows = lists::of(list).rows(model, palette, list);
     if rows.is_empty() {
-        let empty = lists::of(list).empty(model, list);
+        let empty = lists::of(list).empty(model);
         frame.render_widget(
             Paragraph::new(Span::styled(empty, Style::new().fg(palette.dim))),
             inner,
@@ -483,11 +498,12 @@ fn render_panel(frame: &mut Frame, model: &Model, palette: &Palette, panel: Pane
     let selected = model.index(list).min(rows.len() - 1);
     let start = offset(selected, inner.height);
     let lines: Vec<Line> = rows
-        .into_iter()
+        .iter()
         .enumerate()
         .skip(start)
         .take(inner.height as usize)
-        .map(|(index, line)| {
+        .map(|(index, row)| {
+            let line = row.line.clone();
             if index == selected {
                 let style = Style::new().bg(palette.selection);
                 let style = if focused {
@@ -504,16 +520,10 @@ fn render_panel(frame: &mut Frame, model: &Model, palette: &Palette, panel: Pane
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// The active list's selected item, whose README and commits the main view shows.
-fn selected(model: &Model) -> Option<&Work> {
-    let list = model.active();
-    lists::of(list).item(model, list)
-}
-
 /// The selected carnet's README, rendered once read and wrapped at the main view's width,
 /// capped at [`markdown::MAX_WIDTH`].
-fn readme(model: &Model, palette: &Palette) -> Option<Vec<Line<'static>>> {
-    let path = selected(model)?.path();
+fn readme(model: &Model, palette: &Palette, item: Option<&Work>) -> Option<Vec<Line<'static>>> {
+    let path = item?.path();
     let readme = (model.readme.as_ref()).filter(|readme| readme.path == *path)?;
     let text = (palette.markdown).render(crate::carnet::body(readme.text.as_deref()?));
     let main = areas(model, Rect::new(0, 0, model.size.0, model.size.1)).main?;
@@ -522,29 +532,47 @@ fn readme(model: &Model, palette: &Palette) -> Option<Vec<Line<'static>>> {
 }
 
 /// The selected worktree's recent commits, once loaded.
-fn commits(model: &Model) -> Option<&Vec<Commit>> {
-    model.commits.get(selected(model)?.path())
+fn commits<'a>(model: &'a Model, item: Option<&Work>) -> Option<&'a Vec<Commit>> {
+    model.commits.get(item?.path())
 }
 
-fn detail(model: &Model, palette: &Palette) -> Vec<(String, Line<'static>)> {
+/// The selection's detail, from the active list.
+fn detail(model: &Model, palette: &Palette, row: Option<&ListRow>) -> Vec<(String, Line<'static>)> {
     let list = model.active();
-    lists::of(list).detail(model, palette, list)
+    row.map(|row| lists::of(list).detail(model, palette, &row.target))
+        .unwrap_or_default()
+}
+
+/// The selected carnet's search hits, while the Carnets list is active.
+fn hits<'a>(model: &'a Model, item: Option<&Work>) -> Option<&'a Vec<String>> {
+    model.search_hits(item?)
 }
 
 /// How many lines the main view holds, so scrolling stops at its end. Any palette lays out
 /// the same lines.
 pub fn main_len(model: &Model) -> usize {
     let palette = Palette::new(Icons::Unicode);
-    detail(model, &palette).len()
-        + model.carnet_hits().map_or(0, |hits| hits.len() + 2)
-        + readme(model, &palette).map_or(0, |readme| readme.len() + 2)
-        + commits(model).map_or(0, |commits| commits.len() + 2)
+    let list = model.active();
+    let rows = lists::of(list).rows(model, &palette, list);
+    let row = lists::selected(model, list, &rows);
+    let item = row.and_then(|row| row.target.item());
+    detail(model, &palette, row).len()
+        + hits(model, item).map_or(0, |hits| hits.len() + 2)
+        + readme(model, &palette, item).map_or(0, |readme| readme.len() + 2)
+        + commits(model, item).map_or(0, |commits| commits.len() + 2)
 }
 
-fn render_main(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect) {
+fn render_main(
+    frame: &mut Frame,
+    model: &Model,
+    palette: &Palette,
+    rect: Rect,
+    selected: Option<&ListRow>,
+) {
     let focused = model.focus == Focus::Main;
     let block = block(Line::from(" Main "), focused, palette);
-    let pairs = detail(model, palette);
+    let item = selected.and_then(|row| row.target.item());
+    let pairs = detail(model, palette, selected);
     let width = pairs.iter().map(|(key, _)| key.len()).max().unwrap_or(0);
     let mut lines: Vec<Line> = pairs
         .into_iter()
@@ -560,15 +588,15 @@ fn render_main(frame: &mut Frame, model: &Model, palette: &Palette, rect: Rect) 
         lines.push(Line::raw(""));
         lines.push(Line::styled(title, Style::new().fg(palette.accent).bold()));
     };
-    if let Some(hits) = model.carnet_hits() {
+    if let Some(hits) = hits(model, item) {
         section(&mut lines, "Matches");
         lines.extend(hits.iter().map(|hit| Line::raw(hit.as_str())));
     }
-    if let Some(readme) = readme(model, palette) {
+    if let Some(readme) = readme(model, palette, item) {
         section(&mut lines, "README");
         lines.extend(readme);
     }
-    if let Some(commits) = commits(model) {
+    if let Some(commits) = commits(model, item) {
         section(&mut lines, "Recent commits");
         let dim = Style::new().fg(palette.dim);
         lines.extend(commits.iter().map(|commit| {

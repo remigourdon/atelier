@@ -1,9 +1,14 @@
 //! Panel 3's review lists: To review and Mine.
 
+use std::borrow::Cow;
+
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, close_tabs, group_style, key_style, pair, subtle, tab_mark, work_line};
+use super::{
+    ListKind, ListRow, Target, close_tabs, group_style, key_style, pair, subtle, tab_mark,
+    work_line,
+};
 
 use crate::reviews::{Review, Role};
 use crate::state::Repo;
@@ -41,12 +46,6 @@ impl Model {
                     )
             })
             .collect()
-    }
-
-    /// The selected review, when a review list is active.
-    pub fn review(&self) -> Option<&Review> {
-        let list = self.active();
-        self.reviews(list).get(self.index(list)).copied()
     }
 
     /// The registered repo's name for a review's project, else the project's path.
@@ -87,18 +86,8 @@ impl ListKind for Reviews {
         }
     }
 
-    fn len(&self, model: &Model, list: List) -> usize {
-        model.reviews(list).len()
-    }
-
-    /// A review's URL.
-    fn ids(&self, model: &Model, list: List) -> Vec<String> {
-        (model.reviews(list).iter())
-            .map(|review| review.url.clone())
-            .collect()
-    }
-
-    fn rows<'a>(&self, model: &'a Model, palette: &Palette, list: List) -> Vec<Line<'a>> {
+    /// Each row's identity is its review's URL.
+    fn rows<'a>(&self, model: &'a Model, palette: &Palette, list: List) -> Vec<ListRow<'a>> {
         let dim = Style::new().fg(palette.dim);
         let linked = model.linked();
         model
@@ -127,7 +116,14 @@ impl ListKind for Reviews {
                 if list == List::ToReview {
                     spans.push(Span::styled(format!(" @{}", review.author), dim));
                 }
-                Line::from(spans)
+                ListRow {
+                    id: review.url.clone(),
+                    line: Line::from(spans),
+                    target: Target::Review(Cow::Borrowed(review)),
+                    path: None,
+                    branch: Some(review.branch.clone()),
+                    url: Some(review.url.clone()),
+                }
             })
             .collect()
     }
@@ -136,9 +132,9 @@ impl ListKind for Reviews {
         &self,
         model: &Model,
         palette: &Palette,
-        _list: List,
+        target: &Target,
     ) -> Vec<(String, Line<'static>)> {
-        let Some(review) = model.review() else {
+        let Target::Review(review) = target else {
             return Vec::new();
         };
         let linked = model.linked();
@@ -179,7 +175,7 @@ impl ListKind for Reviews {
         ]
     }
 
-    fn empty(&self, model: &Model, _list: List) -> &'static str {
+    fn empty(&self, model: &Model) -> &'static str {
         if (model.schedule.loading()).any(|source| matches!(source, Source::Feed(Feed::Reviews(_))))
         {
             "loading…"
@@ -188,8 +184,8 @@ impl ListKind for Reviews {
         }
     }
 
-    fn activate(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        let Some(review) = model.review() else {
+    fn activate(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
+        let Some(review) = review(selected) else {
             return Vec::new();
         };
         let Some(repo) = model.linked().project_repo(&review.project_url) else {
@@ -202,30 +198,34 @@ impl ListKind for Reviews {
         let pending = Pending::Checkout {
             repo: repo.path.clone(),
             workspace: repo.default_workspace.clone(),
-            review: Box::new(review.clone()),
+            review: Box::new(review),
         };
         join_linked_group(model, pending)
     }
 
-    fn command(&self, model: &mut Model, _list: List, cmd: Cmd) -> Vec<Effect> {
+    fn command(
+        &self,
+        model: &mut Model,
+        selected: Option<Target<'static>>,
+        cmd: Cmd,
+    ) -> Vec<Effect> {
         if cmd != Cmd::Close {
             return Vec::new();
         }
-        let paths = model
-            .review()
-            .and_then(|review| model.linked().review_worktree(review))
+        let paths = review(selected)
+            .and_then(|review| model.linked().review_worktree(&review))
             .filter(|work| work.tab)
             .map(|work| work.path.clone())
             .into_iter()
             .collect();
         close_tabs(model, paths)
     }
+}
 
-    fn branch(&self, model: &Model, _list: List) -> Option<String> {
-        model.review().map(|review| review.branch.clone())
-    }
-
-    fn url(&self, model: &Model, _list: List) -> Option<String> {
-        model.review().map(|review| review.url.clone())
+/// The selected review.
+fn review(selected: Option<Target>) -> Option<Review> {
+    match selected? {
+        Target::Review(review) => Some(review.into_owned()),
+        _ => None,
     }
 }

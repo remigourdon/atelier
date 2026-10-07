@@ -1,5 +1,6 @@
 //! Panel 2's Carnets list: every carnet in every workspace, closed ones included.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -7,8 +8,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::{
-    ListKind, close_tabs, dim_after, edit_links, group_span, group_style, issue_keys, move_menu,
-    pair, subtle, tab_detail, tab_mark, workspace_span, workspace_style,
+    ListKind, ListRow, Target, close_tabs, dim_after, edit_links, group_span, group_style,
+    issue_keys, move_menu, pair, subtle, tab_detail, tab_mark, workspace_span, workspace_style,
 };
 use crate::carnet::dated;
 use crate::issues::TrackerConfig;
@@ -45,16 +46,12 @@ impl Model {
             .collect()
     }
 
-    pub fn carnet(&self) -> Option<&Work> {
-        self.carnet_rows().get(self.index(List::Carnets)).copied()
-    }
-
-    /// The selected carnet's search hits, while the Carnets list is active.
-    pub fn carnet_hits(&self) -> Option<&Vec<String>> {
+    /// A carnet's search hits, while the Carnets list is active.
+    pub fn search_hits(&self, work: &Work) -> Option<&Vec<String>> {
         if self.active() != List::Carnets {
             return None;
         }
-        self.search.as_ref()?.hits.get(&self.carnet()?.path)
+        self.search.as_ref()?.hits.get(&work.path)
     }
 }
 
@@ -154,24 +151,22 @@ impl ListKind for Carnets {
         "Carnets"
     }
 
-    fn len(&self, model: &Model, _list: List) -> usize {
-        model.carnet_rows().len()
-    }
-
-    fn ids(&self, model: &Model, _list: List) -> Vec<String> {
-        (model.carnet_rows().into_iter())
-            .map(|work| work.path.display().to_string())
-            .collect()
-    }
-
-    fn rows<'a>(&self, model: &'a Model, palette: &Palette, _list: List) -> Vec<Line<'a>> {
+    fn rows<'a>(&self, model: &'a Model, palette: &Palette, _list: List) -> Vec<ListRow<'a>> {
         let selected = model.workspace();
         (model.carnet_rows().into_iter())
             .map(|work| {
                 let elsewhere =
                     (selected != Some(work.workspace.as_str())).then_some(work.workspace.as_str());
                 let lead = vec![tab_mark(work.tab, palette)];
-                row(work, lead, elsewhere, false, &model.tracker_config, palette)
+                let path = work.path.display().to_string();
+                ListRow {
+                    id: path.clone(),
+                    line: row(work, lead, elsewhere, false, &model.tracker_config, palette),
+                    target: Target::Item(Cow::Borrowed(work)),
+                    path: Some(path),
+                    branch: None,
+                    url: None,
+                }
             })
             .collect()
     }
@@ -180,14 +175,14 @@ impl ListKind for Carnets {
         &self,
         model: &Model,
         palette: &Palette,
-        _list: List,
+        target: &Target,
     ) -> Vec<(String, Line<'static>)> {
-        (model.carnet())
+        (target.item())
             .map(|work| detail(work, &model.tracker_config, palette))
             .unwrap_or_default()
     }
 
-    fn empty(&self, model: &Model, _list: List) -> &'static str {
+    fn empty(&self, model: &Model) -> &'static str {
         match &model.search {
             Some(_) => "no carnet matches: Esc clears the search",
             None if model.loaded => "no carnets yet: n in Work makes one",
@@ -195,21 +190,17 @@ impl ListKind for Carnets {
         }
     }
 
-    fn item<'a>(&self, model: &'a Model, _list: List) -> Option<&'a Work> {
-        model.carnet()
-    }
-
     /// Edits the carnet's group or issue keys.
-    fn edit(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        match model.carnet().cloned() {
+    fn edit(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
+        match carnet(selected) {
             Some(work) => edit_links(model, &work),
             None => Vec::new(),
         }
     }
 
     /// Moves the carnet, closed or not, to another workspace.
-    fn move_to(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        let Some(work) = model.carnet() else {
+    fn move_to(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
+        let Some(work) = carnet(selected) else {
             return Vec::new();
         };
         let (title, paths) = (format!("Move {} to", work.title()), [work.path.clone()]);
@@ -218,8 +209,8 @@ impl ListKind for Carnets {
     }
 
     /// Opens the carnet's tab; a closed carnet stays closed.
-    fn activate(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        match model.carnet() {
+    fn activate(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
+        match carnet(selected) {
             Some(work) => {
                 let job = Job::Open(vec![work.path.clone()]);
                 vec![run(model, job)]
@@ -229,11 +220,15 @@ impl ListKind for Carnets {
     }
 
     /// `x` closes the tab, `c` toggles the carnet lifecycle, and `s` searches every carnet.
-    fn command(&self, model: &mut Model, _list: List, cmd: Cmd) -> Vec<Effect> {
+    fn command(
+        &self,
+        model: &mut Model,
+        selected: Option<Target<'static>>,
+        cmd: Cmd,
+    ) -> Vec<Effect> {
         match cmd {
             Cmd::Close => {
-                let paths = model
-                    .carnet()
+                let paths = carnet(selected)
                     .filter(|work| work.tab)
                     .map(|work| work.path.clone())
                     .into_iter()
@@ -241,7 +236,7 @@ impl ListKind for Carnets {
                 close_tabs(model, paths)
             }
             Cmd::ToggleCarnet => {
-                let Some(work) = model.carnet() else {
+                let Some(work) = carnet(selected) else {
                     return Vec::new();
                 };
                 let paths = vec![work.path.clone()];
@@ -264,12 +259,16 @@ impl ListKind for Carnets {
     }
 
     /// Clears the search.
-    fn back(&self, model: &mut Model, _list: List) -> bool {
+    fn back(&self, model: &mut Model) -> bool {
         model.search.take().is_some()
     }
+}
 
-    fn copy_path(&self, model: &Model, _list: List) -> Option<String> {
-        model.carnet().map(|work| work.path.display().to_string())
+/// The selected carnet.
+fn carnet(selected: Option<Target>) -> Option<Work> {
+    match selected? {
+        Target::Item(work) => Some(work.into_owned()),
+        _ => None,
     }
 }
 

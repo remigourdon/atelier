@@ -1,9 +1,13 @@
 //! Panel 4's sections, one list of issues each.
 
+use std::borrow::Cow;
+
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{ListKind, close_tabs, kind, pair, plan, subtle, tab_mark, tag_style, work_line};
+use super::{
+    ListKind, ListRow, Target, close_tabs, kind, pair, plan, subtle, tab_mark, tag_style, work_line,
+};
 use crate::finish::{Line as PlanLine, Plan, Scope};
 use crate::issues::{Issue, State};
 use crate::links::IssueKeys;
@@ -39,12 +43,6 @@ impl Model {
                     )
             })
             .collect()
-    }
-
-    /// The selected issue, when a section is active.
-    pub fn issue(&self) -> Option<&Issue> {
-        let list = self.active();
-        self.issues(list).get(self.index(list)).copied()
     }
 
     /// An issue's key as shown.
@@ -173,18 +171,8 @@ impl ListKind for Issues {
         }
     }
 
-    fn len(&self, model: &Model, list: List) -> usize {
-        model.issues(list).len()
-    }
-
-    /// An issue's key, which unlike its URL is never empty.
-    fn ids(&self, model: &Model, list: List) -> Vec<String> {
-        (model.issues(list).iter())
-            .map(|issue| issue.key.to_string())
-            .collect()
-    }
-
-    fn rows<'a>(&self, model: &'a Model, palette: &Palette, list: List) -> Vec<Line<'a>> {
+    /// Each row's identity is its issue's key, which unlike its URL is never empty.
+    fn rows<'a>(&self, model: &'a Model, palette: &Palette, list: List) -> Vec<ListRow<'a>> {
         let dim = Style::new().fg(palette.dim);
         let linked = model.linked();
         model
@@ -213,7 +201,14 @@ impl ListKind for Issues {
                 for label in &issue.labels {
                     spans.push(Span::styled(format!(" {label}"), tag_style(palette)));
                 }
-                Line::from(spans)
+                ListRow {
+                    id: issue.key.to_string(),
+                    line: Line::from(spans),
+                    target: Target::Issue(Cow::Borrowed(issue)),
+                    path: None,
+                    branch: None,
+                    url: issue.url.clone(),
+                }
             })
             .collect()
     }
@@ -222,9 +217,9 @@ impl ListKind for Issues {
         &self,
         model: &Model,
         palette: &Palette,
-        _list: List,
+        target: &Target,
     ) -> Vec<(String, Line<'static>)> {
-        let Some(issue) = model.issue() else {
+        let Target::Issue(issue) = target else {
             return Vec::new();
         };
         let mut pairs = vec![
@@ -289,7 +284,7 @@ impl ListKind for Issues {
         pairs
     }
 
-    fn empty(&self, model: &Model, _list: List) -> &'static str {
+    fn empty(&self, model: &Model) -> &'static str {
         if (model.schedule.loading()).any(|source| matches!(source, Source::Feed(Feed::Issues(_))))
         {
             "loading…"
@@ -302,8 +297,8 @@ impl ListKind for Issues {
 
     /// A plan to open the issue's linked work and check out its open reviews, else asks to
     /// start a worktree for it.
-    fn activate(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        let Some(issue) = model.issue().cloned() else {
+    fn activate(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
+        let Some(issue) = issue(selected) else {
             return Vec::new();
         };
         let plan = issue_plan(model, &issue);
@@ -314,12 +309,16 @@ impl ListKind for Issues {
         Vec::new()
     }
 
-    fn command(&self, model: &mut Model, _list: List, cmd: Cmd) -> Vec<Effect> {
+    fn command(
+        &self,
+        model: &mut Model,
+        selected: Option<Target<'static>>,
+        cmd: Cmd,
+    ) -> Vec<Effect> {
         if cmd != Cmd::Close {
             return Vec::new();
         }
-        let paths = model
-            .issue()
+        let paths = issue(selected)
             .map(|issue| {
                 model
                     .linked()
@@ -333,27 +332,31 @@ impl ListKind for Issues {
         close_tabs(model, paths)
     }
 
-    fn create(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        match model.issue().cloned() {
+    fn create(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
+        match issue(selected) {
             Some(issue) => ask_start(model, issue),
             None => Vec::new(),
         }
     }
 
     /// The issue's linked work alone, never the rest of its groups.
-    fn finish(&self, model: &mut Model, _list: List) -> Vec<Effect> {
-        let Some(issue) = model.issue() else {
+    fn finish(&self, model: &mut Model, selected: Option<Target<'static>>) -> Vec<Effect> {
+        let Some(issue) = issue(selected) else {
             return Vec::new();
         };
         let scope = Scope::Issue {
             key: issue.key.clone(),
-            label: model.issue_label(issue),
+            label: model.issue_label(&issue),
             state: issue.state.label().to_lowercase(),
         };
         plan(model, scope)
     }
+}
 
-    fn url(&self, model: &Model, _list: List) -> Option<String> {
-        model.issue()?.url.clone()
+/// The selected issue.
+fn issue(selected: Option<Target>) -> Option<Issue> {
+    match selected? {
+        Target::Issue(issue) => Some(issue.into_owned()),
+        _ => None,
     }
 }

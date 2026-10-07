@@ -1000,6 +1000,6 @@ impl Model {
     }
 
     pub fn len(&self, list: List) -> usize {
-        lists::of(list).len(self, list)
+        self.rows(list).len()
     }
 }
