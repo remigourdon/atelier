@@ -48,11 +48,6 @@ pub enum Tone {
 }
 
 impl Tone {
-    /// A status symbol's tone, grey for one worktrunk added since.
-    pub fn of(mark: char) -> Self {
-        lookup(mark).map_or(Self::Quiet, |symbol| symbol.tone)
-    }
-
     pub fn color(self, palette: &Palette) -> Color {
         match self {
             Self::Broken => palette.error,

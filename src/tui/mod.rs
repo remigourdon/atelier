@@ -6,7 +6,6 @@ mod lists;
 mod markdown;
 mod marks;
 mod schedule;
-pub mod statusline;
 mod update;
 mod view;
 mod widgets;
@@ -539,7 +538,6 @@ mod tests {
             workspace,
             repo,
             worktree,
-            main: _statusline_only,
             carnet,
             review,
             reviewed,

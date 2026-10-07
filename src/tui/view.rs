@@ -55,8 +55,6 @@ pub struct Glyphs {
     pub workspace: &'static str,
     pub repo: &'static str,
     pub worktree: &'static str,
-    /// A repo's main worktree, in place of its name when there is a glyph.
-    pub main: &'static str,
     pub carnet: &'static str,
     pub review: &'static str,
     /// An issue's mark when an open review links it.
@@ -89,7 +87,6 @@ impl Glyphs {
                 workspace: "",
                 repo: "",
                 worktree: "",
-                main: "",
                 carnet: "✎",
                 review: "",
                 reviewed: "⑂",
@@ -114,7 +111,6 @@ impl Glyphs {
                 workspace: "\u{f108}",
                 repo: "\u{f401}",
                 worktree: "\u{e725}",
-                main: "\u{f015}",
                 carnet: "\u{f02d}",
                 review: "\u{f407}",
                 reviewed: "\u{f407}",

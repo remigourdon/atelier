@@ -17,7 +17,7 @@ use crate::tui::app::{
     Action, Cmd, Draft, DraftStep, Effect, Job, Kind, List, MenuEntry, Modal, Model, Removal,
     Submit, Work, WorkKind,
 };
-use crate::tui::marks::{self, Mark, Part, Severity, Symbol, Tone};
+use crate::tui::marks::{self, Mark, Part, Severity, Symbol};
 use crate::tui::update::{confirm, note, run, update};
 use crate::tui::view::{Palette, icon};
 use crate::worktrunk::{Ci, CiReview, Forge, Worktree};
@@ -485,18 +485,6 @@ pub(crate) fn severity(work: &Work) -> Severity {
     }
 }
 
-/// worktrunk's status symbols, such as `!?↑`, each in its own colour.
-pub(crate) fn colored_symbols(tree: &Worktree, palette: &Palette) -> Vec<Span<'static>> {
-    (tree.symbols.chars())
-        .map(|mark| {
-            Span::styled(
-                mark.to_string(),
-                Style::new().fg(Tone::of(mark).color(palette)),
-            )
-        })
-        .collect()
-}
-
 /// One line of the detail: a fact's spans.
 type Fact = Vec<Span<'static>>;
 
@@ -694,7 +682,7 @@ fn finished_fact(tree: &Worktree, palette: &Palette) -> Option<Fact> {
 }
 
 /// How the forge refers to a review: `#12`, `!12` on GitLab, `open` without a number.
-pub(crate) fn review_reference(review: &CiReview, forge: Option<&Forge>) -> String {
+fn review_reference(review: &CiReview, forge: Option<&Forge>) -> String {
     match (review.number, forge) {
         (Some(number), Some(forge)) => forge.review_reference(number),
         (Some(number), None) => format!("#{number}"),
@@ -703,7 +691,7 @@ pub(crate) fn review_reference(review: &CiReview, forge: Option<&Forge>) -> Stri
 }
 
 /// A finished worktree's mark: why it is finished.
-pub(crate) fn finished_mark(signal: Signal, palette: &Palette) -> Span<'static> {
+fn finished_mark(signal: Signal, palette: &Palette) -> Span<'static> {
     Span::styled(palette.glyphs.signal(signal), Style::new().fg(palette.dim))
 }
 
