@@ -284,15 +284,6 @@ impl Decision {
             _ => None,
         }
     }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::ChangesRequested => "changes requested",
-            Self::Pending => "approval pending",
-            Self::Draft => "draft",
-            Self::Approved => "approved",
-        }
-    }
 }
 
 impl Ci {

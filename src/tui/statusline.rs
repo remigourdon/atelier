@@ -7,10 +7,9 @@ use color_eyre::eyre::Result;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 
-use super::lists::work::{
-    checks_span, conflicts_mark, decision_mark, finished_mark, review_reference, symbols,
-};
+use super::lists::work::{finished_mark, review_reference, symbols};
 use super::lists::{group_style, key_style};
+use super::marks::{self, Mark};
 use super::view::Palette;
 use crate::config::Config;
 use crate::context;
@@ -138,20 +137,21 @@ fn cells(tree: &Worktree, forge: Option<&Forge>, palette: &Palette) -> Vec<Vec<S
         cells.push(symbols(tree, palette));
     }
     if let Some(ci) = &tree.ci {
-        cells.extend(checks_span(ci, palette).map(|span| vec![span]));
+        cells.extend(marks::checks_span(ci, palette).map(|span| vec![span]));
         if let Some(review) = &ci.review {
             let reference = review_reference(review, forge);
             let mut review_cell = vec![Span::styled(reference, Style::new().fg(palette.text))];
-            let decision = review
-                .decision
-                .and_then(|decision| decision_mark(decision, palette));
-            if let Some((glyph, color)) = decision {
-                review_cell.push(Span::styled(format!(" {glyph}"), Style::new().fg(color)));
-            }
-            if ci.conflicts {
-                let (glyph, color) = conflicts_mark(palette);
-                review_cell.push(Span::styled(format!(" {glyph}"), Style::new().fg(color)));
-            }
+            let decision = review.decision.and_then(marks::decision);
+            let conflicts = ci.conflicts.then_some(marks::CONFLICTS);
+            review_cell.extend(
+                [decision, conflicts]
+                    .into_iter()
+                    .flatten()
+                    .map(|mark: Mark| {
+                        let glyph = (mark.glyph)(&palette.glyphs);
+                        Span::styled(format!(" {glyph}"), mark.style(palette))
+                    }),
+            );
             cells.push(review_cell);
         }
     }

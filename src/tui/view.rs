@@ -17,7 +17,7 @@ use super::widgets;
 use crate::config::Icons;
 use crate::finish::Signal;
 use crate::git::Commit;
-use crate::worktrunk::Checks;
+use crate::worktrunk::{Checks, Decision};
 
 /// Below this width the main view is hidden until `+`.
 pub const NARROW: u16 = 100;
@@ -36,8 +36,6 @@ pub struct Palette {
     pub error: Color,
     pub warn: Color,
     pub info: Color,
-    /// A review's reviewers requested changes.
-    pub changes_requested: Color,
     /// A review's required approval is not given yet.
     pub approval_pending: Color,
     /// A list's filter, as it is typed and once applied.
@@ -184,8 +182,17 @@ fn fg(color: Color) -> Style {
     Style::new().fg(color)
 }
 
-fn checks(checks: Checks, palette: &Palette) -> Style {
-    fg(lists::work::checks_mark(checks, palette).1)
+/// A Work legend entry for a fact's [`marks::Mark`], under `section`.
+macro_rules! fact {
+    ($section:literal, $mark:expr) => {
+        Legend {
+            section: $section,
+            mark: |g| ($mark.glyph)(g),
+            style: |p| $mark.style(p),
+            help: $mark.words,
+            on: On::Lists(WORK),
+        }
+    };
 }
 
 /// A status symbol's legend entry, its heading, colour and words from [`marks::SYMBOLS`].
@@ -257,17 +264,17 @@ pub const LEGEND: &[Legend] = &[
     status!("⇡"),
     status!("⇣"),
     status!("⇅"),
-    Legend { section: "Checks", mark: |g| g.passed, style: |p| checks(Checks::Passed, p), help: "passed", on: On::Lists(WORK) },
-    Legend { section: "Checks", mark: |g| g.running, style: |p| checks(Checks::Running, p), help: "running", on: On::Lists(WORK) },
-    Legend { section: "Checks", mark: |g| g.failed, style: |p| checks(Checks::Failed, p), help: "failed", on: On::Lists(WORK) },
-    Legend { section: "Checks", mark: |g| g.unavailable, style: |p| checks(Checks::Unavailable, p), help: "unavailable", on: On::Lists(WORK) },
-    Legend { section: "Checks", mark: |g| g.passed, style: |p| checks(Checks::Passed, p).add_modifier(Modifier::DIM), help: "dimmed: stale, or a draft", on: On::Lists(WORK) },
+    fact!("Checks", marks::checks(Checks::Passed)),
+    fact!("Checks", marks::checks(Checks::Running)),
+    fact!("Checks", marks::checks(Checks::Failed)),
+    fact!("Checks", marks::checks(Checks::Unavailable)),
+    Legend { section: "Checks", mark: |g| g.passed, style: |p| marks::checks(Checks::Passed).style(p).add_modifier(Modifier::DIM), help: "dimmed: stale, or a draft", on: On::Lists(WORK) },
     Legend { section: "Review", mark: |_| "draft", style: dim, help: "a draft review, its checks dimmed", on: On::Lists(WORK) },
     Legend { section: "Review", mark: |g| g.reviewed, style: lists::review_style, help: "an open review links it", on: On::Lists(ISSUES) },
-    Legend { section: "Decision", mark: |g| g.approval, style: |p| fg(p.approval_pending), help: "waiting for approval", on: On::Lists(WORK) },
-    Legend { section: "Decision", mark: |g| g.changes_requested, style: |p| fg(p.changes_requested), help: "changes requested", on: On::Lists(WORK) },
-    Legend { section: "Decision", mark: |g| g.passed, style: |p| fg(p.ok), help: "approved", on: On::Lists(WORK) },
-    Legend { section: "Merge", mark: |g| g.conflicts, style: |p| fg(p.error), help: "the review conflicts with its base", on: On::Lists(WORK) },
+    fact!("Decision", marks::decision(Decision::Pending).unwrap()),
+    fact!("Decision", marks::decision(Decision::ChangesRequested).unwrap()),
+    fact!("Decision", marks::decision(Decision::Approved).unwrap()),
+    Legend { section: "Merge", mark: |g| (marks::CONFLICTS.glyph)(g), style: |p| marks::CONFLICTS.style(p), help: "the review conflicts with its base", on: On::Lists(WORK) },
     Legend { section: "Finished", mark: |g| g.integrated, style: dim, help: "merged into the default branch, row dimmed", on: On::Lists(WORK) },
     Legend { section: "Finished", mark: |g| g.gone, style: dim, help: "its remote branch was deleted, row dimmed", on: On::Lists(WORK) },
     Legend { section: "Command log", mark: |_| "✓", style: dim, help: "succeeded", on: On::Global },
@@ -316,7 +323,6 @@ impl Palette {
             error: colors.red.into(),
             warn: colors.yellow.into(),
             info: colors.blue.into(),
-            changes_requested: colors.yellow.into(),
             approval_pending: colors.pink.into(),
             filter: colors.yellow.into(),
             group: colors.lavender.into(),

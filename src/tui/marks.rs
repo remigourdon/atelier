@@ -1,9 +1,10 @@
-//! What worktrunk's status symbols mean, and how badly a worktree needs attention.
+//! What a worktree's marks mean, and how badly a worktree needs attention.
 
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::Span;
 
-use super::view::Palette;
-use crate::worktrunk::{Checks, Decision, Worktree};
+use super::view::{Glyphs, Palette};
+use crate::worktrunk::{Checks, Ci, Decision, Worktree};
 
 /// What part of a worktree a status symbol is about, as the detail's sections are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,8 +35,12 @@ pub enum Tone {
     Broken,
     /// Something needs you: yellow.
     NeedsYou,
+    /// Someone else's turn, as a review waiting for approval: pink.
+    Waiting,
     /// Something is under way: blue.
     Busy,
+    /// Done, and well: green.
+    Done,
     /// Plain text.
     Neutral,
     /// Nothing to act on: grey.
@@ -52,7 +57,9 @@ impl Tone {
         match self {
             Self::Broken => palette.error,
             Self::NeedsYou => palette.warn,
+            Self::Waiting => palette.approval_pending,
             Self::Busy => palette.info,
+            Self::Done => palette.ok,
             Self::Neutral => palette.text,
             Self::Quiet => palette.dim,
         }
@@ -145,6 +152,87 @@ pub fn symbols(tree: &Worktree, part: Part) -> impl Iterator<Item = &'static Sym
     (tree.symbols.chars().filter_map(lookup)).filter(move |symbol| symbol.part == part)
 }
 
+/// A fact's mark: its glyph, its tone and what it means.
+#[derive(Debug, Clone, Copy)]
+pub struct Mark {
+    pub glyph: fn(&Glyphs) -> &'static str,
+    pub tone: Tone,
+    pub words: &'static str,
+}
+
+impl Mark {
+    pub fn style(self, palette: &Palette) -> Style {
+        Style::new().fg(self.tone.color(palette))
+    }
+}
+
+/// A branch's checks.
+pub const fn checks(checks: Checks) -> Mark {
+    match checks {
+        Checks::Passed => Mark {
+            glyph: |g| g.passed,
+            tone: Tone::Done,
+            words: "passed",
+        },
+        Checks::Running => Mark {
+            glyph: |g| g.running,
+            tone: Tone::Busy,
+            words: "running",
+        },
+        Checks::Failed => Mark {
+            glyph: |g| g.failed,
+            tone: Tone::Broken,
+            words: "failed",
+        },
+        Checks::Unavailable => Mark {
+            glyph: |g| g.unavailable,
+            tone: Tone::NeedsYou,
+            words: "unavailable",
+        },
+    }
+}
+
+/// A review's decision; `None` for a draft's, which the review's line says instead.
+pub const fn decision(decision: Decision) -> Option<Mark> {
+    match decision {
+        Decision::ChangesRequested => Some(Mark {
+            glyph: |g| g.changes_requested,
+            tone: Tone::NeedsYou,
+            words: "changes requested",
+        }),
+        Decision::Pending => Some(Mark {
+            glyph: |g| g.approval,
+            tone: Tone::Waiting,
+            words: "waiting for approval",
+        }),
+        Decision::Approved => Some(Mark {
+            glyph: |g| g.passed,
+            tone: Tone::Done,
+            words: "approved",
+        }),
+        Decision::Draft => None,
+    }
+}
+
+/// A review that conflicts with its base.
+pub const CONFLICTS: Mark = Mark {
+    glyph: |g| g.conflicts,
+    tone: Tone::Broken,
+    words: "conflicts",
+};
+
+/// The checks' mark, dimmed when stale or for a draft; `None` without checks.
+pub fn checks_span(ci: &Ci, palette: &Palette) -> Option<Span<'static>> {
+    let mark = checks(ci.checks?);
+    let style = mark.style(palette);
+    let style = if ci.checks_dimmed() {
+        style.add_modifier(Modifier::DIM)
+    } else {
+        style
+    };
+    Some(Span::styled((mark.glyph)(&palette.glyphs), style))
+}
+
 /// How badly an item needs attention, least first. Only its name takes the colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
@@ -158,42 +246,41 @@ pub enum Severity {
 impl Severity {
     /// The name's colour; `None` leaves it as it is.
     pub fn color(self, palette: &Palette) -> Option<Color> {
-        match self {
-            Self::Fine => None,
-            Self::Waiting => Some(palette.approval_pending),
-            Self::NeedsYou => Some(Tone::NeedsYou.color(palette)),
-            Self::Broken => Some(Tone::Broken.color(palette)),
-        }
+        let tone = match self {
+            Self::Fine => return None,
+            Self::Waiting => Tone::Waiting,
+            Self::NeedsYou => Tone::NeedsYou,
+            Self::Broken => Tone::Broken,
+        };
+        Some(tone.color(palette))
     }
 
     /// A worktree's most severe fact: its status symbols, its checks unless dimmed, its review's
     /// decision and whether that review conflicts.
     pub fn of(tree: &Worktree) -> Self {
-        let symbols = (tree.symbols.chars().filter_map(lookup)).map(|symbol| match symbol.tone {
-            Tone::Broken => Self::Broken,
-            Tone::NeedsYou => Self::NeedsYou,
-            Tone::Busy | Tone::Neutral | Tone::Quiet => Self::Fine,
-        });
+        let symbols = (tree.symbols.chars().filter_map(lookup)).map(|symbol| symbol.tone);
         let ci = tree.ci.iter().flat_map(|ci| {
             // Dimmed checks, stale or a draft's, colour no name.
-            let checks = match ci.checks.filter(|_| !ci.checks_dimmed()) {
-                Some(Checks::Failed) => Self::Broken,
-                Some(Checks::Unavailable) => Self::NeedsYou,
-                Some(Checks::Passed | Checks::Running) | None => Self::Fine,
-            };
-            let conflicts = if ci.conflicts {
-                Self::Broken
-            } else {
-                Self::Fine
-            };
-            let decision = match ci.decision() {
-                Some(Decision::ChangesRequested) => Self::NeedsYou,
-                Some(Decision::Pending) => Self::Waiting,
-                Some(Decision::Approved | Decision::Draft) | None => Self::Fine,
-            };
-            [checks, conflicts, decision]
+            let marks = [
+                (ci.checks.filter(|_| !ci.checks_dimmed())).map(checks),
+                ci.decision().and_then(decision),
+                ci.conflicts.then_some(CONFLICTS),
+            ];
+            marks.into_iter().flatten()
         });
-        symbols.chain(ci).max().unwrap_or(Self::Fine)
+        let tones = symbols.chain(ci.map(|mark| mark.tone));
+        tones.map(Self::from).max().unwrap_or(Self::Fine)
+    }
+}
+
+impl From<Tone> for Severity {
+    fn from(tone: Tone) -> Self {
+        match tone {
+            Tone::Broken => Self::Broken,
+            Tone::NeedsYou => Self::NeedsYou,
+            Tone::Waiting => Self::Waiting,
+            Tone::Busy | Tone::Done | Tone::Neutral | Tone::Quiet => Self::Fine,
+        }
     }
 }
 

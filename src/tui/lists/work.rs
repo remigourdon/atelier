@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 use super::{
@@ -17,10 +17,10 @@ use crate::tui::app::{
     Action, Cmd, Draft, DraftStep, Effect, Job, Kind, List, MenuEntry, Modal, Model, Removal,
     Submit, Work, WorkKind,
 };
-use crate::tui::marks::{self, Part, Severity, Symbol, Tone};
+use crate::tui::marks::{self, Mark, Part, Severity, Symbol, Tone};
 use crate::tui::update::{confirm, note, run, update};
 use crate::tui::view::{Palette, icon};
-use crate::worktrunk::{Checks, Ci, CiReview, Decision, Forge, Worktree};
+use crate::worktrunk::{Ci, CiReview, Forge, Worktree};
 
 pub struct WorkList;
 
@@ -554,72 +554,21 @@ pub(crate) fn symbols(tree: &Worktree, palette: &Palette) -> Vec<Span<'static>> 
         .collect()
 }
 
-/// A check status's glyph and colour.
-pub(crate) fn checks_mark(checks: Checks, palette: &Palette) -> (&'static str, Color) {
-    let glyphs = &palette.glyphs;
-    match checks {
-        Checks::Passed => (glyphs.passed, palette.ok),
-        Checks::Running => (glyphs.running, palette.info),
-        Checks::Failed => (glyphs.failed, palette.error),
-        Checks::Unavailable => (glyphs.unavailable, palette.warn),
-    }
-}
-
-/// What a check status is called.
-pub(crate) fn checks_label(checks: Checks) -> &'static str {
-    match checks {
-        Checks::Passed => "passed",
-        Checks::Running => "running",
-        Checks::Failed => "failed",
-        Checks::Unavailable => "unavailable",
-    }
-}
-
-/// The checks' mark, dimmed when stale or for a draft; `None` without checks.
-pub(crate) fn checks_span(ci: &Ci, palette: &Palette) -> Option<Span<'static>> {
-    let (glyph, color) = checks_mark(ci.checks?, palette);
-    let style = Style::new().fg(color);
-    let style = if ci.checks_dimmed() {
-        style.add_modifier(Modifier::DIM)
-    } else {
-        style
-    };
-    Some(Span::styled(glyph, style))
-}
-
-/// A review decision's glyph and colour, none for a draft's.
-pub(crate) fn decision_mark(
-    decision: Decision,
-    palette: &Palette,
-) -> Option<(&'static str, Color)> {
-    let glyphs = &palette.glyphs;
-    match decision {
-        Decision::ChangesRequested => Some((glyphs.changes_requested, palette.changes_requested)),
-        Decision::Pending => Some((glyphs.approval, palette.approval_pending)),
-        Decision::Approved => Some((glyphs.passed, palette.ok)),
-        Decision::Draft => None,
-    }
-}
-
-/// What a review decision is called.
-pub(crate) fn decision_label(decision: Decision) -> &'static str {
-    match decision {
-        Decision::Pending => "waiting for approval",
-        decision => decision.label(),
-    }
-}
-
-/// A review's merge conflicts: its glyph and colour.
-pub(crate) fn conflicts_mark(palette: &Palette) -> (&'static str, Color) {
-    (palette.glyphs.conflicts, palette.error)
-}
-
 /// A mark in its colour, then what it means.
 fn fact(mark: impl Into<String>, color: Color, words: impl Into<String>) -> Vec<Span<'static>> {
     vec![
         Span::styled(mark.into(), Style::new().fg(color)),
         Span::raw(format!(" {}", words.into())),
     ]
+}
+
+/// A fact's mark in its colour, then `words`.
+fn marked(mark: Mark, words: impl Into<String>, palette: &Palette) -> Vec<Span<'static>> {
+    fact(
+        (mark.glyph)(&palette.glyphs),
+        mark.tone.color(palette),
+        words,
+    )
 }
 
 /// `n` of `thing`, plural past one.
@@ -722,8 +671,8 @@ fn tree_detail(
 
     let ci = tree.ci.as_ref();
     if let Some((ci, checks)) = ci.and_then(|ci| Some((ci, ci.checks?))) {
-        let mark = checks_span(ci, palette).unwrap_or_default();
-        let mut line = vec![mark, Span::raw(format!(" {}", checks_label(checks)))];
+        let mark = marks::checks_span(ci, palette).unwrap_or_default();
+        let mut line = vec![mark, Span::raw(format!(" {}", marks::checks(checks).words))];
         if ci.branch_workflow {
             line.push(subtle(" (branch workflow)", palette));
         }
@@ -739,23 +688,16 @@ fn tree_detail(
             line.push(subtle(" draft", palette));
         }
         pairs.push(pair("Review", line));
-        if let Some(decision) = review
-            .decision
-            .filter(|&decision| decision != Decision::Draft)
-        {
-            let (glyph, color) = decision_mark(decision, palette).unwrap_or_default();
-            pairs.push(pair(
-                "Decision",
-                fact(glyph, color, decision_label(decision)),
-            ));
+        if let Some(mark) = review.decision.and_then(marks::decision) {
+            pairs.push(pair("Decision", marked(mark, mark.words, palette)));
         }
         let merge = if ci.conflicts {
             let base = tree
                 .default_branch
                 .as_deref()
                 .unwrap_or("the default branch");
-            let (glyph, color) = conflicts_mark(palette);
-            fact(glyph, color, format!("conflicts with {base}"))
+            let mark = marks::CONFLICTS;
+            marked(mark, format!("{} with {base}", mark.words), palette)
         } else {
             vec![Span::raw("mergeable")]
         };
@@ -881,7 +823,7 @@ mod tests {
 
     #[test]
     fn the_detail_spells_out_every_mark() {
-        use crate::worktrunk::{Checks, CiReview, CiState};
+        use crate::worktrunk::{Checks, CiReview, CiState, Decision};
         let tree = Worktree {
             dirty: true,
             diff: (48, 12),
