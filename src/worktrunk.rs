@@ -232,20 +232,6 @@ pub enum CiState {
     ApprovalPending,
 }
 
-impl CiState {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Passed => "passed",
-            Self::Running => "running",
-            Self::Failed => "failed",
-            Self::Conflicts => "conflicts",
-            Self::Error => "error",
-            Self::ChangesRequested => Decision::ChangesRequested.label(),
-            Self::ApprovalPending => Decision::Pending.label(),
-        }
-    }
-}
-
 /// A branch's checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Checks {

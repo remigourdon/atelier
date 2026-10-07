@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 
 use super::{
     ListKind, carnets, edit_links, group_span, group_style, issue_keys, kind, move_menu, pair,
-    paths, plan, subtle, tab_detail, tab_mark,
+    paths, plan, subtle, tab_detail, tab_mark, workspace_span,
 };
 use crate::finish::{self, Scope, Signal};
 use crate::links::{Group, group_text};
@@ -17,7 +17,7 @@ use crate::tui::app::{
     Action, Cmd, Draft, DraftStep, Effect, Job, Kind, List, MenuEntry, Modal, Model, Removal,
     Submit, Work, WorkKind,
 };
-use crate::tui::marks::{self, Severity, Tone};
+use crate::tui::marks::{self, Part, Severity, Symbol, Tone};
 use crate::tui::update::{confirm, note, run, update};
 use crate::tui::view::{Palette, icon};
 use crate::worktrunk::{Checks, Ci, CiReview, Decision, Forge, Worktree};
@@ -281,69 +281,20 @@ impl ListKind for WorkList {
                         return carnets::detail(work, &model.tracker_config, palette);
                     }
                 };
-                let status_text = if tree.dirty {
-                    format!("dirty +{} -{}", tree.diff.0, tree.diff.1)
-                } else {
-                    "clean".into()
-                };
-                let mut status = Vec::new();
-                if !tree.symbols.is_empty() {
-                    status.extend(symbols(tree, palette));
-                    status.push(Span::raw(" "));
-                }
-                status.push(Span::raw(status_text));
-                let upstream = match tree.upstream {
-                    // Counts of zero recede.
-                    Some((ahead, behind)) => {
-                        let count = |arrow, count| {
-                            let text = format!("{arrow}{count}");
-                            if count > 0 {
-                                Span::raw(text)
-                            } else {
-                                subtle(text, palette)
-                            }
-                        };
-                        Line::from(vec![count("↑", ahead), Span::raw(" "), count("↓", behind)])
-                    }
-                    None => subtle("none", palette).into(),
-                };
+                let pulling = model.schedule.is_pulling(work.path());
+                let forge = model.snapshot.forges.get(repo);
                 let mut pairs = vec![
                     pair("Repo", repo_name.clone()),
                     pair("Branch", work.branch()),
                     pair("Path", tree.path.display().to_string()),
-                    pair("Workspace", work.workspace.clone()),
+                    pair("Workspace", workspace_span(&work.workspace, palette)),
                     pair("Group", group_span(work.group(), palette)),
                     pair(
                         "Issue keys",
                         issue_keys(work, &model.tracker_config, ", ", palette),
                     ),
-                    pair("Tab", tab_detail(work.tab, palette)),
-                    pair("Status", status),
-                    pair("Upstream", upstream),
-                    pair(
-                        "Commit",
-                        vec![
-                            subtle(format!("{} ", tree.short_sha), palette),
-                            Span::raw(tree.subject.clone()),
-                            subtle(format!(" ({})", tree.committed_at), palette),
-                        ],
-                    ),
                 ];
-                if let Some(ci) = &tree.ci {
-                    pairs.push(pair("CI", ci_detail(ci, palette)));
-                    let forge = model.snapshot.forges.get(repo);
-                    if let Some(review) = &ci.review {
-                        pairs.push(pair("Review", review_detail(ci, review, forge, palette)));
-                    }
-                }
-                if let Some(signal) = finish::signal(work) {
-                    let why = format!(" {} (f to finish)", signal.label());
-                    let line = vec![
-                        finished_mark(signal, palette),
-                        Span::styled(why, Style::new().fg(palette.dim)),
-                    ];
-                    pairs.push(pair("Finished", line));
-                }
+                pairs.extend(tree_detail(tree, work.tab, pulling, forge, palette));
                 pairs
             }
             None => Vec::new(),
@@ -661,48 +612,170 @@ pub(crate) fn conflicts_mark(palette: &Palette) -> (&'static str, Color) {
     (palette.glyphs.conflicts, palette.error)
 }
 
-/// The detail's CI: its checks' mark, what it means, and why it may be dimmed.
-fn ci_detail(ci: &Ci, palette: &Palette) -> Line<'static> {
-    let Some(checks) = ci.checks else {
-        return subtle("none", palette).into();
-    };
-    let mut text = format!(" {}", checks_label(checks));
-    if ci.branch_workflow {
-        text.push_str(" (branch)");
-    }
-    if ci.stale {
-        text.push_str(" · stale");
-    }
-    if ci.draft() {
-        text.push_str(" · draft");
-    }
-    let mark = checks_span(ci, palette).unwrap_or_default();
-    Line::from(vec![mark.clone(), Span::styled(text, mark.style)])
+/// A mark in its colour, then what it means.
+fn fact(mark: impl Into<String>, color: Color, words: impl Into<String>) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(mark.into(), Style::new().fg(color)),
+        Span::raw(format!(" {}", words.into())),
+    ]
 }
 
-/// The detail's review: its reference, its decision and its conflicts, marked.
-fn review_detail(
-    ci: &Ci,
-    review: &CiReview,
+/// `n` of `thing`, plural past one.
+fn count(n: u64, thing: &str) -> String {
+    if n == 1 {
+        format!("1 {thing}")
+    } else {
+        format!("{n} {thing}s")
+    }
+}
+
+/// Facts under one key: the key on the first line only.
+fn section(
+    pairs: &mut Vec<(String, Line<'static>)>,
+    key: &str,
+    lines: impl IntoIterator<Item = Vec<Span<'static>>>,
+) {
+    for (index, line) in lines.into_iter().enumerate() {
+        pairs.push(pair(if index == 0 { key } else { "" }, line));
+    }
+}
+
+/// What a finished worktree's mark means.
+pub(crate) fn finished_label(signal: Signal) -> &'static str {
+    match signal {
+        Signal::Integrated => "merged into the default branch",
+        Signal::Gone => "its remote branch was deleted",
+    }
+}
+
+/// A worktree's state in the detail, one fact a line, each mark with its meaning in words:
+/// its tab, changes, checkout, the default branch, the remote, its commit, checks, review,
+/// decision, merge and whether it is finished.
+fn tree_detail(
+    tree: &Worktree,
+    tab: bool,
+    pulling: bool,
     forge: Option<&Forge>,
     palette: &Palette,
-) -> Line<'static> {
-    let mut spans = vec![Span::raw(review_reference(review, forge))];
-    if let Some((glyph, color)) = review.decision.and_then(|d| decision_mark(d, palette)) {
-        let label = decision_label(review.decision.unwrap_or(Decision::Draft));
-        spans.push(Span::styled(
-            format!(" {glyph} {label}"),
-            Style::new().fg(color),
-        ));
+) -> Vec<(String, Line<'static>)> {
+    let glyphs = &palette.glyphs;
+    let mut pairs = Vec::new();
+    let tab = if pulling {
+        fact(glyphs.spinner[0], palette.info, "pulling")
+    } else {
+        tab_detail(tab, palette).spans
+    };
+    pairs.push(pair("Tab", tab));
+
+    let changes: Vec<_> = (marks::symbols(tree, Part::Changes))
+        .map(|symbol| fact(symbol.mark, palette.text, symbol.help))
+        .collect();
+    let lines = vec![Span::raw(format!(
+        "+{} −{} lines",
+        tree.diff.0, tree.diff.1
+    ))];
+    if changes.is_empty() && !tree.dirty {
+        pairs.push(pair("Changes", subtle("clean", palette)));
+    } else {
+        section(&mut pairs, "Changes", changes.into_iter().chain([lines]));
     }
-    if ci.conflicts {
-        let (glyph, color) = conflicts_mark(palette);
-        spans.push(Span::styled(
-            format!(" {glyph} conflicts"),
-            Style::new().fg(color),
-        ));
+
+    let symbol =
+        |symbol: &Symbol, words: String| fact(symbol.mark, symbol.tone.color(palette), words);
+    let checkout = marks::symbols(tree, Part::Checkout).map(|s| symbol(s, s.help.into()));
+    section(&mut pairs, "Checkout", checkout);
+
+    let default = marks::symbols(tree, Part::Default).map(|s| {
+        let words = match (s.mark, tree.ahead_of_default) {
+            ('↑', Some(n)) => format!("{} by {}", s.help, count(n, "commit")),
+            ('↕', Some(n)) => format!("{}, {} ahead", s.help, count(n, "commit")),
+            _ => s.help.into(),
+        };
+        let mut line = symbol(s, words);
+        if let Some(branch) = &tree.default_branch {
+            line.push(subtle(format!(" ({branch})"), palette));
+        }
+        line
+    });
+    section(&mut pairs, "Default branch", default);
+
+    let remote = match tree.upstream {
+        None => vec![subtle("no upstream", palette)],
+        Some((ahead, behind)) => {
+            let (mark, words) = match (ahead, behind) {
+                (0, 0) => ('|', "in sync".to_owned()),
+                (ahead, 0) => ('⇡', format!("ahead: {} unpushed", count(ahead, "commit"))),
+                (0, behind) => ('⇣', format!("behind: {} to pull", count(behind, "commit"))),
+                (ahead, behind) => ('⇅', format!("diverged: {ahead} to push, {behind} to pull")),
+            };
+            let tone = marks::lookup(mark).map_or(Tone::Quiet, |symbol| symbol.tone);
+            fact(mark, tone.color(palette), words)
+        }
+    };
+    pairs.push(pair("Remote", remote));
+
+    pairs.push(pair(
+        "Commit",
+        vec![
+            subtle(format!("{} ", tree.short_sha), palette),
+            Span::raw(tree.subject.clone()),
+            subtle(format!(" ({})", tree.committed_at), palette),
+        ],
+    ));
+
+    let ci = tree.ci.as_ref();
+    let checks = match ci.and_then(|ci| Some((ci, ci.checks?))) {
+        None => vec![subtle("none", palette)],
+        Some((ci, checks)) => {
+            let mark = checks_span(ci, palette).unwrap_or_default();
+            let mut line = vec![mark, Span::raw(format!(" {}", checks_label(checks)))];
+            if ci.branch_workflow {
+                line.push(subtle(" (branch workflow)", palette));
+            }
+            if ci.stale {
+                line.push(subtle(" · stale: local commits not pushed", palette));
+            }
+            line
+        }
+    };
+    pairs.push(pair("Checks", checks));
+
+    if let Some((ci, review)) = ci.and_then(|ci| Some((ci, ci.review.as_ref()?))) {
+        let mut line = vec![Span::raw(review_reference(review, forge))];
+        if ci.draft() {
+            line.push(subtle(" draft", palette));
+        }
+        pairs.push(pair("Review", line));
+        if let Some(decision) = review
+            .decision
+            .filter(|&decision| decision != Decision::Draft)
+        {
+            let (glyph, color) = decision_mark(decision, palette).unwrap_or_default();
+            pairs.push(pair(
+                "Decision",
+                fact(glyph, color, decision_label(decision)),
+            ));
+        }
+        let merge = if ci.conflicts {
+            let base = tree
+                .default_branch
+                .as_deref()
+                .unwrap_or("the default branch");
+            let (glyph, color) = conflicts_mark(palette);
+            fact(glyph, color, format!("conflicts with {base}"))
+        } else {
+            vec![Span::raw("mergeable")]
+        };
+        pairs.push(pair("Merge", merge));
     }
-    Line::from(spans)
+
+    if let Some(signal) = finish::tree_signal(tree) {
+        let mut line = vec![finished_mark(signal, palette)];
+        line.push(Span::raw(format!(" {}", finished_label(signal))));
+        line.push(subtle(" (f to finish)", palette));
+        pairs.push(pair("Finished", line));
+    }
+    pairs
 }
 
 /// How the forge refers to a review: `#12`, `!12` on GitLab, `open` without a number.
@@ -800,5 +873,78 @@ mod tests {
         );
         model.set_folded(&key, false);
         assert_eq!(titles(&model).len(), 10);
+    }
+
+    /// The detail as text, a line per fact: its key, or `-` under the one above.
+    fn facts(tree: &Worktree, tab: bool, pulling: bool) -> Vec<String> {
+        let palette = Palette::new(crate::config::Icons::Unicode);
+        (tree_detail(tree, tab, pulling, None, &palette).into_iter())
+            .map(|(key, line)| {
+                let key = if key.is_empty() { "-".into() } else { key };
+                format!("{key}: {line}")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_detail_spells_out_every_mark() {
+        use crate::worktrunk::{Checks, CiReview, CiState};
+        let tree = Worktree {
+            dirty: true,
+            diff: (48, 12),
+            symbols: "+!?↻↑⇅".into(),
+            ahead_of_default: Some(3),
+            default_branch: Some("main".into()),
+            upstream: Some((1, 2)),
+            short_sha: "a1b2c3d".into(),
+            subject: "Accept bounds".into(),
+            committed_at: "2 hours ago".into(),
+            ci: Some(Ci {
+                state: CiState::Conflicts,
+                checks: Some(Checks::Passed),
+                conflicts: true,
+                stale: true,
+                branch_workflow: false,
+                review: Some(CiReview {
+                    number: Some(464),
+                    url: None,
+                    decision: Some(Decision::Pending),
+                }),
+            }),
+            ..Worktree::default()
+        };
+        assert_eq!(
+            facts(&tree, true, false),
+            [
+                "Tab: ◉ open",
+                "Changes: + staged changes",
+                "-: ! unstaged changes",
+                "-: ? untracked files",
+                "-: +48 −12 lines",
+                "Checkout: ↻ rebase, merge or other operation in progress",
+                "Default branch: ↑ ahead by 3 commits (main)",
+                "Remote: ⇅ diverged: 1 to push, 2 to pull",
+                "Commit: a1b2c3d Accept bounds (2 hours ago)",
+                "Checks: ✔ passed · stale: local commits not pushed",
+                "Review: #464",
+                "Decision: ◇ waiting for approval",
+                "Merge: ✗ conflicts with main",
+            ]
+        );
+        let clean = Worktree {
+            integrated: true,
+            ..Worktree::default()
+        };
+        assert_eq!(
+            facts(&clean, false, true),
+            [
+                "Tab: ◐ pulling",
+                "Changes: clean",
+                "Remote: no upstream",
+                "Commit:   ()",
+                "Checks: none",
+                "Finished: ⊂ merged into the default branch (f to finish)",
+            ]
+        );
     }
 }

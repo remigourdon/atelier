@@ -418,14 +418,16 @@ mod tests {
     }
 
     #[test]
-    fn commits_and_counts_of_zero_recede_and_warnings_are_yellow() {
+    fn commits_recede_and_the_remote_is_spelled_out() {
         let mut model = loaded(120, 30);
         model.snapshot.work[1].tree_mut().upstream = Some((2, 0));
         let palette = Palette::new(Icons::Unicode);
         let buffer = draw(&model, &palette);
-        assert_eq!(palette.warn, catppuccin::PALETTE.mocha.colors.yellow.into());
-        assert_eq!(style_of(&buffer, "↑2").fg, Some(palette.text));
-        assert_eq!(style_of(&buffer, "↓0").fg, Some(palette.dim));
+        assert_eq!(style_of(&buffer, "⇡ ahead").fg, Some(palette.dim));
+        assert_eq!(
+            style_of(&buffer, "ahead: 2 commits unpushed").fg,
+            Some(palette.text)
+        );
         assert_eq!(style_of(&buffer, "abc1234 Add").fg, Some(palette.dim));
         assert_eq!(style_of(&buffer, "Add login").fg, Some(palette.text));
         assert_eq!(style_of(&buffer, "(2 hours ago, R)").fg, Some(palette.dim));

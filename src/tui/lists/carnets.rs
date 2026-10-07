@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 
 use super::{
     ListKind, close_tabs, edit_links, group_span, group_style, issue_keys, move_menu, pair, subtle,
-    tab_detail, tab_mark, workspace_style,
+    tab_detail, tab_mark, workspace_span, workspace_style,
 };
 use crate::carnet::dated;
 use crate::issues::TrackerConfig;
@@ -129,18 +129,22 @@ pub fn detail(
         } => (*closed, summary.clone()),
         WorkKind::Worktree { .. } => return Vec::new(),
     };
-    let mut pairs = vec![
+    let glyph = Span::styled(palette.glyphs.carnet, glyph_style(closed, palette));
+    let standing = if closed {
+        " closed: row dimmed"
+    } else {
+        " open"
+    };
+    let carnet = vec![glyph, Span::raw(standing)];
+    vec![
         pair("Summary", summary),
         pair("Path", subtle(work.path.display().to_string(), palette)),
-        pair("Workspace", work.workspace.clone()),
+        pair("Carnet", carnet),
+        pair("Workspace", workspace_span(&work.workspace, palette)),
         pair("Group", group_span(work.group(), palette)),
         pair("Issue keys", issue_keys(work, tracker, ", ", palette)),
         pair("Tab", tab_detail(work.tab, palette)),
-    ];
-    if closed {
-        pairs.push(pair("Closed", subtle("yes", palette)));
-    }
-    pairs
+    ]
 }
 
 impl ListKind for Carnets {

@@ -204,6 +204,11 @@ pub fn workspace_style(palette: &Palette) -> Style {
     Style::new().fg(palette.workspace)
 }
 
+/// A workspace's name, in its colour.
+fn workspace_span(workspace: &str, palette: &Palette) -> Span<'static> {
+    Span::styled(workspace.to_owned(), workspace_style(palette))
+}
+
 /// An optional group, as the detail shows it.
 fn group_span(group: Option<&Group>, palette: &Palette) -> Span<'static> {
     Span::styled(group_text(group).to_owned(), group_style(palette))
@@ -245,7 +250,9 @@ fn tab_word(open: bool, palette: &Palette) -> Span<'static> {
 fn work_line(work: &Work, palette: &Palette) -> Line<'static> {
     Line::from(vec![
         tab_mark(work.tab, palette),
-        Span::raw(format!("{} · {} · tab ", work.title(), work.workspace)),
+        Span::raw(format!("{} · ", work.title())),
+        workspace_span(&work.workspace, palette),
+        Span::raw(" · tab "),
         tab_word(work.tab, palette),
     ])
 }
